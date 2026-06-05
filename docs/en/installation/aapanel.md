@@ -1,4 +1,16 @@
-# Xboard Deployment Guide for aaPanel Environment
+# Xboard Deployment Guide for aaPanel Environment (PHP Compatibility Path)
+
+This guide is now compatibility-only.
+
+Default production deployment has moved to the Rust-first Docker stack:
+
+- `gateway + mysql + redis`
+- Rust `/bootstrap/full` for initialization
+
+Read these first for the recommended path:
+
+- `README.md`
+- `docs/deployment-docker.md`
 
 ## Table of Contents
 1. [Requirements](#requirements)
@@ -76,8 +88,8 @@ rm -rf .htaccess 404.html 502.html index.html .user.ini
 # Clone repository
 git clone https://github.com/cedar2025/Xboard.git ./
 
-# Install dependencies
-sh init.sh
+# Install dependencies with the legacy PHP flow
+sh init.sh --php-compat
 ```
 
 #### 3.3 Configure Site
@@ -149,17 +161,8 @@ location ~ .* {
 ## Maintenance Guide
 
 ### Version Updates
-```bash
-# Enter site directory
-cd /www/wwwroot/your-domain
 
-# Execute update script
-git fetch --all && git reset --hard origin/master && git pull origin master
-sh update.sh
-
-# If Octane is enabled, restart the daemon process
-# aaPanel > App Store > Tools > Supervisor > Restart Octane
-```
+Automatic upgrade scripts are not provided. If you need to update, review changes manually and restart Octane/Horizon as needed.
 
 ### Routine Maintenance
 - Regular log checking

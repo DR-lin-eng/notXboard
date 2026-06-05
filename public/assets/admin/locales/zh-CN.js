@@ -1,5 +1,5 @@
-window.XBOARD_TRANSLATIONS = window.XBOARD_TRANSLATIONS || {};
-window.XBOARD_TRANSLATIONS['zh-CN'] = {
+window.Portal_TRANSLATIONS = window.Portal_TRANSLATIONS || {};
+window.Portal_TRANSLATIONS['zh-CN'] = {
   "payment": {
     "title": "支付配置",
     "description": "在这里可以配置支付方式，包括支付宝、微信等。",
@@ -817,7 +817,7 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
       "description": "配置节点通信和同步设置，包括通信密钥、轮询间隔、负载均衡等高级选项。",
       "server_token": {
         "title": "通讯密钥",
-        "description": "Xboard与节点通讯的密钥，以便数据不会被他人获取。",
+        "description": "面板与节点通讯的密钥，以便数据不会被他人获取。",
         "placeholder": "请输入通讯密钥",
         "generate_tooltip": "点击生成随机通信密钥"
       },
@@ -1871,7 +1871,7 @@ window.XBOARD_TRANSLATIONS['zh-CN'] = {
   },
   "theme": {
     "title": "主题配置",
-    "description": "主题配置，包括主题色、字体大小等。如果你采用前后分离的方式部署V2board，那么主题配置将不会生效。",
+    "description": "主题配置，包括主题色、字体大小等。如果你采用前后分离的方式部署前端与后端，那么主题配置将不会生效。",
     "upload": {
       "button": "上传主题",
       "title": "上传主题",

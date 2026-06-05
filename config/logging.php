@@ -16,7 +16,7 @@ return [
     |
     */
 
-    'default' => 'mysql',
+    'default' => env('LOG_CHANNEL', 'stack'),
 
     /*
     |--------------------------------------------------------------------------
@@ -37,30 +37,34 @@ return [
         'mysql' => [
             'driver' => 'custom',
             'via' => App\Logging\MysqlLogger::class,
+            'level' => env('LOG_MYSQL_LEVEL', env('LOG_LEVEL', 'warning')),
+            'bubble' => false,
         ],
 
         'stack' => [
             'driver' => 'stack',
-            'channels' => ['daily'],
+            'channels' => array_filter(array_map('trim', explode(',', (string) env('LOG_STACK', 'stderr')))),
             'ignore_exceptions' => false,
         ],
 
         'backup' => [
-            'driver' => 'single',
-            'path' => storage_path('logs/backup.log'),
-            'level' => 'debug',
+            'driver' => 'stack',
+            'channels' => array_values(array_filter(
+                array_map('trim', explode(',', (string) env('BACKUP_LOG_STACK', 'stderr')))
+            )),
+            'ignore_exceptions' => false,
         ],
 
         'single' => [
             'driver' => 'single',
             'path' => storage_path('logs/laravel.log'),
-            'level' => 'debug',
+            'level' => env('LOG_LEVEL', 'info'),
         ],
 
         'daily' => [
             'driver' => 'daily',
             'path' => storage_path('logs/laravel.log'),
-            'level' => 'debug',
+            'level' => env('LOG_LEVEL', 'info'),
             'days' => 14,
         ],
 
@@ -86,6 +90,7 @@ return [
             'driver' => 'monolog',
             'handler' => StreamHandler::class,
             'formatter' => env('LOG_STDERR_FORMATTER'),
+            'level' => env('LOG_LEVEL', 'info'),
             'with' => [
                 'stream' => 'php://stderr',
             ],
@@ -93,18 +98,18 @@ return [
 
         'syslog' => [
             'driver' => 'syslog',
-            'level' => 'debug',
+            'level' => env('LOG_LEVEL', 'info'),
         ],
 
         'errorlog' => [
             'driver' => 'errorlog',
-            'level' => 'debug',
+            'level' => env('LOG_LEVEL', 'info'),
         ],
 
         'deprecations' => [
             'driver' => 'daily',
             'path' => storage_path('logs/deprecations.log'),
-            'level' => 'debug',
+            'level' => env('LOG_LEVEL', 'info'),
             'days' => 14,
         ],
     ],

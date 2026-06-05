@@ -11,6 +11,8 @@ use App\Protocols\Stash;
 use App\Protocols\Surfboard;
 use App\Protocols\Surge;
 use App\Services\MailService;
+use App\Services\Auth\RegisterModeService;
+use App\Services\PowService;
 use App\Services\TelegramService;
 use App\Services\ThemeService;
 use App\Utils\Dict;
@@ -32,24 +34,15 @@ class ConfigController extends Controller
         return $this->success($files);
     }
 
-    public function getThemeTemplate()
-    {
-        $path = public_path('theme/');
-        $files = array_map(function ($item) use ($path) {
-            return str_replace($path, '', $item);
-        }, glob($path . '*'));
-        return $this->success($files);
-    }
-
     public function testSendMail(Request $request)
     {
         $mailLog = MailService::sendEmail([
             'email' => $request->user()->email,
-            'subject' => 'This is xboard test email',
+            'subject' => 'This is a test email',
             'template_name' => 'notify',
             'template_value' => [
-                'name' => admin_setting('app_name', 'XBoard'),
-                'content' => 'This is xboard test email',
+                'name' => admin_setting('app_name', 'Portal'),
+                'content' => 'This is a test email',
                 'url' => admin_setting('app_url')
             ]
         ]);
@@ -74,10 +67,8 @@ class ConfigController extends Controller
         $app_url = admin_setting('app_url');
         if (blank($app_url))
             return $this->fail([422, '请先设置站点网址']);
-        $hookUrl = $app_url . '/api/v1/guest/telegram/webhook?' . http_build_query([
-            'access_token' => md5(admin_setting('telegram_bot_token', $request->input('telegram_bot_token')))
-        ]);
         $telegramService = new TelegramService($request->input('telegram_bot_token'));
+        $hookUrl = rtrim($app_url, '/') . '/api/v1/guest/telegram/webhook';
         $telegramService->getMe();
         $telegramService->setWebhook($hookUrl);
         $telegramService->registerBotCommands();
@@ -102,6 +93,12 @@ class ConfigController extends Controller
      */
     private function getConfigMappings(): array
     {
+        $registerModeService = app(RegisterModeService::class);
+        $powService = app(PowService::class);
+        $appUrl = (string) (admin_setting('app_url', config('app.url')) ?: config('app.url'));
+        $appUrl = rtrim($appUrl, '/');
+        $defaultOAuthRedirect = $appUrl . '/api/v1/passport/oauth2/linux-do/callback';
+
         return [
             'invite' => [
                 'invite_force' => (bool) admin_setting('invite_force', 0),
@@ -122,10 +119,12 @@ class ConfigController extends Controller
                 'logo' => admin_setting('logo'),
                 'force_https' => (int) admin_setting('force_https', 0),
                 'stop_register' => (int) admin_setting('stop_register', 0),
-                'app_name' => admin_setting('app_name', 'XBoard'),
-                'app_description' => admin_setting('app_description', 'XBoard is best!'),
+                'register_mode' => $registerModeService->getRegisterMode(),
+                'app_name' => admin_setting('app_name', 'Portal'),
+                'app_description' => admin_setting('app_description', 'Secure access portal'),
                 'app_url' => admin_setting('app_url'),
                 'subscribe_url' => admin_setting('subscribe_url'),
+                'subscribe_root_domains' => admin_setting('subscribe_root_domains', ''),
                 'try_out_plan_id' => (int) admin_setting('try_out_plan_id', 0),
                 'try_out_hour' => (int) admin_setting('try_out_hour', 1),
                 'tos_url' => admin_setting('tos_url'),
@@ -146,7 +145,7 @@ class ConfigController extends Controller
                 'subscribe_path' => admin_setting('subscribe_path', 's'),
             ],
             'frontend' => [
-                'frontend_theme' => admin_setting('frontend_theme', 'Xboard'),
+                'frontend_theme' => ThemeService::DEFAULT_THEME,
                 'frontend_theme_sidebar' => admin_setting('frontend_theme_sidebar', 'light'),
                 'frontend_theme_header' => admin_setting('frontend_theme_header', 'dark'),
                 'frontend_theme_color' => admin_setting('frontend_theme_color', 'default'),
@@ -171,7 +170,26 @@ class ConfigController extends Controller
             'telegram' => [
                 'telegram_bot_enable' => (bool) admin_setting('telegram_bot_enable', 0),
                 'telegram_bot_token' => admin_setting('telegram_bot_token'),
-                'telegram_discuss_link' => admin_setting('telegram_discuss_link')
+                'telegram_discuss_link' => admin_setting('telegram_discuss_link'),
+                'telegram_user_ticket_enable' => (bool) admin_setting('telegram_user_ticket_enable', 1),
+                'telegram_notify_ops_alert' => (bool) admin_setting('telegram_notify_ops_alert', 1),
+                'telegram_notify_ticket_created' => (bool) admin_setting('telegram_notify_ticket_created', 1),
+                'telegram_notify_ticket_replied' => (bool) admin_setting('telegram_notify_ticket_replied', 1),
+                'telegram_notify_ticket_closed' => (bool) admin_setting('telegram_notify_ticket_closed', 1),
+                'telegram_notify_payment_success' => (bool) admin_setting('telegram_notify_payment_success', 1),
+                'telegram_notify_notice_published' => (bool) admin_setting('telegram_notify_notice_published', 1),
+                'telegram_notify_tcping_alert' => (bool) admin_setting('telegram_notify_tcping_alert', 1),
+                'telegram_notify_tcping_recover' => (bool) admin_setting('telegram_notify_tcping_recover', 1),
+                'telegram_notify_refund_vote' => (bool) admin_setting('telegram_notify_refund_vote', 1),
+                'telegram_notify_refund_status' => (bool) admin_setting('telegram_notify_refund_status', 1),
+                'telegram_notify_user_risk_detected' => (bool) admin_setting('telegram_notify_user_risk_detected', 1),
+                'telegram_notify_user_banned' => (bool) admin_setting('telegram_notify_user_banned', 1),
+            ],
+            'oauth' => [
+                'oauth_linux_do_enable' => (bool) admin_setting('oauth_linux_do_enable', 1),
+                'oauth_linux_do_client_id' => admin_setting('oauth_linux_do_client_id', config('services.linux_do.client_id', '')),
+                'oauth_linux_do_client_secret' => admin_setting('oauth_linux_do_client_secret', config('services.linux_do.client_secret', '')),
+                'oauth_linux_do_redirect_uri' => admin_setting('oauth_linux_do_redirect_uri', $defaultOAuthRedirect)
             ],
             'app' => [
                 'windows_version' => admin_setting('windows_version', ''),
@@ -185,6 +203,8 @@ class ConfigController extends Controller
                 'email_verify' => (bool) admin_setting('email_verify', 0),
                 'safe_mode_enable' => (bool) admin_setting('safe_mode_enable', 0),
                 'secure_path' => admin_setting('secure_path', admin_setting('frontend_admin_path', hash('crc32b', config('app.key')))),
+                'force_oauth2_login' => (bool) admin_setting('force_oauth2_login', 0),
+                'login_token_expire_days' => (int) admin_setting('login_token_expire_days', 365),
                 'email_whitelist_enable' => (bool) admin_setting('email_whitelist_enable', 0),
                 'email_whitelist_suffix' => admin_setting('email_whitelist_suffix', Dict::EMAIL_WHITELIST_SUFFIX_DEFAULT),
                 'email_gmail_limit_enable' => (bool) admin_setting('email_gmail_limit_enable', 0),
@@ -197,6 +217,16 @@ class ConfigController extends Controller
                 'recaptcha_v3_score_threshold' => admin_setting('recaptcha_v3_score_threshold', 0.5),
                 'turnstile_secret_key' => admin_setting('turnstile_secret_key', ''),
                 'turnstile_site_key' => admin_setting('turnstile_site_key', ''),
+                'pow_enable' => (bool) admin_setting('pow_enable', 0),
+                'pow_difficulty' => (int) admin_setting('pow_difficulty', 4),
+                'pow_effective_difficulty' => $powService->getDifficulty(),
+                'pow_ttl' => (int) admin_setting('pow_ttl', 120),
+                'pow_seed_salt' => admin_setting('pow_seed_salt', ''),
+                'pow_base_value' => admin_setting('pow_base_value', 'portal'),
+                'pow_require_ja3' => (bool) admin_setting('pow_require_ja3', 1),
+                'pow_auto_scale_enable' => (bool) admin_setting('pow_auto_scale_enable', 1),
+                'pow_auto_max_difficulty' => (int) admin_setting('pow_auto_max_difficulty', 7),
+                'register_mode' => $registerModeService->getRegisterMode(),
                 'register_limit_by_ip_enable' => (bool) admin_setting('register_limit_by_ip_enable', 0),
                 'register_limit_count' => admin_setting('register_limit_count', 3),
                 'register_limit_expire' => admin_setting('register_limit_expire', 60),
@@ -216,6 +246,30 @@ class ConfigController extends Controller
                 'subscribe_template_stash' => admin_setting('subscribe_template_stash', $this->getDefaultTemplate('stash')),
                 'subscribe_template_surge' => admin_setting('subscribe_template_surge', $this->getDefaultTemplate('surge')),
                 'subscribe_template_surfboard' => admin_setting('subscribe_template_surfboard', $this->getDefaultTemplate('surfboard'))
+            ],
+            'system' => [
+                'rotate_subscription_credentials_daily' => (bool) admin_setting('rotate_subscription_credentials_daily', 0),
+                'refund_dispute_enable' => (bool) admin_setting('refund_dispute_enable', 0),
+                'node_traffic_records_retention_days' => (int) admin_setting('node_traffic_records_retention_days', 7),
+                'user_traffic_usage_logs_retention_days' => (int) admin_setting('user_traffic_usage_logs_retention_days', 7),
+                'tcping_samples_retention_days' => (int) admin_setting('tcping_samples_retention_days', 7),
+                'tcping_alerts_retention_days' => (int) admin_setting('tcping_alerts_retention_days', 7),
+                'audit_logs_retention_days' => (int) admin_setting('audit_logs_retention_days', 7),
+            ],
+            'risk_review' => [
+                'user_risk_review_enable' => (bool) admin_setting('user_risk_review_enable', 0),
+                'user_risk_review_schedule_minutes' => (int) admin_setting('user_risk_review_schedule_minutes', 30),
+                'user_risk_review_time_window_minutes' => (int) admin_setting('user_risk_review_time_window_minutes', 60),
+                'user_risk_review_context_hours' => (int) admin_setting('user_risk_review_context_hours', 24),
+                'user_risk_review_min_shared_ip_users' => (int) admin_setting('user_risk_review_min_shared_ip_users', 2),
+                'user_risk_review_scan_limit' => (int) admin_setting('user_risk_review_scan_limit', 20),
+                'user_risk_review_notify_cooldown_minutes' => (int) admin_setting('user_risk_review_notify_cooldown_minutes', 60),
+                'user_risk_review_llm_enable' => (bool) admin_setting('user_risk_review_llm_enable', 0),
+                'user_risk_review_llm_base_url' => admin_setting('user_risk_review_llm_base_url', ''),
+                'user_risk_review_llm_api_key' => admin_setting('user_risk_review_llm_api_key', ''),
+                'user_risk_review_llm_model' => admin_setting('user_risk_review_llm_model', ''),
+                'user_risk_review_llm_timeout_seconds' => (int) admin_setting('user_risk_review_llm_timeout_seconds', 20),
+                'user_risk_review_llm_temperature' => (float) admin_setting('user_risk_review_llm_temperature', 0.2),
             ]
         ];
     }
@@ -223,14 +277,46 @@ class ConfigController extends Controller
     public function save(ConfigSave $request)
     {
         $data = $request->validated();
+        $registerModeService = app(RegisterModeService::class);
+
+        unset($data['frontend_theme']);
+
+        $forceOauth2 = array_key_exists('force_oauth2_login', $data)
+            ? (bool) $data['force_oauth2_login']
+            : (bool) admin_setting('force_oauth2_login', 0);
+        $oauthEnabled = array_key_exists('oauth_linux_do_enable', $data)
+            ? (bool) $data['oauth_linux_do_enable']
+            : (bool) admin_setting('oauth_linux_do_enable', 1);
+        $registerMode = array_key_exists('register_mode', $data)
+            ? (string) $data['register_mode']
+            : $registerModeService->getRegisterMode();
+
+        if ($forceOauth2 && !$oauthEnabled) {
+            return $this->fail([422, '请先开启 Linux DO OAuth2 登录，再启用强制 OAuth2']);
+        }
+
+        if ($registerMode === RegisterModeService::MODE_OAUTH_ONLY && !$oauthEnabled) {
+            return $this->fail([422, '仅 OAuth2 注册模式下必须先开启 Linux DO OAuth2 登录']);
+        }
+
+        if (!array_key_exists('register_mode', $data) && array_key_exists('stop_register', $data)) {
+            $data['register_mode'] = (bool) $data['stop_register']
+                ? RegisterModeService::MODE_CLOSED
+                : $registerModeService->getRegisterMode();
+        }
+
+        if (array_key_exists('register_mode', $data)) {
+            $data['stop_register'] = $data['register_mode'] === RegisterModeService::MODE_CLOSED ? 1 : 0;
+        }
 
         foreach ($data as $k => $v) {
-            if ($k == 'frontend_theme') {
-                $themeService = app(ThemeService::class);
-                $themeService->switch($v);
-            }
             admin_setting([$k => $v]);
         }
+
+        admin_setting([
+            'frontend_theme' => ThemeService::DEFAULT_THEME,
+            'current_theme' => ThemeService::DEFAULT_THEME,
+        ]);
 
         return $this->success(true);
     }

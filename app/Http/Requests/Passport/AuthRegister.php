@@ -15,7 +15,13 @@ class AuthRegister extends FormRequest
     {
         return [
             'email' => 'required|email:strict',
-            'password' => 'required|min:8'
+            'password' => 'required|min:8',
+            'invite_code' => 'nullable|string|max:64',
+            'email_code' => 'nullable|string|max:16',
+            'turnstile_token' => 'nullable|string',
+            'pow_id' => 'nullable|string|max:64',
+            'pow_nonce' => 'nullable|string|max:64',
+            'pow_token' => 'nullable|string|max:255',
         ];
     }
 

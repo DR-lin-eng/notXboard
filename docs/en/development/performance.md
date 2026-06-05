@@ -13,7 +13,6 @@
 - PHP: 8.2
 - MySQL: 5.7
 - Redis: 7.0
-- Docker: Latest stable version
 
 ## Test Scenarios
 
@@ -97,4 +96,4 @@ Results:
 
 ## Conclusion
 
-The current version shows significant performance improvements compared to the previous version, with an average improvement of 48% in response times. The optimization measures implemented have effectively enhanced the system's performance and stability. 
+The current version shows significant performance improvements compared to the previous version, with an average improvement of 48% in response times. The optimization measures implemented have effectively enhanced the system's performance and stability.

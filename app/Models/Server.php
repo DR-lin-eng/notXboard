@@ -161,7 +161,7 @@ class Server extends Model
             'plugin_opts' => ['type' => 'string', 'default' => null]
         ],
         self::TYPE_HYSTERIA => [
-            'version' => ['type' => 'integer', 'default' => 2],
+            'version' => ['type' => 'integer', 'default' => 1],
             'bandwidth' => [
                 'type' => 'object',
                 'fields' => [
@@ -191,6 +191,8 @@ class Server extends Model
             'congestion_control' => ['type' => 'string', 'default' => 'cubic'],
             'alpn' => ['type' => 'array', 'default' => ['h3']],
             'udp_relay_mode' => ['type' => 'string', 'default' => 'native'],
+            'zero_rtt_handshake' => ['type' => 'boolean', 'default' => false],
+            'heartbeat' => ['type' => 'string', 'default' => '10s'],
             'tls' => [
                 'type' => 'object',
                 'fields' => [
@@ -227,24 +229,36 @@ class Server extends Model
             'tls_settings' => [
                 'type' => 'object',
                 'fields' => [
-                    'allow_insecure' => ['type' => 'boolean', 'default' => false]
+                    'allow_insecure' => ['type' => 'boolean', 'default' => false],
+                    'server_name' => ['type' => 'string', 'default' => null],
                 ]
-            ]
+            ],
+            'udp_over_tcp' => ['type' => 'boolean', 'default' => false],
         ],
         self::TYPE_NAIVE => [
             'tls' => ['type' => 'integer', 'default' => 0],
-            'tls_settings' => ['type' => 'array', 'default' => null]
+            'tls_settings' => [
+                'type' => 'object',
+                'fields' => [
+                    'allow_insecure' => ['type' => 'boolean', 'default' => false],
+                    'server_name' => ['type' => 'string', 'default' => null],
+                ]
+            ]
         ],
         self::TYPE_HTTP => [
             'tls' => ['type' => 'integer', 'default' => 0],
             'tls_settings' => [
                 'type' => 'object',
                 'fields' => [
-                    'allow_insecure' => ['type' => 'boolean', 'default' => false]
+                    'allow_insecure' => ['type' => 'boolean', 'default' => false],
+                    'server_name' => ['type' => 'string', 'default' => null],
                 ]
-            ]
+            ],
+            'path' => ['type' => 'string', 'default' => null],
+            'headers' => ['type' => 'array', 'default' => null],
         ],
         self::TYPE_MIERU => [
+            'protocol' => ['type' => 'integer', 'default' => 0],
             'transport' => ['type' => 'string', 'default' => 'tcp'],
             'multiplexing' => ['type' => 'string', 'default' => 'MULTIPLEXING_LOW']
         ]
@@ -278,6 +292,42 @@ class Server extends Model
         return $result;
     }
 
+    private static function buildProtocolSettingDefaults(array $configs): array
+    {
+        $result = [];
+        foreach ($configs as $key => $config) {
+            $type = $config['type'] ?? null;
+            if ($type === 'object') {
+                $result[$key] = self::buildProtocolSettingDefaults((array) ($config['fields'] ?? []));
+                continue;
+            }
+
+            if (array_key_exists('default', $config)) {
+                $result[$key] = $config['default'];
+                continue;
+            }
+
+            $result[$key] = null;
+        }
+
+        return $result;
+    }
+
+    public static function getProtocolSettingTemplateForType(?string $type): array
+    {
+        $normalizedType = self::normalizeType($type);
+        if (!$normalizedType) {
+            return [];
+        }
+
+        $configs = self::PROTOCOL_CONFIGURATIONS[$normalizedType] ?? [];
+        if (!is_array($configs) || !$configs) {
+            return [];
+        }
+
+        return self::buildProtocolSettingDefaults($configs);
+    }
+
     public function getProtocolSettingsAttribute($value)
     {
         $settings = json_decode($value, true) ?? [];
@@ -299,21 +349,23 @@ class Server extends Model
 
     public function generateServerPassword(User $user): string
     {
+        $effectiveUuid = app(\App\Services\SubscriptionCredentialService::class)->getEffectiveUuid($user);
+
         if ($this->type !== self::TYPE_SHADOWSOCKS) {
-            return $user->uuid;
+            return $effectiveUuid;
         }
 
 
         $cipher = data_get($this, 'protocol_settings.cipher');
         if (!$cipher || !isset(self::CIPHER_CONFIGURATIONS[$cipher])) {
-            return $user->uuid;
+            return $effectiveUuid;
         }
 
         $config = self::CIPHER_CONFIGURATIONS[$cipher];
         // Use parent's created_at if this is a child node
         $serverCreatedAt = $this->parent_id ? $this->parent->created_at : $this->created_at;
         $serverKey = Helper::getServerKey($serverCreatedAt, $config['serverKeySize']);
-        $userKey = Helper::uuidToBase64($user->uuid, $config['userKeySize']);
+        $userKey = Helper::uuidToBase64($effectiveUuid, $config['userKeySize']);
         return "{$serverKey}:{$userKey}";
     }
 
@@ -464,7 +516,17 @@ class Server extends Model
         $ranges = $this->rate_time_ranges ?? [];
         $matchedRange = collect($ranges)
             ->first(fn($range) => $now >= $range['start'] && $now <= $range['end']);
-        
+
         return $matchedRange ? (float) $matchedRange['rate'] : (float) $this->rate;
+    }
+
+    public function isActive(): bool
+    {
+        return true;
+    }
+
+    public function isTrafficExceeded(): bool
+    {
+        return false;
     }
 }

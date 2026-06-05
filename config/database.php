@@ -2,6 +2,32 @@
 
 use Illuminate\Support\Str;
 
+$sqliteDatabase = env('DB_DATABASE');
+$isAbsoluteWindowsPath = is_string($sqliteDatabase) && preg_match('/^[A-Za-z]:[\\\\\\/]/', $sqliteDatabase) === 1;
+$normalizeNullableEnv = static function ($value) {
+    if ($value === null) {
+        return null;
+    }
+
+    if (!is_string($value)) {
+        return $value;
+    }
+
+    $trimmed = trim($value);
+    if ($trimmed === '' || strtolower($trimmed) === 'null') {
+        return null;
+    }
+
+    return $value;
+};
+
+$mysqlSslCaOption = null;
+if (class_exists(\Pdo\Mysql::class) && defined('Pdo\\Mysql::ATTR_SSL_CA')) {
+    $mysqlSslCaOption = constant('Pdo\\Mysql::ATTR_SSL_CA');
+} elseif (defined('PDO::MYSQL_ATTR_SSL_CA')) {
+    $mysqlSslCaOption = constant('PDO::MYSQL_ATTR_SSL_CA');
+}
+
 return [
 
     /*
@@ -38,7 +64,13 @@ return [
         'sqlite' => [
             'driver' => 'sqlite',
             'url' => env('DATABASE_URL'),
-            'database' => env('DB_DATABASE') ? base_path(env('DB_DATABASE')) : database_path('database.sqlite'),
+            'database' => match (true) {
+                empty($sqliteDatabase) => database_path('database.sqlite'),
+                $sqliteDatabase === ':memory:' => ':memory:',
+                $isAbsoluteWindowsPath => $sqliteDatabase,
+                is_string($sqliteDatabase) && Str::startsWith($sqliteDatabase, DIRECTORY_SEPARATOR) => $sqliteDatabase,
+                default => base_path($sqliteDatabase),
+            },
             'prefix' => '',
             'foreign_key_constraints' => env('DB_FOREIGN_KEYS', true),
         ],
@@ -59,7 +91,7 @@ return [
             'strict' => true,
             'engine' => null,
             'options' => (extension_loaded('pdo_mysql') ? array_filter([
-                PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
+                $mysqlSslCaOption => env('MYSQL_ATTR_SSL_CA'),
                 PDO::ATTR_PERSISTENT => false,
             ]) : []),
             'pool' => [
@@ -135,7 +167,7 @@ return [
         'default' => [
             'url' => env('REDIS_URL'),
             'host' => env('REDIS_HOST', '127.0.0.1'),
-            'password' => env('REDIS_PASSWORD', null),
+            'password' => $normalizeNullableEnv(env('REDIS_PASSWORD', null)),
             'port' => env('REDIS_PORT', 6379),
             'database' => env('REDIS_DB', 0),
             'persistent' => true, // 开启持久连接
@@ -144,7 +176,7 @@ return [
         'cache' => [
             'url' => env('REDIS_URL'),
             'host' => env('REDIS_HOST', '127.0.0.1'),
-            'password' => env('REDIS_PASSWORD', null),
+            'password' => $normalizeNullableEnv(env('REDIS_PASSWORD', null)),
             'port' => env('REDIS_PORT', 6379),
             'database' => env('REDIS_CACHE_DB', 1),
         ],

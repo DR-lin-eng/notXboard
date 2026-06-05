@@ -10,6 +10,8 @@ use App\Models\Ticket;
 use App\Models\TicketMessage;
 use App\Models\User;
 use App\Services\TicketService;
+use App\Services\AccessControlService;
+use App\Models\ServerNode;
 use App\Utils\Dict;
 use Illuminate\Http\Request;
 use App\Services\Plugin\HookManager;
@@ -19,11 +21,14 @@ class TicketController extends Controller
 {
     public function fetch(Request $request)
     {
+        $request->validate([
+            'node_id' => 'nullable|integer|min:1',
+        ]);
         if ($request->input('id')) {
             $ticket = Ticket::where('id', $request->input('id'))
                 ->where('user_id', $request->user()->id)
                 ->first()
-                ->load('message');
+                ?->load('message');
             if (!$ticket) {
                 return $this->fail([400, __('Ticket does not exist')]);
             }
@@ -34,6 +39,9 @@ class TicketController extends Controller
             return $this->success(TicketResource::make($ticket)->additional(['message' => true]));
         }
         $ticket = Ticket::where('user_id', $request->user()->id)
+            ->when($request->input('node_id') !== null, function ($query) use ($request) {
+                $query->where('node_id', (int) $request->input('node_id'));
+            })
             ->orderBy('created_at', 'DESC')
             ->get();
         return $this->success(TicketResource::collection($ticket));
@@ -41,12 +49,24 @@ class TicketController extends Controller
 
     public function save(TicketSave $request)
     {
+        $nodeId = $request->input('node_id') ? (int) $request->input('node_id') : null;
+        if ($nodeId !== null) {
+            $node = ServerNode::query()->whereKey($nodeId)->first();
+            if (!$node) {
+                return $this->fail([400, __('Invalid parameter')]);
+            }
+            if (!app(AccessControlService::class)->canUserAccessNode($request->user(), $node)) {
+                return $this->fail([403, 'No permission to create ticket for this node']);
+            }
+        }
+
         $ticketService = new TicketService();
         $ticket = $ticketService->createTicket(
             $request->user()->id,
             $request->input('subject'),
             $request->input('level'),
-            $request->input('message')
+            $request->input('message'),
+            $nodeId
         );
         HookManager::call('ticket.create.after', $ticket);
         return $this->success(true);
@@ -70,7 +90,8 @@ class TicketController extends Controller
         if ($ticket->status) {
             return $this->fail([400, __('The ticket is closed and cannot be replied')]);
         }
-        if ($request->user()->id == $this->getLastMessage($ticket->id)->user_id) {
+        $lastMessage = $this->getLastMessage($ticket->id);
+        if ($lastMessage && $request->user()->id == $lastMessage->user_id) {
             return $this->fail(codeResponse: [400, __('Please wait for the technical enginneer to reply')]);
         }
         $ticketService = new TicketService();
@@ -99,10 +120,13 @@ class TicketController extends Controller
         if (!$ticket) {
             return $this->fail([400, __('Ticket does not exist')]);
         }
-        $ticket->status = Ticket::STATUS_CLOSED;
-        if (!$ticket->save()) {
+
+        try {
+            app(TicketService::class)->closeByActor($ticket, $request->user());
+        } catch (\Throwable $e) {
             return $this->fail([500, __('Close failed')]);
         }
+
         return $this->success(true);
     }
 

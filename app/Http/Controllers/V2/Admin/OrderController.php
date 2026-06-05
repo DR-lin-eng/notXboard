@@ -16,9 +16,61 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
+    private const FILTERABLE_FIELDS = [
+        'id',
+        'user_id',
+        'plan_id',
+        'payment_id',
+        'period',
+        'trade_no',
+        'total_amount',
+        'handling_amount',
+        'balance_amount',
+        'refund_amount',
+        'surplus_amount',
+        'type',
+        'status',
+        'coupon_id',
+        'commission_status',
+        'invite_user_id',
+        'actual_commission_balance',
+        'commission_rate',
+        'commission_auto_check',
+        'commission_balance',
+        'discount_amount',
+        'paid_at',
+        'callback_no',
+        'created_at',
+        'updated_at',
+    ];
+
+    private const SORTABLE_FIELDS = self::FILTERABLE_FIELDS;
+
+    private function normalizeFilterField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::FILTERABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'filter' => ['包含非法订单筛选字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function normalizeSortField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::SORTABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'sort' => ['包含非法订单排序字段'],
+            ]);
+        }
+
+        return $field;
+    }
 
     public function detail(Request $request)
     {
@@ -76,7 +128,7 @@ class OrderController extends Controller
         }
 
         collect($request->input('filter'))->each(function ($filter) use ($builder) {
-            $field = $filter['id'];
+            $field = $this->normalizeFilterField($filter['id'] ?? null);
             $value = $filter['value'];
 
             $builder->where(function ($query) use ($field, $value) {
@@ -100,6 +152,7 @@ class OrderController extends Controller
         }
 
         [$operator, $filterValue] = explode(':', $value, 2);
+        $operator = strtolower($operator);
 
         // Convert numeric strings to appropriate type
         if (is_numeric($filterValue)) {
@@ -108,8 +161,18 @@ class OrderController extends Controller
                 : (int) $filterValue;
         }
 
+        if ($operator === 'null') {
+            $query->whereNull($field);
+            return;
+        }
+
+        if ($operator === 'notnull') {
+            $query->whereNotNull($field);
+            return;
+        }
+
         // Apply operator
-        $query->where($field, match (strtolower($operator)) {
+        $query->where($field, match ($operator) {
             'eq' => '=',
             'gt' => '>',
             'gte' => '>=',
@@ -117,12 +180,9 @@ class OrderController extends Controller
             'lte' => '<=',
             'like' => 'like',
             'notlike' => 'not like',
-            'null' => static fn($q) => $q->whereNull($field),
-            'notnull' => static fn($q) => $q->whereNotNull($field),
             default => 'like'
-        }, match (strtolower($operator)) {
+        }, match ($operator) {
             'like', 'notlike' => "%{$filterValue}%",
-            'null', 'notnull' => null,
             default => $filterValue
         });
     }
@@ -134,7 +194,7 @@ class OrderController extends Controller
         }
 
         collect($request->input('sort'))->each(function ($sort) use ($builder) {
-            $field = $sort['id'];
+            $field = $this->normalizeSortField($sort['id'] ?? null);
             $direction = $sort['desc'] ? 'DESC' : 'ASC';
             $builder->orderBy($field, $direction);
         });
@@ -224,16 +284,7 @@ class OrderController extends Controller
             $order->period = PlanService::getPeriodKey((string) $period);
             $order->trade_no = Helper::guid();
             $order->total_amount = $request->input('total_amount');
-
-            if (PlanService::getPeriodKey((string) $order->period) === Plan::PERIOD_RESET_TRAFFIC) {
-                $order->type = Order::TYPE_RESET_TRAFFIC;
-            } else if ($user->plan_id !== NULL && $order->plan_id !== $user->plan_id) {
-                $order->type = Order::TYPE_UPGRADE;
-            } else if ($user->expired_at > time() && $order->plan_id == $user->plan_id) {
-                $order->type = Order::TYPE_RENEWAL;
-            } else {
-                $order->type = Order::TYPE_NEW_PURCHASE;
-            }
+            $orderService->setOrderType($user);
 
             $orderService->setInvite($user);
 

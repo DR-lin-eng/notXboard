@@ -17,7 +17,12 @@ class NoticeSave extends FormRequest
             'title' => 'required',
             'content' => 'required',
             'img_url' => 'nullable|url',
-            'tags' => 'nullable|array'
+            'tags' => 'nullable|array',
+            'show' => 'nullable|boolean',
+            'popup' => 'nullable|boolean',
+            'scope_type' => 'nullable|string|in:global,plan_subscribers',
+            'target_plan_ids' => 'nullable|array',
+            'target_plan_ids.*' => 'integer|exists:v2_plan,id',
         ];
     }
 
@@ -27,7 +32,9 @@ class NoticeSave extends FormRequest
             'title.required' => '标题不能为空',
             'content.required' => '内容不能为空',
             'img_url.url' => '图片URL格式不正确',
-            'tags.array' => '标签格式不正确'
+            'tags.array' => '标签格式不正确',
+            'scope_type.in' => '公告范围类型不正确',
+            'target_plan_ids.array' => '目标套餐格式不正确',
         ];
     }
 }

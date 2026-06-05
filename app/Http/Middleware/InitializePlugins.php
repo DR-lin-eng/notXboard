@@ -28,6 +28,10 @@ class InitializePlugins
      */
     public function handle(Request $request, Closure $next)
     {
+        if ($request->is('healthz')) {
+            return $next($request);
+        }
+
         // This single method call handles loading and booting all enabled plugins.
         // It's safe to call multiple times, as it will only run once per request.
         $this->pluginManager->initializeEnabledPlugins();

@@ -10,18 +10,108 @@ use Illuminate\Support\Facades\View;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
 class PluginManager
 {
+    private const PLUGIN_CODE_PATTERN = '/^[a-z0-9_]+$/';
+    private const MAX_ARCHIVE_BYTES = 10485760;
+    private const MAX_ARCHIVE_ENTRIES = 512;
+    private const MAX_EXTRACTED_BYTES = 52428800;
+    private const MAX_ENTRY_BYTES = 10485760;
+
     protected string $pluginPath;
     protected array $loadedPlugins = [];
     protected bool $pluginsInitialized = false;
     protected array $configTypesCache = [];
+    protected ?bool $pluginTableReady = null;
+    protected bool $pluginBootstrapSkipLogged = false;
 
     public function __construct()
     {
         $this->pluginPath = base_path('plugins');
+    }
+
+    protected function assertValidPluginCode(string $pluginCode): void
+    {
+        if (!preg_match(self::PLUGIN_CODE_PATTERN, $pluginCode)) {
+            throw new \InvalidArgumentException('Invalid plugin code');
+        }
+    }
+
+    protected function extractZipSafely(\ZipArchive $zip, string $destination): void
+    {
+        File::ensureDirectoryExists($destination);
+        if ($zip->numFiles > self::MAX_ARCHIVE_ENTRIES) {
+            throw new \Exception('插件包文件数量过多');
+        }
+
+        $totalBytes = 0;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entryName = (string) $zip->getNameIndex($i);
+            if ($entryName === '') {
+                continue;
+            }
+
+            $normalized = str_replace('\\', '/', $entryName);
+            $normalized = ltrim($normalized, '/');
+
+            if ($normalized === '' || preg_match('#(^|/)\.\.(?:/|$)#', $normalized)) {
+                throw new \Exception('插件包包含非法路径');
+            }
+
+            $targetPath = $destination . '/' . $normalized;
+
+            if (str_ends_with($normalized, '/')) {
+                File::ensureDirectoryExists($targetPath);
+                continue;
+            }
+
+            $stat = $zip->statIndex($i);
+            if ($stat === false) {
+                throw new \Exception('无法读取插件包元数据');
+            }
+            $declaredSize = (int) ($stat['size'] ?? 0);
+            if ($declaredSize > self::MAX_ENTRY_BYTES || $totalBytes + $declaredSize > self::MAX_EXTRACTED_BYTES) {
+                throw new \Exception('插件包解压后体积过大');
+            }
+
+            File::ensureDirectoryExists(dirname($targetPath));
+
+            $stream = $zip->getStream($entryName);
+            if ($stream === false) {
+                throw new \Exception('无法读取插件包内容');
+            }
+
+            $output = fopen($targetPath, 'wb');
+            if ($output === false) {
+                fclose($stream);
+                throw new \Exception('无法创建插件包文件');
+            }
+
+            $entryBytes = 0;
+            try {
+                while (!feof($stream)) {
+                    $chunk = fread($stream, 8192);
+                    if ($chunk === false) {
+                        throw new \Exception('插件包解压失败');
+                    }
+                    $entryBytes += strlen($chunk);
+                    $totalBytes += strlen($chunk);
+                    if ($entryBytes > self::MAX_ENTRY_BYTES || $totalBytes > self::MAX_EXTRACTED_BYTES) {
+                        throw new \Exception('插件包解压后体积过大');
+                    }
+                    if (fwrite($output, $chunk) === false) {
+                        throw new \Exception('插件包解压失败');
+                    }
+                }
+            } finally {
+                fclose($stream);
+                fclose($output);
+            }
+        }
     }
 
     /**
@@ -29,6 +119,7 @@ class PluginManager
      */
     public function getPluginNamespace(string $pluginCode): string
     {
+        $this->assertValidPluginCode($pluginCode);
         return 'Plugin\\' . Str::studly($pluginCode);
     }
 
@@ -37,6 +128,7 @@ class PluginManager
      */
     public function getPluginPath(string $pluginCode): string
     {
+        $this->assertValidPluginCode($pluginCode);
         return $this->pluginPath . '/' . Str::studly($pluginCode);
     }
 
@@ -282,7 +374,7 @@ class PluginManager
         }
 
         // 验证插件代码格式
-        if (!preg_match('/^[a-z0-9_]+$/', $config['code'])) {
+        if (!preg_match(self::PLUGIN_CODE_PATTERN, $config['code'])) {
             return false;
         }
 
@@ -485,6 +577,10 @@ class PluginManager
      */
     public function upload($file): bool
     {
+        if (method_exists($file, 'getSize') && (($file->getSize() ?: 0) > self::MAX_ARCHIVE_BYTES)) {
+            throw new \Exception('插件包大小不能超过10MB');
+        }
+
         $tmpPath = storage_path('tmp/plugins');
         if (!File::exists($tmpPath)) {
             File::makeDirectory($tmpPath, 0755, true);
@@ -497,7 +593,7 @@ class PluginManager
             throw new \Exception('无法打开插件包文件');
         }
 
-        $zip->extractTo($extractPath);
+        $this->extractZipSafely($zip, $extractPath);
         $zip->close();
 
         $configFile = File::glob($extractPath . '/*/config.json');
@@ -549,6 +645,80 @@ class PluginManager
         return true;
     }
 
+    protected function isPluginTableReady(): bool
+    {
+        if ($this->pluginTableReady === true) {
+            return true;
+        }
+
+        $table = (new Plugin())->getTable();
+
+        try {
+            $isReady = Schema::hasTable($table);
+        } catch (\Throwable $e) {
+            $this->pluginTableReady = false;
+            $this->logPluginBootstrapSkip('schema_check_failed', $e);
+            return false;
+        }
+
+        if (!$isReady) {
+            $this->pluginTableReady = false;
+            $this->logPluginBootstrapSkip('plugins_table_missing');
+            return false;
+        }
+
+        $this->pluginTableReady = true;
+
+        return true;
+    }
+
+    protected function logPluginBootstrapSkip(string $reason, ?\Throwable $e = null): void
+    {
+        if ($this->pluginBootstrapSkipLogged) {
+            return;
+        }
+
+        $context = ['reason' => $reason];
+        if ($e !== null) {
+            $context['error'] = $e->getMessage();
+        }
+
+        Log::notice('Plugin bootstrap skipped because plugin storage is not ready.', $context);
+        $this->pluginBootstrapSkipLogged = true;
+    }
+
+    protected function getEnabledPluginRows(): Collection
+    {
+        if (!$this->isPluginTableReady()) {
+            return collect();
+        }
+
+        try {
+            return Plugin::where('is_enabled', true)->get();
+        } catch (\Throwable $e) {
+            $this->logPluginBootstrapSkip('plugins_query_failed', $e);
+            return collect();
+        }
+    }
+
+    protected function getEnabledPluginCodes(?string $type = null): array
+    {
+        if (!$this->isPluginTableReady()) {
+            return [];
+        }
+
+        try {
+            $query = Plugin::where('is_enabled', true);
+            if ($type !== null) {
+                $query->byType($type);
+            }
+            return $query->pluck('code')->all();
+        } catch (\Throwable $e) {
+            $this->logPluginBootstrapSkip('plugin_codes_query_failed', $e);
+            return [];
+        }
+    }
+
     /**
      * Initializes all enabled plugins from the database.
      * This method ensures that plugins are loaded, and their routes, views,
@@ -556,11 +726,15 @@ class PluginManager
      */
     public function initializeEnabledPlugins(): void
     {
-        if ($this->pluginsInitialized) {
+        if ($this->pluginsInitialized && $this->pluginTableReady === true) {
             return;
         }
 
-        $enabledPlugins = Plugin::where('is_enabled', true)->get();
+        if (!$this->isPluginTableReady()) {
+            return;
+        }
+
+        $enabledPlugins = $this->getEnabledPluginRows();
 
         foreach ($enabledPlugins as $dbPlugin) {
             try {
@@ -601,8 +775,7 @@ class PluginManager
      */
     public function registerPluginSchedules(Schedule $schedule): void
     {
-        Plugin::where('is_enabled', true)
-            ->get()
+        $this->getEnabledPluginRows()
             ->each(function ($dbPlugin) use ($schedule) {
                 try {
                     $pluginInstance = $this->loadPlugin($dbPlugin->code);
@@ -634,9 +807,7 @@ class PluginManager
     {
         $this->initializeEnabledPlugins();
 
-        $enabledPluginCodes = Plugin::where('is_enabled', true)
-            ->pluck('code')
-            ->all();
+        $enabledPluginCodes = $this->getEnabledPluginCodes();
 
         return array_intersect_key($this->loadedPlugins, array_flip($enabledPluginCodes));
     }
@@ -648,10 +819,7 @@ class PluginManager
     {
         $this->initializeEnabledPlugins();
 
-        $enabledPluginCodes = Plugin::where('is_enabled', true)
-            ->byType($type)
-            ->pluck('code')
-            ->all();
+        $enabledPluginCodes = $this->getEnabledPluginCodes($type);
 
         return array_intersect_key($this->loadedPlugins, array_flip($enabledPluginCodes));
     }
@@ -669,9 +837,13 @@ class PluginManager
      */
     public static function installDefaultPlugins(): void
     {
+        $pluginManager = app(self::class);
+        if (!$pluginManager->isPluginTableReady()) {
+            return;
+        }
+
         foreach (Plugin::PROTECTED_PLUGINS as $pluginCode) {
             if (!Plugin::where('code', $pluginCode)->exists()) {
-                $pluginManager = app(self::class);
                 $pluginManager->install($pluginCode);
                 $pluginManager->enable($pluginCode);
                 Log::info("Installed and enabled default plugin: {$pluginCode}");

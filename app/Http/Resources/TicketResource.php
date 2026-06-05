@@ -16,6 +16,8 @@ class TicketResource extends JsonResource
     {  
         $data = [
             "id" => $this['id'],
+            "node_id" => $this['node_id'] ?? null,
+            "assigned_admin_user_id" => $this['assigned_admin_user_id'] ?? null,
             "level" => $this['level'],
             "reply_status" => $this['reply_status'],
             "status" => $this['status'],

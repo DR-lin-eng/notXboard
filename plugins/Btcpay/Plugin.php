@@ -8,6 +8,9 @@ use App\Exceptions\ApiException;
 
 class Plugin extends AbstractPlugin implements PaymentInterface
 {
+    private const REQUEST_TIMEOUT_SECONDS = 20;
+    private const CONNECT_TIMEOUT_SECONDS = 10;
+
     public function boot(): void
     {
         $this->filter('available_payment_methods', function($methods) {
@@ -65,7 +68,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         ];
 
         $params_string = @json_encode($params);
-        $ret_raw = $this->curlPost($this->getConfig('btcpay_url') . 'api/v1/stores/' . $this->getConfig('btcpay_storeId') . '/invoices', $params_string);
+        $ret_raw = $this->curlRequest('POST', $this->buildInvoiceUrl(), $params_string);
         $ret = @json_decode($ret_raw, true);
 
         if (empty($ret['checkoutLink'])) {
@@ -81,9 +84,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
     public function notify($params): array|bool
     {
         $payload = trim(request()->getContent());
-        $headers = getallheaders();
-        $headerName = 'Btcpay-Sig';
-        $signraturHeader = isset($headers[$headerName]) ? $headers[$headerName] : '';
+        $signraturHeader = (string) request()->header('Btcpay-Sig', '');
         $json_param = json_decode($payload, true);
 
         $computedSignature = "sha256=" . \hash_hmac('sha256', $payload, $this->getConfig('btcpay_webhook_key'));
@@ -92,15 +93,15 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             throw new ApiException('HMAC signature does not match', 400);
         }
 
-        $context = stream_context_create(array(
-            'http' => array(
-                'method' => 'GET',
-                'header' => "Authorization:" . "token " . $this->getConfig('btcpay_api_key') . "\r\n"
-            )
-        ));
+        if (!is_array($json_param) || empty($json_param['invoiceId']) || !is_scalar($json_param['invoiceId'])) {
+            throw new ApiException('Invalid BTCPay payload', 400);
+        }
 
-        $invoiceDetail = file_get_contents($this->getConfig('btcpay_url') . 'api/v1/stores/' . $this->getConfig('btcpay_storeId') . '/invoices/' . $json_param['invoiceId'], false, $context);
+        $invoiceDetail = $this->curlRequest('GET', $this->buildInvoiceDetailUrl((string) $json_param['invoiceId']));
         $invoiceDetail = json_decode($invoiceDetail, true);
+        if (!is_array($invoiceDetail) || empty($invoiceDetail['metadata']['orderId'])) {
+            throw new ApiException('Invalid BTCPay invoice response', 400);
+        }
 
         $out_trade_no = $invoiceDetail['metadata']["orderId"];
         $pay_trade_no = $json_param['invoiceId'];
@@ -111,20 +112,65 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         ];
     }
 
-    private function curlPost($url, $params = false)
+    private function buildInvoiceUrl(): string
+    {
+        return $this->buildApiUrl('invoices');
+    }
+
+    private function buildInvoiceDetailUrl(string $invoiceId): string
+    {
+        return $this->buildApiUrl('invoices/' . rawurlencode($invoiceId));
+    }
+
+    private function buildApiUrl(string $path): string
+    {
+        $baseUrl = $this->normalizedBaseUrl();
+        $storeId = rawurlencode((string) $this->getConfig('btcpay_storeId'));
+        return "{$baseUrl}api/v1/stores/{$storeId}/{$path}";
+    }
+
+    private function normalizedBaseUrl(): string
+    {
+        $url = trim((string) $this->getConfig('btcpay_url'));
+        $parts = parse_url($url);
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+
+        if (!$parts || !isset($parts['host']) || !in_array($scheme, ['http', 'https'], true)) {
+            throw new ApiException('Invalid BTCPay API URL', 400);
+        }
+
+        return rtrim($url, '/') . '/';
+    }
+
+    private function curlRequest(string $method, string $url, $params = false): string
     {
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_HEADER, false);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $params);
+        curl_setopt($ch, CURLOPT_TIMEOUT, self::REQUEST_TIMEOUT_SECONDS);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, self::CONNECT_TIMEOUT_SECONDS);
+        if (defined('CURLOPT_PROTOCOLS')) {
+            curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        }
+        if (defined('CURLOPT_REDIR_PROTOCOLS')) {
+            curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        }
+        if ($method === 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $params);
+        }
         curl_setopt(
             $ch,
             CURLOPT_HTTPHEADER,
-            array('Authorization:' . 'token ' . $this->getConfig('btcpay_api_key'), 'Content-Type: application/json')
+            array('Authorization: token ' . $this->getConfig('btcpay_api_key'), 'Content-Type: application/json')
         );
         $result = curl_exec($ch);
+        if ($result === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+            throw new ApiException('BTCPay request failed: ' . $error, 502);
+        }
         curl_close($ch);
         return $result;
     }
@@ -147,4 +193,4 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             return !$ret;
         }
     }
-} 
+}

@@ -2,9 +2,11 @@
 
 namespace App\Models;
 
+use App\Utils\Helper;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use InvalidArgumentException;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Relations\HasOne;
@@ -14,8 +16,14 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
  *
  * @property int $id
  * @property string $name 套餐名称
+ * @property string $scope legacy|node
+ * @property int|null $owner_user_id node plan publisher user id
+ * @property int|null $min_trust_level Minimum Linux DO trust level required
+ * @property array|null $free_quota_gb_by_trust_level Free quota per trust_level (GB/month)
+ * @property array|null $node_ids server_nodes ids for node plan
  * @property int|null $group_id 权限组ID
  * @property int $transfer_enable 流量(KB)
+ * @property bool $is_unlimited_traffic 是否无限流量
  * @property int|null $speed_limit 速度限制Mbps
  * @property bool $show 是否显示
  * @property bool $renew 是否允许续费
@@ -74,11 +82,22 @@ class Plan extends Model
     ];
 
     protected $fillable = [
+        'scope',
+        'owner_user_id',
+        'min_trust_level',
+        'free_quota_gb_by_trust_level',
+        'node_ids',
         'group_id',
         'transfer_enable',
+        'is_unlimited_traffic',
         'name',
         'speed_limit',
         'show',
+        'visibility_scope',
+        'access_user_ids',
+        'share_token',
+        'share_discount_type',
+        'share_discount_value',
         'sort',
         'renew',
         'content',
@@ -92,14 +111,34 @@ class Plan extends Model
 
     protected $casts = [
         'show' => 'boolean',
+        'sell' => 'boolean',
         'renew' => 'boolean',
         'created_at' => 'timestamp',
         'updated_at' => 'timestamp',
         'group_id' => 'integer',
+        'owner_user_id' => 'integer',
+        'min_trust_level' => 'integer',
+        'is_unlimited_traffic' => 'boolean',
         'prices' => 'array',
         'tags' => 'array',
         'reset_traffic_method' => 'integer',
+        'node_ids' => 'array',
+        'free_quota_gb_by_trust_level' => 'array',
+        'access_user_ids' => 'array',
+        'share_discount_type' => 'integer',
+        'share_discount_value' => 'integer',
     ];
+
+    public const SCOPE_LEGACY = 'legacy';
+    public const SCOPE_NODE = 'node';
+
+    public const VISIBILITY_PUBLIC = 'public';
+    public const VISIBILITY_LINK_ONLY = 'link_only';
+    public const VISIBILITY_ASSIGNED_ONLY = 'assigned_only';
+
+    public const SHARE_DISCOUNT_NONE = 0;
+    public const SHARE_DISCOUNT_FIXED = 1;
+    public const SHARE_DISCOUNT_PERCENT = 2;
 
     /**
      * 获取所有可用的流量重置方式
@@ -190,7 +229,8 @@ class Plan extends Model
         return array_filter(
             self::getAvailablePeriods(),
             fn($period) => isset($this->prices[$period])
-            && $this->prices[$period] > 0,
+            && is_numeric($this->prices[$period])
+            && (float) $this->prices[$period] >= 0,
             ARRAY_FILTER_USE_KEY
         );
     }
@@ -239,7 +279,7 @@ class Plan extends Model
 
         $priceList = [];
         foreach ($prices as $period => $price) {
-            if (isset($periods[$period]) && $price > 0) {
+            if (isset($periods[$period]) && is_numeric($price) && (float) $price >= 0) {
                 $priceList[$period] = [
                     'period' => $periods[$period],
                     'price' => $price,
@@ -307,6 +347,11 @@ class Plan extends Model
         return $this->hasMany(User::class);
     }
 
+    public function owner(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'owner_user_id', 'id');
+    }
+
     public function group(): HasOne
     {
         return $this->hasOne(ServerGroup::class, 'id', 'group_id');
@@ -349,5 +394,48 @@ class Plan extends Model
     public function order(): HasMany
     {
         return $this->hasMany(Order::class);
+    }
+
+    public function ensureShareToken(bool $force = false): string
+    {
+        if (!$force && !empty($this->share_token)) {
+            return (string) $this->share_token;
+        }
+
+        do {
+            $token = Helper::randomChar(24);
+            $exists = self::query()
+                ->where('share_token', $token)
+                ->exists();
+        } while ($exists);
+
+        $this->share_token = $token;
+        return $token;
+    }
+
+    public static function normalizeVisibilityScope(?string $scope): string
+    {
+        $raw = strtolower(trim((string) $scope));
+        return match ($raw) {
+            self::VISIBILITY_LINK_ONLY => self::VISIBILITY_LINK_ONLY,
+            self::VISIBILITY_ASSIGNED_ONLY => self::VISIBILITY_ASSIGNED_ONLY,
+            default => self::VISIBILITY_PUBLIC,
+        };
+    }
+
+    public function hasAssignedUser(int $userId): bool
+    {
+        if ($userId <= 0) {
+            return false;
+        }
+
+        $ids = collect($this->access_user_ids ?? [])
+            ->map(fn ($value) => (int) $value)
+            ->filter(fn ($value) => $value > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        return in_array($userId, $ids, true);
     }
 }

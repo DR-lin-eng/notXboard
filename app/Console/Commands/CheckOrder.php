@@ -2,13 +2,9 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\OrderHandleJob;
 use App\Services\OrderService;
 use Illuminate\Console\Command;
 use App\Models\Order;
-use App\Models\User;
-use App\Models\Plan;
-use Illuminate\Support\Facades\DB;
 
 class CheckOrder extends Command
 {
@@ -43,12 +39,12 @@ class CheckOrder extends Command
      */
     public function handle()
     {
-        ini_set('memory_limit', -1);
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         $orders = Order::whereIn('status', [Order::STATUS_PENDING, Order::STATUS_PROCESSING])
             ->orderBy('created_at', 'ASC')
             ->get();
         foreach ($orders as $order) {
-            OrderHandleJob::dispatch($order->trade_no);
+            OrderService::handleTradeNo((string) $order->trade_no);
         }
     }
 }

@@ -115,7 +115,8 @@ class GiftCardCode extends Model
         }
 
         // 检查是否过期
-        if ($this->expires_at && $this->expires_at < time()) {
+        $expiresAt = $this->normalizeTimestamp($this->expires_at);
+        if ($expiresAt !== null && $expiresAt < time()) {
             return false;
         }
 
@@ -132,7 +133,8 @@ class GiftCardCode extends Model
      */
     public function isExpired(): bool
     {
-        return $this->expires_at && $this->expires_at < time();
+        $expiresAt = $this->normalizeTimestamp($this->expires_at);
+        return $expiresAt !== null && $expiresAt < time();
     }
 
     /**
@@ -155,6 +157,19 @@ class GiftCardCode extends Model
     {
         $this->status = self::STATUS_EXPIRED;
         return $this->save();
+    }
+
+    private function normalizeTimestamp(mixed $value): ?int
+    {
+        if ($value instanceof \DateTimeInterface) {
+            return $value->getTimestamp();
+        }
+
+        if (is_numeric($value)) {
+            return (int) $value;
+        }
+
+        return null;
     }
 
     /**

@@ -61,7 +61,13 @@ class SystemController extends Controller
 
     protected function getScheduleStatus(): bool
     {
-        return (time() - 120) < Cache::get(CacheKey::get('SCHEDULE_LAST_CHECK_AT', null));
+        $lastRuntime = (int) Cache::get(CacheKey::get('SCHEDULE_LAST_CHECK_AT', null), 0);
+        if ($lastRuntime <= 0) {
+            return false;
+        }
+
+        $maxDelay = max(60, (int) env('SCHEDULE_HEALTH_TIMEOUT_SECONDS', 180));
+        return (time() - $maxDelay) < $lastRuntime;
     }
 
     protected function getHorizonStatus(): bool

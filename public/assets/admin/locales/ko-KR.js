@@ -1,5 +1,5 @@
-window.XBOARD_TRANSLATIONS = window.XBOARD_TRANSLATIONS || {};
-window.XBOARD_TRANSLATIONS['ko-KR'] = {
+window.Portal_TRANSLATIONS = window.Portal_TRANSLATIONS || {};
+window.Portal_TRANSLATIONS['ko-KR'] = {
   "payment": {
     "title": "결제 설정",
     "description": "알리페이, 위챗페이 등의 결제 수단을 설정합니다.",
@@ -1359,7 +1359,7 @@ window.XBOARD_TRANSLATIONS['ko-KR'] = {
   },
   "theme": {
     "title": "테마 설정",
-    "description": "테마 색상, 글꼴 크기 등을 포함한 테마 설정입니다. V2board를 프론트엔드와 백엔드로 분리하여 배포하는 경우 테마 설정이 적용되지 않습니다.",
+    "description": "테마 색상, 글꼴 크기 등을 포함한 테마 설정입니다. 프론트엔드와 백엔드를 분리하여 배포하는 경우 테마 설정이 적용되지 않습니다.",
     "upload": {
       "button": "테마 업로드",
       "title": "테마 업로드",
@@ -1462,7 +1462,7 @@ window.XBOARD_TRANSLATIONS['ko-KR'] = {
     "description": "통신 키, 폴링 간격, 로드 밸런싱 및 기타 고급 옵션을 포함한 노드 통신 및 동기화 설정을 구성합니다.",
     "server_token": {
       "title": "통신 키",
-      "description": "Xboard와 노드 간의 통신을 위한 키로, 무단 데이터 접근을 방지합니다.",
+      "description": "패널과 노드 간의 통신을 위한 키로, 무단 데이터 접근을 방지합니다.",
       "placeholder": "통신 키를 입력해주세요"
     },
     "server_pull_interval": {

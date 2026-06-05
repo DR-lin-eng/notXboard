@@ -40,6 +40,9 @@ class LoginService
         if (!$user) {
             return [false, [400, __('Incorrect email or password')]];
         }
+        if (!$this->canUseEmailLogin($user)) {
+            return [false, [403, __('Email login is disabled. Please use OAuth2 login')]];
+        }
 
         // 验证密码
         if (
@@ -62,9 +65,14 @@ class LoginService
             return [false, [400, __('Incorrect email or password')]];
         }
 
+        // 登录成功后重置密码错误计数，避免用户长期被历史错误次数锁定
+        if ((int) admin_setting('password_limit_enable', true)) {
+            Cache::forget(CacheKey::get('PASSWORD_ERROR_LIMIT', $email));
+        }
+
         // 检查账户状态
         if ($user->banned) {
-            return [false, [400, __('Your account has been suspended')]];
+            return [false, [400, $user->getSuspensionMessage()]];
         }
 
         // 更新最后登录时间
@@ -73,6 +81,11 @@ class LoginService
 
         HookManager::call('user.login.after', $user);
         return [true, $user];
+    }
+
+    public function canUseEmailLogin(User $user): bool
+    {
+        return app(RegisterModeService::class)->allowsEmailLogin($user);
     }
 
     /**
@@ -141,7 +154,7 @@ class LoginService
         Cache::put($key, $user->id, 60);
 
         $redirect = $redirect ?: 'dashboard';
-        $loginRedirect = '/#/login?verify=' . $code . '&redirect=' . rawurlencode($redirect);
+        $loginRedirect = '/app/#/login?verify=' . $code . '&redirect=' . rawurlencode($redirect);
 
         if (admin_setting('app_url')) {
             $url = admin_setting('app_url') . $loginRedirect;

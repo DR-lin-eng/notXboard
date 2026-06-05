@@ -178,16 +178,14 @@ return [
         App\Providers\OctaneServiceProvider::class,
         App\Providers\PluginServiceProvider::class,
         App\Providers\ProtocolServiceProvider::class,
+        App\Providers\LinuxDoOAuthServiceProvider::class,
 
     ],
 
     /*
     |--------------------------------------------------------------------------
-    | V2board version
+    | Application version
     |--------------------------------------------------------------------------
-    |
-    | The only modification by laravel config
-    |
     */
     'version' => '1.0.0'
 ];

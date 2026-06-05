@@ -2,7 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Models\Order;
 use App\Services\OrderService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -13,11 +12,10 @@ use Illuminate\Queue\SerializesModels;
 class OrderHandleJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
-    protected $order;
     protected $tradeNo;
 
     public $tries = 3;
-    public $timeout = 5;
+    public $timeout = 120;
     /**
      * Create a new job instance.
      *
@@ -36,21 +34,6 @@ class OrderHandleJob implements ShouldQueue
      */
     public function handle()
     {
-        $order = Order::where('trade_no', $this->tradeNo)
-            ->lockForUpdate()
-            ->first();
-        if (!$order) return;
-        $orderService = new OrderService($order);
-        switch ($order->status) {
-            // cancel
-            case Order::STATUS_PENDING:
-                if ($order->created_at <= (time() - 3600 * 2)) {
-                    $orderService->cancel();
-                }
-                break;
-            case Order::STATUS_PROCESSING:
-                $orderService->open();
-                break;
-        }
+        OrderService::handleTradeNo((string) $this->tradeNo);
     }
 }

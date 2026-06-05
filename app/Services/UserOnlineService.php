@@ -101,23 +101,39 @@ class UserOnlineService
      */
     public static function calculateDeviceCount(array $ipsArray): int
     {
-        $mode = (int) admin_setting('device_limit_mode', 0);
+        $summary = self::summarizeAliveIps($ipsArray);
+        return max($summary['ipv4_count'], $summary['ipv6_count']);
+    }
 
-        return match ($mode) {
-            1 => collect($ipsArray)
-                ->filter(fn(mixed $data): bool => is_array($data) && isset($data['aliveips']))
-                ->flatMap(
-                    fn(array $data): array => collect($data['aliveips'])
-                        ->map(fn(string $ipNodeId): string => Str::before($ipNodeId, '_'))
-                        ->unique()
-                        ->all()
-                )
-                ->unique()
-                ->count(),
-            0 => collect($ipsArray)
-                ->filter(fn(mixed $data): bool => is_array($data) && isset($data['aliveips']))
-                ->sum(fn(array $data): int => count($data['aliveips'])),
-            default => throw new \InvalidArgumentException("Invalid device limit mode: $mode"),
-        };
+    public static function summarizeAliveIps(array $ipsArray): array
+    {
+        $ipv4 = [];
+        $ipv6 = [];
+
+        collect($ipsArray)
+            ->filter(fn(mixed $data): bool => is_array($data) && isset($data['aliveips']))
+            ->flatMap(function (array $data): array {
+                return collect($data['aliveips'])
+                    ->filter(fn ($item) => is_string($item) && $item !== '')
+                    ->map(fn (string $ipNodeId): string => trim(Str::before($ipNodeId, '_')))
+                    ->all();
+            })
+            ->each(function (string $ip) use (&$ipv4, &$ipv6): void {
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                    $ipv4[$ip] = true;
+                    return;
+                }
+
+                if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                    $ipv6[$ip] = true;
+                }
+            });
+
+        return [
+            'ipv4' => array_keys($ipv4),
+            'ipv6' => array_keys($ipv6),
+            'ipv4_count' => count($ipv4),
+            'ipv6_count' => count($ipv6),
+        ];
     }
 }

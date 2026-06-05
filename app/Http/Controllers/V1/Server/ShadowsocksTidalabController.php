@@ -20,7 +20,7 @@ class ShadowsocksTidalabController extends Controller
     // 后端获取用户
     public function user(Request $request)
     {
-        ini_set('memory_limit', -1);
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         $server = $request->attributes->get('node_info');
         Cache::put(CacheKey::get('SERVER_SHADOWSOCKS_LAST_CHECK_AT', $server->id), time(), 3600);
         $users = ServerService::getAvailableUsers($server);

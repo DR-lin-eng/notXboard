@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Exceptions\ApiException;
-use App\Jobs\OrderHandleJob;
 use App\Models\Order;
 use App\Models\Plan;
 use App\Models\TrafficResetLog;
@@ -14,6 +13,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use App\Services\PlanService;
+use App\Services\UserPlanSubscriptionService;
 
 class OrderService
 {
@@ -48,18 +48,35 @@ class OrderService
         Plan $plan,
         string $period,
         ?string $couponCode = null,
+        ?string $purchaseToken = null,
     ): Order {
         $userService = app(UserService::class);
         $planService = new PlanService($plan);
 
-        $planService->validatePurchase($user, $period);
+        $planService->validatePurchase($user, $period, [
+            'purchase_token' => $purchaseToken,
+        ]);
         HookManager::call('order.create.before', [$user, $plan, $period, $couponCode]);
 
         return DB::transaction(function () use ($user, $plan, $period, $couponCode, $userService) {
+            $lockedUser = User::query()->lockForUpdate()->find($user->id);
+            if (!$lockedUser) {
+                throw new ApiException(__('The user does not exist'));
+            }
+
+            $hasOpenOrder = Order::query()
+                ->where('user_id', $lockedUser->id)
+                ->whereIn('status', [Order::STATUS_PENDING, Order::STATUS_PROCESSING])
+                ->lockForUpdate()
+                ->exists();
+            if ($hasOpenOrder) {
+                throw new ApiException(__('You have an unpaid or pending order, please try again later or cancel it'));
+            }
+
             $newPeriod = PlanService::getPeriodKey($period);
 
             $order = new Order([
-                'user_id' => $user->id,
+                'user_id' => $lockedUser->id,
                 'plan_id' => $plan->id,
                 'period' => $newPeriod,
                 'trade_no' => Helper::generateOrderNo(),
@@ -72,12 +89,12 @@ class OrderService
                 $orderService->applyCoupon($couponCode);
             }
 
-            $orderService->setVipDiscount($user);
-            $orderService->setOrderType($user);
-            $orderService->setInvite(user: $user);
+            $orderService->setVipDiscount($lockedUser);
+            $orderService->setOrderType($lockedUser);
+            $orderService->setInvite(user: $lockedUser);
 
-            if ($user->balance && $order->total_amount > 0) {
-                $orderService->handleUserBalance($user, $userService);
+            if ($lockedUser->balance && $order->total_amount > 0) {
+                $orderService->handleUserBalance($lockedUser, $userService);
             }
 
             if (!$order->save()) {
@@ -94,54 +111,127 @@ class OrderService
 
     public function open(): void
     {
-        $order = $this->order;
-        $this->user = User::find($order->user_id);
-        $plan = Plan::find($order->plan_id);
+        $orderId = (int) $this->order->id;
+        $opened = false;
+        $eventId = 0;
 
-        HookManager::call('order.open.before', $order);
+        DB::transaction(function () use ($orderId, &$opened, &$eventId) {
+            $order = Order::query()->lockForUpdate()->find($orderId);
+            if (!$order) {
+                throw new \RuntimeException('订单不存在');
+            }
 
+            $this->order = $order;
+            if ((int) $order->status === Order::STATUS_COMPLETED) {
+                $opened = false;
+                return;
+            }
+            if ((int) $order->status !== Order::STATUS_PROCESSING) {
+                $opened = false;
+                return;
+            }
 
-        DB::transaction(function () use ($order, $plan) {
+            $user = User::query()->lockForUpdate()->find($order->user_id);
+            $plan = Plan::query()->find($order->plan_id);
+            if (!$user || !$plan) {
+                throw new \RuntimeException('订单关联数据不存在');
+            }
+
+            $this->user = $user;
+            HookManager::call('order.open.before', $order);
+
             if ($order->refund_amount) {
-                $this->user->balance += $order->refund_amount;
+                $this->user->balance += (int) $order->refund_amount;
             }
 
             if ($order->surplus_order_ids) {
-                Order::whereIn('id', $order->surplus_order_ids)
+                Order::query()->whereIn('id', $order->surplus_order_ids)
+                    ->where('status', Order::STATUS_COMPLETED)
                     ->update(['status' => Order::STATUS_DISCOUNTED]);
             }
 
             match ((string) $order->period) {
-                Plan::PERIOD_ONETIME => $this->buyByOneTime($plan),
+                Plan::PERIOD_ONETIME => $this->buyByOneTime($order, $plan),
                 Plan::PERIOD_RESET_TRAFFIC => app(TrafficResetService::class)->performReset($this->user, TrafficResetLog::SOURCE_ORDER),
                 default => $this->buyByPeriod($order, $plan),
             };
-
-            $this->setSpeedLimit($plan->speed_limit);
-            $this->setDeviceLimit($plan->device_limit);
 
             if (!$this->user->save()) {
                 throw new \RuntimeException('用户信息保存失败');
             }
 
-            $order->status = Order::STATUS_COMPLETED;
-            if (!$order->save()) {
-                throw new \RuntimeException('订单信息保存失败');
+            $updated = Order::query()
+                ->where('id', $order->id)
+                ->where('status', Order::STATUS_PROCESSING)
+                ->update(['status' => Order::STATUS_COMPLETED]);
+            if ($updated !== 1) {
+                $opened = false;
+                return;
             }
+
+            $this->order = Order::query()->findOrFail($order->id);
+            $eventId = match ((int) $order->type) {
+                Order::TYPE_NEW_PURCHASE => (int) admin_setting('new_order_event_id', 0),
+                Order::TYPE_RENEWAL => (int) admin_setting('renew_order_event_id', 0),
+                Order::TYPE_UPGRADE => (int) admin_setting('change_order_event_id', 0),
+                default => 0,
+            };
+            $opened = true;
         });
 
-        $eventId = match ((int) $order->type) {
-            Order::STATUS_PROCESSING => admin_setting('new_order_event_id', 0),
-            Order::TYPE_RENEWAL => admin_setting('renew_order_event_id', 0),
-            Order::TYPE_UPGRADE => admin_setting('change_order_event_id', 0),
-            default => 0,
-        };
+        if (!$opened) {
+            return;
+        }
 
         if ($eventId) {
             $this->openEvent($eventId);
         }
 
-        HookManager::call('order.open.after', $order);
+        HookManager::call('order.open.after', $this->order);
+    }
+
+    public static function handleTradeNo(string $tradeNo): void
+    {
+        $tradeNo = trim($tradeNo);
+        if ($tradeNo === '') {
+            return;
+        }
+
+        $order = null;
+        $action = null;
+
+        DB::transaction(function () use ($tradeNo, &$order, &$action) {
+            $order = Order::query()->where('trade_no', $tradeNo)
+                ->lockForUpdate()
+                ->first();
+            if (!$order) {
+                return;
+            }
+
+            switch ((int) $order->status) {
+                case Order::STATUS_PENDING:
+                    $createdAt = (int) (is_object($order->created_at) ? $order->created_at->timestamp : $order->created_at);
+                    if ($createdAt <= (time() - 3600 * 2)) {
+                        $action = 'cancel';
+                    }
+                    break;
+                case Order::STATUS_PROCESSING:
+                    $action = 'open';
+                    break;
+            }
+        });
+
+        if (!$order || !$action) {
+            return;
+        }
+
+        $orderService = new self($order);
+        if ($action === 'cancel') {
+            $orderService->cancel();
+            return;
+        }
+
+        $orderService->open();
     }
 
 
@@ -150,19 +240,7 @@ class OrderService
         $order = $this->order;
         if ($order->period === Plan::PERIOD_RESET_TRAFFIC) {
             $order->type = Order::TYPE_RESET_TRAFFIC;
-        } else if ($user->plan_id !== NULL && $order->plan_id !== $user->plan_id && ($user->expired_at > time() || $user->expired_at === NULL)) {
-            if (!(int) admin_setting('plan_change_enable', 1))
-                throw new ApiException('目前不允许更改订阅，请联系客服或提交工单操作');
-            $order->type = Order::TYPE_UPGRADE;
-            if ((int) admin_setting('surplus_enable', 1))
-                $this->getSurplusValue($user, $order);
-            if ($order->surplus_amount >= $order->total_amount) {
-                $order->refund_amount = (int) ($order->surplus_amount - $order->total_amount);
-                $order->total_amount = 0;
-            } else {
-                $order->total_amount = (int) ($order->total_amount - $order->surplus_amount);
-            }
-        } else if (($user->expired_at === null || $user->expired_at > time()) && $order->plan_id == $user->plan_id) { // 用户订阅未过期或按流量订阅 且购买订阅与当前订阅相同 === 续费
+        } else if (app(UserPlanSubscriptionService::class)->hasActiveSubscription($user, (int) $order->plan_id)) {
             $order->type = Order::TYPE_RENEWAL;
         } else { // 新购
             $order->type = Order::TYPE_NEW_PURCHASE;
@@ -282,49 +360,127 @@ class OrderService
         }
     }
 
-    public function paid(string $callbackNo)
+    public function paid(string $callbackNo): bool
     {
-        $order = $this->order;
-        if ($order->status !== Order::STATUS_PENDING)
-            return true;
-        $order->status = Order::STATUS_PROCESSING;
-        $order->paid_at = time();
-        $order->callback_no = $callbackNo;
-        if (!$order->save())
-            return false;
+        $callbackNo = trim($callbackNo);
+        $orderId = (int) $this->order->id;
+        $tradeNo = null;
+        $shouldDispatch = false;
+
         try {
-            OrderHandleJob::dispatchSync($order->trade_no);
-        } catch (\Exception $e) {
+            DB::transaction(function () use ($orderId, $callbackNo, &$tradeNo, &$shouldDispatch) {
+                $order = Order::query()->lockForUpdate()->find($orderId);
+                if (!$order) {
+                    throw new \RuntimeException('订单不存在');
+                }
+
+                $this->order = $order;
+                $tradeNo = $order->trade_no;
+                $status = (int) $order->status;
+
+                if ($status === Order::STATUS_PENDING) {
+                    $order->status = Order::STATUS_PROCESSING;
+                    $order->paid_at = (int) ($order->paid_at ?: time());
+                    if ($callbackNo !== '' && empty($order->callback_no)) {
+                        $order->callback_no = $callbackNo;
+                    }
+                    if (!$order->save()) {
+                        throw new \RuntimeException('订单更新失败');
+                    }
+                    $shouldDispatch = true;
+                    return;
+                }
+
+                // 幂等：处理中订单允许重复触发开通任务，避免首次开通异常后卡单。
+                if ($status === Order::STATUS_PROCESSING) {
+                    if ($callbackNo !== '' && empty($order->callback_no)) {
+                        $order->callback_no = $callbackNo;
+                        $order->save();
+                    }
+                    $shouldDispatch = true;
+                    return;
+                }
+
+                // completed/cancelled/discounted 都视为已处理完成。
+                $shouldDispatch = false;
+            });
+        } catch (\Throwable $e) {
             Log::error($e);
             return false;
         }
+
+        if (!$shouldDispatch) {
+            return true;
+        }
+
+        try {
+            self::handleTradeNo((string) $tradeNo);
+        } catch (\Throwable $e) {
+            Log::error($e);
+            return false;
+        }
+
         return true;
     }
 
     public function cancel(): bool
     {
-        $order = $this->order;
-        HookManager::call('order.cancel.before', $order);
+        $orderId = (int) $this->order->id;
+        $cancelled = false;
+        $transitioned = false;
+
         try {
-            DB::beginTransaction();
-            $order->status = Order::STATUS_CANCELLED;
-            if (!$order->save()) {
-                throw new \Exception('Failed to save order status.');
-            }
-            if ($order->balance_amount) {
-                $userService = new UserService();
-                if (!$userService->addBalance($order->user_id, $order->balance_amount)) {
-                    throw new \Exception('Failed to add balance.');
+            DB::transaction(function () use ($orderId, &$cancelled, &$transitioned) {
+                $order = Order::query()->lockForUpdate()->find($orderId);
+                if (!$order) {
+                    throw new \RuntimeException('订单不存在');
                 }
-            }
-            DB::commit();
-            HookManager::call('order.cancel.after', $order);
-            return true;
-        } catch (\Exception $e) {
-            DB::rollBack();
+
+                $this->order = $order;
+                if ((int) $order->status === Order::STATUS_CANCELLED) {
+                    $cancelled = true;
+                    return;
+                }
+                if ((int) $order->status !== Order::STATUS_PENDING) {
+                    $cancelled = false;
+                    return;
+                }
+
+                HookManager::call('order.cancel.before', $order);
+                if ((int) ($order->balance_amount ?? 0) > 0) {
+                    $user = User::query()->lockForUpdate()->find($order->user_id);
+                    if (!$user) {
+                        throw new \RuntimeException('用户不存在');
+                    }
+                    $user->balance = (int) $user->balance + (int) $order->balance_amount;
+                    if (!$user->save()) {
+                        throw new \RuntimeException('用户余额回滚失败');
+                    }
+                }
+
+                $updated = Order::query()
+                    ->where('id', $order->id)
+                    ->where('status', Order::STATUS_PENDING)
+                    ->update(['status' => Order::STATUS_CANCELLED]);
+                if ($updated !== 1) {
+                    $cancelled = false;
+                    return;
+                }
+
+                $this->order = Order::query()->findOrFail($order->id);
+                $cancelled = true;
+                $transitioned = true;
+            });
+        } catch (\Throwable $e) {
             Log::error($e);
             return false;
         }
+
+        if ($transitioned) {
+            HookManager::call('order.cancel.after', $this->order);
+        }
+
+        return $cancelled;
     }
 
     private function setSpeedLimit($speedLimit)
@@ -339,26 +495,16 @@ class OrderService
 
     private function buyByPeriod(Order $order, Plan $plan)
     {
-        // change plan process
-        if ((int) $order->type === Order::TYPE_UPGRADE) {
-            $this->user->expired_at = time();
-        }
-        $this->user->transfer_enable = $plan->transfer_enable * 1073741824;
-        // 从一次性转换到循环或者新购的时候，重置流量
-        if ($this->user->expired_at === NULL || $order->type === Order::TYPE_NEW_PURCHASE)
-            app(TrafficResetService::class)->performReset($this->user, TrafficResetLog::SOURCE_ORDER);
-        $this->user->plan_id = $plan->id;
-        $this->user->group_id = $plan->group_id;
-        $this->user->expired_at = $this->getTime($order->period, $this->user->expired_at);
+        $subscriptionService = app(UserPlanSubscriptionService::class);
+        $subscriptionService->activateFromOrder($this->user, $order, $plan);
+        $subscriptionService->refreshUserEntitlements($this->user);
     }
 
-    private function buyByOneTime(Plan $plan)
+    private function buyByOneTime(Order $order, Plan $plan)
     {
-        app(TrafficResetService::class)->performReset($this->user, TrafficResetLog::SOURCE_ORDER);
-        $this->user->transfer_enable = $plan->transfer_enable * 1073741824;
-        $this->user->plan_id = $plan->id;
-        $this->user->group_id = $plan->group_id;
-        $this->user->expired_at = NULL;
+        $subscriptionService = app(UserPlanSubscriptionService::class);
+        $subscriptionService->activateFromOrder($this->user, $order, $plan);
+        $subscriptionService->refreshUserEntitlements($this->user);
     }
 
     /**

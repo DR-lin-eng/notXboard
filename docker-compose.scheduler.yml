@@ -1,0 +1,25 @@
+services:
+  scheduler:
+    extends:
+      file: docker-compose.compat.yml
+      service: php
+    environment:
+      RUST_GATEWAY_OWNS_SCHEDULER: ${RUST_GATEWAY_OWNS_SCHEDULER:-true}
+      CORE_JOB_SYNC_EXECUTION: ${CORE_JOB_SYNC_EXECUTION:-false}
+      PHP_HTTP_API_COMPAT: ${PHP_HTTP_API_COMPAT:-false}
+      PHP_SERVER_INGRESS_COMPAT: ${PHP_SERVER_INGRESS_COMPAT:-false}
+      PHP_WEB_COMPAT: ${PHP_WEB_COMPAT:-false}
+      QUEUE_CONNECTION: ${QUEUE_CONNECTION:-redis}
+    command: ["php", "artisan", "schedule:work"]
+    depends_on:
+      mysql:
+        condition: service_started
+      redis:
+        condition: service_started
+    expose: []
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'artisan schedule:work' >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

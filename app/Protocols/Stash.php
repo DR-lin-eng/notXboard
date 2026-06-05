@@ -77,7 +77,7 @@ class Stash extends AbstractProtocol
     {
         $servers = $this->servers;
         $user = $this->user;
-        $appName = admin_setting('app_name', 'XBoard');
+        $appName = admin_setting('app_name', 'Portal');
 
         $template = admin_setting('subscribe_template_stash', File::exists(base_path(self::CUSTOM_TEMPLATE_FILE))
             ? File::get(base_path(self::CUSTOM_TEMPLATE_FILE))
@@ -163,7 +163,7 @@ class Stash extends AbstractProtocol
         }
 
         $yaml = Yaml::dump($config, 2, 4, Yaml::DUMP_EMPTY_ARRAY_AS_SEQUENCE);
-        $yaml = str_replace('$app_name', admin_setting('app_name', 'XBoard'), $yaml);
+        $yaml = str_replace('$app_name', admin_setting('app_name', 'Portal'), $yaml);
         return response($yaml)
             ->header('content-type', 'text/yaml')
             ->header('subscription-userinfo', "upload={$user['u']}; download={$user['d']}; total={$user['transfer_enable']}; expire={$user['expired_at']}")

@@ -4,7 +4,9 @@ namespace App\Http\Controllers\V1\Client;
 
 use App\Http\Controllers\Controller;
 use App\Models\Server;
+use App\Models\User;
 use App\Protocols\General;
+use App\Services\AccessControlService;
 use App\Services\Plugin\HookManager;
 use App\Services\ServerService;
 use App\Services\UserService;
@@ -27,7 +29,10 @@ class ClientController extends Controller
         'trojan' => '[trojan]',
         'tuic' => '[tuic]',
         'socks' => '[socks]',
-        'anytls' => '[anytls]'
+        'anytls' => '[anytls]',
+        'http' => '[http]',
+        'naive' => '[naive]',
+        'mieru' => '[mieru]',
     ];
 
 
@@ -43,12 +48,25 @@ class ClientController extends Controller
         $user = $request->user();
         $userService = new UserService();
 
-        if (!$userService->isAvailable($user)) {
+        if (!$userService->isAvailable($user) && !$this->canSubscribeWithoutPlan($user)) {
             HookManager::call('client.subscribe.unavailable');
             return response('', 403, ['Content-Type' => 'text/plain']);
         }
 
         return $this->doSubscribe($request, $user);
+    }
+
+    private function canSubscribeWithoutPlan(User $user): bool
+    {
+        // 站长默认拥有订阅能力（全节点管理）
+        if ((bool) $user->is_super_admin) {
+            return true;
+        }
+
+        // 任意可访问节点（自有节点、个人授权、节点套餐、信任等级免费额度）都允许订阅
+        /** @var AccessControlService $accessControlService */
+        $accessControlService = app(AccessControlService::class);
+        return $accessControlService->hasAccessibleNodesForUser($user);
     }
 
     public function doSubscribe(Request $request, $user, $servers = null)

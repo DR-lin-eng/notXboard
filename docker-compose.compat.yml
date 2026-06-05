@@ -1,0 +1,61 @@
+x-php-compat-service: &php-compat-service
+  image: ${PHP_IMAGE:-notxboard-php:local}
+  pull_policy: never
+  build:
+    context: .
+    dockerfile: Dockerfile.php-compat
+  restart: unless-stopped
+  env_file:
+    - ${APP_ENV_FILE:-.env}
+  volumes:
+    - ${APP_ENV_FILE:-./.env}:/var/www/html/.env
+    - app_storage:/var/www/html/storage
+    - app_cache:/var/www/html/bootstrap/cache
+  depends_on:
+    mysql:
+      condition: service_started
+    redis:
+      condition: service_started
+  networks:
+    - notxboard
+
+x-php-compat-environment: &php-compat-environment
+  APP_ENV: production
+  APP_DEBUG: ${APP_DEBUG:-false}
+  APP_RUNTIME_USER: ${APP_RUNTIME_USER:-www-data}
+  APP_RUNTIME_GROUP: ${APP_RUNTIME_GROUP:-www-data}
+  RUST_GATEWAY_OWNS_SCHEDULER: ${RUST_GATEWAY_OWNS_SCHEDULER:-true}
+  MAIL_SYNC_SEND: ${MAIL_SYNC_SEND:-true}
+  TELEGRAM_SYNC_SEND: ${TELEGRAM_SYNC_SEND:-true}
+  CORE_JOB_SYNC_EXECUTION: ${CORE_JOB_SYNC_EXECUTION:-true}
+  PHP_HTTP_API_COMPAT: ${PHP_HTTP_API_COMPAT:-false}
+  PHP_SERVER_INGRESS_COMPAT: ${PHP_SERVER_INGRESS_COMPAT:-false}
+  PHP_WEB_COMPAT: ${PHP_WEB_COMPAT:-true}
+  QUEUE_CONNECTION: ${QUEUE_CONNECTION:-sync}
+  MAIL_DRIVER: log
+  DB_HOST: mysql
+  REDIS_HOST: redis
+
+services:
+  php:
+    <<: *php-compat-service
+    environment:
+      <<: *php-compat-environment
+      PORT: 8001
+    command: ["php", "artisan", "octane:start", "--host=0.0.0.0", "--port=8001"]
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+volumes:
+  app_storage:
+  app_cache:
+
+networks:
+  notxboard:
+    external: false

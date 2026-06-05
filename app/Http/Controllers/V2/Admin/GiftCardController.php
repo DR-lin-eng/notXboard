@@ -264,6 +264,21 @@ class GiftCardController extends Controller
                 ];
                 $callback = function () use ($codes, $template) {
                     $handle = fopen('php://output', 'w');
+                    $formatDateTime = static function ($value, string $default = ''): string {
+                        if ($value === null || $value === '') {
+                            return $default;
+                        }
+
+                        if ($value instanceof \DateTimeInterface) {
+                            return $value->format('Y-m-d H:i:s');
+                        }
+
+                        if (is_numeric($value)) {
+                            return date('Y-m-d H:i:s', (int) $value);
+                        }
+
+                        return (string) $value;
+                    };
                     // 表头
                     fputcsv($handle, [
                         '兑换码',
@@ -281,30 +296,30 @@ class GiftCardController extends Controller
                         '备注'
                     ]);
                     foreach ($codes as $code) {
-                        $expireDate = $code->expires_at ? date('Y-m-d H:i:s', $code->expires_at) : '长期有效';
-                        $createDate = date('Y-m-d H:i:s', $code->created_at);
+                        $expireDate = $formatDateTime($code->expires_at, '长期有效');
+                        $createDate = $formatDateTime($code->created_at);
                         $templateName = $template->name ?? '';
                         $templateType = $template->type ?? '';
                         $templateRewards = $template->rewards ? json_encode($template->rewards, JSON_UNESCAPED_UNICODE) : '';
                         // 状态判断
                         $status = $code->status_name;
                         $usedBy = $code->user_id ?? '';
-                        $usedAt = $code->used_at ? date('Y-m-d H:i:s', $code->used_at) : '';
+                        $usedAt = $formatDateTime($code->used_at);
                         $remark = $code->remark ?? '';
                         fputcsv($handle, [
-                            $code->code,
-                            $code->prefix ?? '',
-                            $expireDate,
-                            $code->max_usage,
-                            $code->batch_id,
-                            $createDate,
-                            $templateName,
-                            $templateType,
-                            $templateRewards,
-                            $status,
-                            $usedBy,
-                            $usedAt,
-                            $remark,
+                            \App\Utils\Helper::sanitizeForCsv($code->code),
+                            \App\Utils\Helper::sanitizeForCsv($code->prefix ?? ''),
+                            \App\Utils\Helper::sanitizeForCsv($expireDate),
+                            \App\Utils\Helper::sanitizeForCsv($code->max_usage),
+                            \App\Utils\Helper::sanitizeForCsv($code->batch_id),
+                            \App\Utils\Helper::sanitizeForCsv($createDate),
+                            \App\Utils\Helper::sanitizeForCsv($templateName),
+                            \App\Utils\Helper::sanitizeForCsv($templateType),
+                            \App\Utils\Helper::sanitizeForCsv($templateRewards),
+                            \App\Utils\Helper::sanitizeForCsv($status),
+                            \App\Utils\Helper::sanitizeForCsv($usedBy),
+                            \App\Utils\Helper::sanitizeForCsv($usedAt),
+                            \App\Utils\Helper::sanitizeForCsv($remark),
                         ]);
                     }
                     fclose($handle);

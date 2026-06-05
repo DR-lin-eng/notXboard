@@ -14,7 +14,8 @@ class OrderSave extends FormRequest
     public function rules()
     {
         return [
-            'plan_id' => 'required',
+            'plan_id' => 'required_without:purchase_token',
+            'purchase_token' => 'required_without:plan_id|string|min:8|max:64',
             'period' => 'required|in:month_price,quarter_price,half_year_price,year_price,two_year_price,three_year_price,onetime_price,reset_price'
         ];
     }
@@ -22,7 +23,8 @@ class OrderSave extends FormRequest
     public function messages()
     {
         return [
-            'plan_id.required' => __('Plan ID cannot be empty'),
+            'plan_id.required_without' => __('Plan ID cannot be empty'),
+            'purchase_token.required_without' => __('Purchase token cannot be empty'),
             'period.required' => __('Plan period cannot be empty'),
             'period.in' => __('Wrong plan period')
         ];

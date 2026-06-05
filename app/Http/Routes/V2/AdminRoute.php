@@ -9,14 +9,15 @@ use App\Http\Controllers\V2\Admin\Server\ManageController;
 use App\Http\Controllers\V2\Admin\OrderController;
 use App\Http\Controllers\V2\Admin\UserController;
 use App\Http\Controllers\V2\Admin\StatController;
+use App\Http\Controllers\V2\Admin\AdminLeaderboardController;
 use App\Http\Controllers\V2\Admin\NoticeController;
 use App\Http\Controllers\V2\Admin\TicketController;
 use App\Http\Controllers\V2\Admin\CouponController;
+use App\Http\Controllers\V2\Admin\UserRiskReviewController;
 use App\Http\Controllers\V2\Admin\GiftCardController;
 use App\Http\Controllers\V2\Admin\KnowledgeController;
 use App\Http\Controllers\V2\Admin\PaymentController;
 use App\Http\Controllers\V2\Admin\SystemController;
-use App\Http\Controllers\V2\Admin\ThemeController;
 use App\Http\Controllers\V2\Admin\TrafficResetController;
 use Illuminate\Contracts\Routing\Registrar;
 
@@ -30,13 +31,14 @@ class AdminRoute
         ], function ($router) {
             // Config
             $router->group([
-                'prefix' => 'config'
+                'prefix' => 'config',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->get('/fetch', [ConfigController::class, 'fetch']);
                 $router->post('/save', [ConfigController::class, 'save']);
                 $router->get('/getEmailTemplate', [ConfigController::class, 'getEmailTemplate']);
-                $router->get('/getThemeTemplate', [ConfigController::class, 'getThemeTemplate']);
                 $router->post('/setTelegramWebhook', [ConfigController::class, 'setTelegramWebhook']);
+                $router->post('/telegram/setWebhook', [ConfigController::class, 'setTelegramWebhook']);
                 $router->post('/testSendMail', [ConfigController::class, 'testSendMail']);
             });
 
@@ -98,7 +100,8 @@ class AdminRoute
 
             // User
             $router->group([
-                'prefix' => 'user'
+                'prefix' => 'user',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->any('/fetch', [UserController::class, 'fetch']);
                 $router->post('/update', [UserController::class, 'update']);
@@ -107,9 +110,18 @@ class AdminRoute
                 $router->post('/dumpCSV', [UserController::class, 'dumpCSV']);
                 $router->post('/sendMail', [UserController::class, 'sendMail']);
                 $router->post('/ban', [UserController::class, 'ban']);
+                $router->get('/ban-records', [UserController::class, 'banRecords']);
                 $router->post('/resetSecret', [UserController::class, 'resetSecret']);
                 $router->post('/setInviteUser', [UserController::class, 'setInviteUser']);
                 $router->post('/destroy', [UserController::class, 'destroy']);
+            });
+
+            $router->group([
+                'prefix' => 'risk-review',
+                'middleware' => ['admin.super'],
+            ], function ($router) {
+                $router->get('/fetch', [UserRiskReviewController::class, 'fetch']);
+                $router->post('/run', [UserRiskReviewController::class, 'run']);
             });
 
             // Stat
@@ -125,6 +137,16 @@ class AdminRoute
                 $router->get('/getRanking', [StatController::class, 'getRanking']);
                 $router->get('/getStatRecord', [StatController::class, 'getStatRecord']);
                 $router->get('/getTrafficRank', [StatController::class, 'getTrafficRank']);
+            });
+
+            // Super admin leaderboard view (unmasked)
+            $router->group([
+                'prefix' => 'public-dashboard',
+                'middleware' => ['admin.super'],
+            ], function ($router) {
+                $router->get('/overview', [AdminLeaderboardController::class, 'overview']);
+                $router->get('/leaderboards', [AdminLeaderboardController::class, 'leaderboards']);
+                $router->get('/geo', [AdminLeaderboardController::class, 'geo']);
             });
 
             // Notice
@@ -199,7 +221,8 @@ class AdminRoute
 
             // Payment  
             $router->group([
-                'prefix' => 'payment'
+                'prefix' => 'payment',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->get('/fetch', [PaymentController::class, 'fetch']);
                 $router->get('/getPaymentMethods', [PaymentController::class, 'getPaymentMethods']);
@@ -212,7 +235,8 @@ class AdminRoute
 
             // System
             $router->group([
-                'prefix' => 'system'
+                'prefix' => 'system',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->get('/getSystemStatus', [SystemController::class, 'getSystemStatus']);
                 $router->get('/getQueueStats', [SystemController::class, 'getQueueStats']);
@@ -232,20 +256,10 @@ class AdminRoute
             //     $router->post('/execute', [UpdateController::class, 'executeUpdate']);
             // });
 
-            // Theme
-            $router->group([
-                'prefix' => 'theme'
-            ], function ($router) {
-                $router->get('/getThemes', [ThemeController::class, 'getThemes']);
-                $router->post('/upload', [ThemeController::class, 'upload']);
-                $router->post('/delete', [ThemeController::class, 'delete']);
-                $router->post('/saveThemeConfig', [ThemeController::class, 'saveThemeConfig']);
-                $router->post('/getThemeConfig', [ThemeController::class, 'getThemeConfig']);
-            });
-
             // Plugin
             $router->group([
-                'prefix' => 'plugin'
+                'prefix' => 'plugin',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->get('/types', [\App\Http\Controllers\V2\Admin\PluginController::class, 'types']);
                 $router->get('/getPlugins', [\App\Http\Controllers\V2\Admin\PluginController::class, 'index']);
@@ -262,7 +276,8 @@ class AdminRoute
 
             // 流量重置管理
             $router->group([
-                'prefix' => 'traffic-reset'
+                'prefix' => 'traffic-reset',
+                'middleware' => ['admin.super'],
             ], function ($router) {
                 $router->get('logs', [TrafficResetController::class, 'logs']);
                 $router->get('stats', [TrafficResetController::class, 'stats']);

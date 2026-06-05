@@ -2,7 +2,7 @@
 
 namespace App\Jobs;
 
-use App\Models\User;
+use App\Services\LegacyTrafficDispatchService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -35,15 +35,6 @@ class TrafficFetchJob implements ShouldQueue
 
     public function handle(): void
     {
-        foreach ($this->data as $uid => $v) {
-            User::where('id', $uid)
-                ->incrementEach(
-                    [
-                        'u' => $v[0] * $this->server['rate'],
-                        'd' => $v[1] * $this->server['rate'],
-                    ],
-                    ['t' => time()]
-                );
-        }
+        app(LegacyTrafficDispatchService::class)->applyTrafficFetch($this->server, $this->data);
     }
 }

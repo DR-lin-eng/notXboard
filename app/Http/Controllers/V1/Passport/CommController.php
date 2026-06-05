@@ -4,10 +4,10 @@ namespace App\Http\Controllers\V1\Passport;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Passport\CommSendEmailVerify;
-use App\Jobs\SendEmailJob;
 use App\Models\InviteCode;
 use App\Models\User;
 use App\Services\CaptchaService;
+use App\Services\MailService;
 use App\Utils\CacheKey;
 use App\Utils\Helper;
 use Illuminate\Http\Request;
@@ -18,6 +18,10 @@ class CommController extends Controller
 
     public function sendEmailVerify(CommSendEmailVerify $request)
     {
+        if (config('ops.telegram_only_mode')) {
+            return $this->fail([403, __('Email verification is disabled in Telegram-only mode')]);
+        }
+
                 // 验证人机验证码
         $captchaService = app(CaptchaService::class);
         [$captchaValid, $captchaError] = $captchaService->verify($request);
@@ -44,14 +48,14 @@ class CommController extends Controller
             return $this->fail([400, __('Email verification code has been sent, please request again later')]);
         }
         $code = rand(100000, 999999);
-        $subject = admin_setting('app_name', 'XBoard') . __('Email verification code');
+        $subject = admin_setting('app_name', 'Portal') . __('Email verification code');
 
-        SendEmailJob::dispatch([
+        MailService::dispatchEmail([
             'email' => $email,
             'subject' => $subject,
             'template_name' => 'verify',
             'template_value' => [
-                'name' => admin_setting('app_name', 'XBoard'),
+                'name' => admin_setting('app_name', 'Portal'),
                 'code' => $code,
                 'url' => admin_setting('app_url')
             ]

@@ -53,28 +53,23 @@ class XboardInstall extends Command
     public function handle()
     {
         try {
-            $isDocker = file_exists('/.dockerenv');
             $enableSqlite = getenv('ENABLE_SQLITE', false);
-            $enableRedis = getenv('ENABLE_REDIS', false);
             $adminAccount = getenv('ADMIN_ACCOUNT', false);
             $this->info("__    __ ____                      _  ");
             $this->info("\ \  / /| __ )  ___   __ _ _ __ __| | ");
             $this->info(" \ \/ / | __ \ / _ \ / _` | '__/ _` | ");
             $this->info(" / /\ \ | |_) | (_) | (_| | | | (_| | ");
             $this->info("/_/  \_\|____/ \___/ \__,_|_|  \__,_| ");
-            if (
-                (File::exists(base_path() . '/.env') && $this->getEnvValue('INSTALLED'))
-                || (getenv('INSTALLED', false) && $isDocker)
-            ) {
+            if (File::exists(base_path() . '/.env') && $this->getEnvValue('INSTALLED')) {
                 $securePath = admin_setting('secure_path', admin_setting('frontend_admin_path', hash('crc32b', config('app.key'))));
                 $this->info("访问 http(s)://你的站点/{$securePath} 进入管理面板，你可以在用户中心修改你的密码。");
-                $this->warn("如需重新安装请清空目录下 .env 文件的内容（Docker安装方式不可以删除此文件）");
-                $this->warn("快捷清空.env命令：");
-                note('rm .env && touch .env');
+                $this->warn("如需重新安装请清空 .env 文件内容或删除 .env 后重新执行安装。");
+                $this->warn("快捷命令：");
+                note('rm -f .env');
                 return;
             }
             if (is_dir(base_path() . '/.env')) {
-                $this->error('😔：安装失败，Docker环境下安装请保留空的 .env 文件');
+                $this->error('😔：安装失败，.env 不能是目录，请检查当前目录');
                 return;
             }
             // 选择数据库类型
@@ -102,16 +97,9 @@ class XboardInstall extends Command
             $envConfig['APP_KEY'] = 'base64:' . base64_encode(Encrypter::generateKey('AES-256-CBC'));
             $isReidsValid = false;
             while (!$isReidsValid) {
-                // 判断是否为Docker环境
-                if ($isDocker == 'true' && ($enableRedis || confirm(label: '是否启用Docker内置的Redis', default: true, yes: '启用', no: '不启用'))) {
-                    $envConfig['REDIS_HOST'] = '/data/redis.sock';
-                    $envConfig['REDIS_PORT'] = 0;
-                    $envConfig['REDIS_PASSWORD'] = null;
-                } else {
-                    $envConfig['REDIS_HOST'] = text(label: '请输入Redis地址', default: '127.0.0.1', required: true);
-                    $envConfig['REDIS_PORT'] = text(label: '请输入Redis端口', default: '6379', required: true);
-                    $envConfig['REDIS_PASSWORD'] = text(label: '请输入redis密码(默认: null)', default: '');
-                }
+                $envConfig['REDIS_HOST'] = text(label: '请输入Redis地址', default: '127.0.0.1', required: true);
+                $envConfig['REDIS_PORT'] = text(label: '请输入Redis端口', default: '6379', required: true);
+                $envConfig['REDIS_PASSWORD'] = text(label: '请输入redis密码(默认: null)', default: '');
                 $redisConfig = [
                     'client' => 'phpredis',
                     'default' => [
@@ -129,7 +117,6 @@ class XboardInstall extends Command
                     // 连接失败，输出错误消息
                     $this->error("redis连接失败：" . $e->getMessage());
                     $this->info("请重新输入REDIS配置");
-                    $enableRedis = false;
                     sleep(1);
                 }
             }
@@ -190,6 +177,12 @@ class XboardInstall extends Command
         $user->password = password_hash($password, PASSWORD_DEFAULT);
         $user->uuid = Helper::guid(true);
         $user->token = Helper::guid();
+        $user->subscribe_path = Helper::randomLetters(10);
+        $user->subscribe_key = Helper::randomLetters(8);
+        $user->subscribe_salt = Helper::randomLetters(6);
+        if ($user->subscribe_salt === $user->subscribe_key) {
+            $user->subscribe_salt = Helper::randomLetters(6);
+        }
         $user->is_admin = 1;
         return $user->save();
     }
@@ -234,11 +227,13 @@ class XboardInstall extends Command
      */
     private function configureSqlite(): ?array
     {
-        $sqliteFile = '.docker/.data/database.sqlite';
+        $sqliteFile = 'database/database.sqlite';
         if (!file_exists(base_path($sqliteFile))) {
-            // 创建空文件
-            if (!touch(base_path($sqliteFile))) {
-                $this->info("sqlite创建成功: $sqliteFile");
+            if (touch(base_path($sqliteFile))) {
+                $this->info("sqlite创建成功: {$sqliteFile}");
+            } else {
+                $this->error("sqlite创建失败: {$sqliteFile}");
+                return null;
             }
         }
 
@@ -370,7 +365,7 @@ class XboardInstall extends Command
     /**
      * 还原内置受保护插件（可在安装和更新时调用）
      */
-    public static function restoreProtectedPlugins(Command $console = null)
+    public static function restoreProtectedPlugins(?Command $console = null)
     {
         exec("git config core.filemode false", $output, $returnVar);
         $cmd = "git status --porcelain plugins/ 2>/dev/null";
@@ -405,7 +400,7 @@ class XboardInstall extends Command
                             $console->info("还原插件文件 [{$relativePath}] ({$action})");
                         }
 
-                        $cmd = "git checkout HEAD -- {$filePath}";
+                        $cmd = 'git checkout HEAD -- ' . escapeshellarg($filePath);
                         exec($cmd, $gitOutput, $gitReturnVar);
 
                         if ($gitReturnVar === 0) {

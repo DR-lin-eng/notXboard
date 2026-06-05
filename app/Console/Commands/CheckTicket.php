@@ -38,7 +38,7 @@ class CheckTicket extends Command
      */
     public function handle()
     {
-        ini_set('memory_limit', -1);
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         $tickets = Ticket::where('status', 0)
             ->where('updated_at', '<=', time() - 24 * 3600)
             ->where('reply_status', 0)

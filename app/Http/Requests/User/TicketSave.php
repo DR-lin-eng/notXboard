@@ -16,7 +16,8 @@ class TicketSave extends FormRequest
         return [
             'subject' => 'required',
             'level' => 'required|in:0,1,2',
-            'message' => 'required'
+            'message' => 'required',
+            'node_id' => 'nullable|integer|min:1|exists:server_nodes,id'
         ];
     }
 

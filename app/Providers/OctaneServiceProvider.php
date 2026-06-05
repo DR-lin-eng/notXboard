@@ -3,7 +3,6 @@
 namespace App\Providers;
 
 use App\Services\Plugin\HookManager;
-use App\Services\UpdateService;
 use Illuminate\Support\ServiceProvider;
 use Laravel\Octane\Facades\Octane;
 use Illuminate\Support\Facades\Cache;
@@ -18,25 +17,30 @@ class OctaneServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        if ($this->app->runningInConsole()) {
+        if (!$this->app->bound('octane')) {
             return;
         }
-        if ($this->app->bound('octane')) {
-            $this->app['events']->listen(WorkerStarting::class, function () {
-                app(UpdateService::class)->updateVersionCache();
-                HookManager::reset();
-            });
+
+        $this->app['events']->listen(WorkerStarting::class, function (): void {
+            HookManager::reset();
+        });
+
+        // Default to a single scheduler source (system cron / scheduler worker).
+        if (!(bool) env('OCTANE_ENABLE_TICK_SCHEDULER', false)) {
+            return;
         }
-        // 每半钟执行一次调度检查
-        Octane::tick('scheduler', function () {
+
+        Octane::tick('scheduler', function (): void {
             $lock = Cache::lock('scheduler-lock', 30);
 
-            if ($lock->get()) {
-                try {
-                    Artisan::call('schedule:run');
-                } finally {
-                    $lock->release();
-                }
+            if (!$lock->get()) {
+                return;
+            }
+
+            try {
+                Artisan::call('schedule:run');
+            } finally {
+                $lock->release();
             }
         })->seconds(30);
     }

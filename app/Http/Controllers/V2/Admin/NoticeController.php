@@ -5,7 +5,9 @@ namespace App\Http\Controllers\V2\Admin;
 use App\Exceptions\ApiException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\NoticeSave;
+use App\Models\Plan;
 use App\Models\Notice;
+use App\Services\Plugin\HookManager;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -28,18 +30,65 @@ class NoticeController extends Controller
             'img_url',
             'tags',
             'show',
-            'popup'
+            'popup',
+            'scope_type',
+            'target_plan_ids',
         ]);
-        if (!$request->input('id')) {
-            if (!Notice::create($data)) {
+
+        $scopeType = (string) ($data['scope_type'] ?? Notice::SCOPE_GLOBAL);
+        if ($scopeType === Notice::SCOPE_PLAN_SUBSCRIBERS) {
+            $planIds = collect($data['target_plan_ids'] ?? [])
+                ->map(fn ($value) => (int) $value)
+                ->filter(fn ($value) => $value > 0)
+                ->unique()
+                ->values()
+                ->all();
+            if (empty($planIds)) {
+                return $this->fail([422, '请选择至少一个目标套餐']);
+            }
+
+            $existingCount = Plan::query()->whereIn('id', $planIds)->count();
+            if ($existingCount !== count($planIds)) {
+                return $this->fail([422, '目标套餐不存在']);
+            }
+            $data['target_plan_ids'] = $planIds;
+        } else {
+            $data['scope_type'] = Notice::SCOPE_GLOBAL;
+            $data['target_plan_ids'] = [];
+        }
+
+        $isNew = !$request->input('id');
+        $publishedNotice = null;
+
+        if ($isNew) {
+            $notice = Notice::create($data);
+            if (!$notice) {
                 return $this->fail([500, '保存失败']);
             }
+            $publishedNotice = $notice;
         } else {
             try {
-                Notice::find($request->input('id'))->update($data);
+                $notice = Notice::find($request->input('id'));
+                if (!$notice) {
+                    return $this->fail([400202, '公告不存在']);
+                }
+                $wasVisible = (bool) ($notice?->show ?? false);
+                $notice->update($data);
+                $publishedNotice = $notice->fresh();
+                if ($wasVisible) {
+                    $publishedNotice = null;
+                }
             } catch (\Exception $e) {
                 return $this->fail([500, '保存失败']);
             }
+        }
+
+        if ($publishedNotice && (bool) $publishedNotice->show) {
+            HookManager::call('notice.published', [
+                'notice' => $publishedNotice,
+                'source' => 'admin',
+                'author_user_id' => $request->user()?->id,
+            ]);
         }
         return $this->success(true);
     }
@@ -58,6 +107,14 @@ class NoticeController extends Controller
         $notice->show = $notice->show ? 0 : 1;
         if (!$notice->save()) {
             return $this->fail([500, '保存失败']);
+        }
+
+        if ((bool) $notice->show) {
+            HookManager::call('notice.published', [
+                'notice' => $notice->fresh(),
+                'source' => 'admin',
+                'author_user_id' => $request->user()?->id,
+            ]);
         }
 
         return $this->success(true);

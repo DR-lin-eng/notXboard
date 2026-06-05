@@ -142,7 +142,7 @@ return [
     |
     */
 
-    'fast_termination' => false,
+    'fast_termination' => env('HORIZON_FAST_TERMINATION', true),
 
     /*
     |--------------------------------------------------------------------------
@@ -155,7 +155,7 @@ return [
     |
     */
 
-    'memory_limit' => 64,
+    'memory_limit' => (int) env('HORIZON_MEMORY_LIMIT', 256),
 
     /*
     |--------------------------------------------------------------------------
@@ -169,6 +169,65 @@ return [
     */
 
     'environments' => [
+        'production' => [
+            'Xboard-core' => [
+                'connection' => 'redis',
+                'queue' => [
+                    'order_handle',
+                    'traffic_fetch',
+                    'stat',
+                    'online_sync',
+                ],
+                'balance' => 'auto',
+                'minProcesses' => (int) env('HORIZON_CORE_MIN_PROCESSES', 10),
+                'maxProcesses' => (int) env('HORIZON_CORE_MAX_PROCESSES', 80),
+                'tries' => (int) env('HORIZON_CORE_TRIES', 3),
+                'timeout' => (int) env('HORIZON_CORE_TIMEOUT', 120),
+                'memory' => (int) env('HORIZON_CORE_MEMORY', 256),
+                'maxJobs' => (int) env('HORIZON_CORE_MAX_JOBS', 1000),
+                'maxTime' => (int) env('HORIZON_CORE_MAX_TIME', 3600),
+                'balanceCooldown' => 3,
+                'balanceMaxShift' => 1,
+            ],
+            'Xboard-notify' => [
+                'connection' => 'redis',
+                'queue' => [
+                    'send_telegram',
+                    'send_email',
+                    'send_email_mass',
+                ],
+                'balance' => 'simple',
+                'minProcesses' => (int) env('HORIZON_NOTIFY_MIN_PROCESSES', 2),
+                'maxProcesses' => (int) env('HORIZON_NOTIFY_MAX_PROCESSES', 20),
+                'tries' => (int) env('HORIZON_NOTIFY_TRIES', 2),
+                'timeout' => (int) env('HORIZON_NOTIFY_TIMEOUT', 90),
+                'memory' => (int) env('HORIZON_NOTIFY_MEMORY', 128),
+                'maxJobs' => (int) env('HORIZON_NOTIFY_MAX_JOBS', 1000),
+                'maxTime' => (int) env('HORIZON_NOTIFY_MAX_TIME', 3600),
+            ],
+        ],
+        'staging' => [
+            'Xboard' => [
+                'connection' => 'redis',
+                'queue' => [
+                    'order_handle',
+                    'traffic_fetch',
+                    'stat',
+                    'send_email',
+                    'send_email_mass',
+                    'send_telegram',
+                    'online_sync',
+                ],
+                'balance' => 'auto',
+                'minProcesses' => (int) env('HORIZON_STAGING_MIN_PROCESSES', 2),
+                'maxProcesses' => (int) env('HORIZON_STAGING_MAX_PROCESSES', 20),
+                'tries' => 2,
+                'memory' => (int) env('HORIZON_STAGING_MEMORY', 192),
+                'maxJobs' => (int) env('HORIZON_STAGING_MAX_JOBS', 500),
+                'maxTime' => (int) env('HORIZON_STAGING_MAX_TIME', 1800),
+                'balanceCooldown' => 3,
+            ],
+        ],
         'local' => [
             'Xboard' => [
                 'connection' => 'redis',
@@ -185,6 +244,9 @@ return [
                 'minProcesses' => 1,
                 'maxProcesses' => 20,
                 'tries' => 1,
+                'memory' => (int) env('HORIZON_LOCAL_MEMORY', 128),
+                'maxJobs' => (int) env('HORIZON_LOCAL_MAX_JOBS', 250),
+                'maxTime' => (int) env('HORIZON_LOCAL_MAX_TIME', 1800),
                 'balanceCooldown' => 3,
             ],
         ],

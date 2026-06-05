@@ -1,0 +1,15 @@
+.portal-turnstile{
+  display:flex;
+  justify-content:center;
+  margin:12px 0 16px;
+}
+
+.portal-turnstile iframe{
+  max-width:100%;
+}
+
+button[data-turnstile-locked="true"],
+button[data-pow-locked="true"]{
+  cursor:not-allowed;
+  opacity:0.7;
+}

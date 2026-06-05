@@ -33,17 +33,17 @@ class ExportV2Log extends Command
 
         foreach ($logs as $log) {
             fputcsv($handle, [
-                $log->level,
-                $log->id,
-                $log->title,
-                $log->host,
-                $log->uri,
-                $log->method,
-                $log->data,
-                $log->ip,
-                $log->context,
-                Carbon::createFromTimestamp($log->created_at)->toDateTimeString(),
-                Carbon::createFromTimestamp($log->updated_at)->toDateTimeString()
+                \App\Utils\Helper::sanitizeForCsv($log->level),
+                \App\Utils\Helper::sanitizeForCsv($log->id),
+                \App\Utils\Helper::sanitizeForCsv($log->title),
+                \App\Utils\Helper::sanitizeForCsv($log->host),
+                \App\Utils\Helper::sanitizeForCsv($log->uri),
+                \App\Utils\Helper::sanitizeForCsv($log->method),
+                \App\Utils\Helper::sanitizeForCsv($log->data),
+                \App\Utils\Helper::sanitizeForCsv($log->ip),
+                \App\Utils\Helper::sanitizeForCsv($log->context),
+                \App\Utils\Helper::sanitizeForCsv(Carbon::createFromTimestamp($log->created_at)->toDateTimeString()),
+                \App\Utils\Helper::sanitizeForCsv(Carbon::createFromTimestamp($log->updated_at)->toDateTimeString())
             ]);
         }
 

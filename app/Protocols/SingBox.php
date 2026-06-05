@@ -68,7 +68,7 @@ class SingBox extends AbstractProtocol
 
     public function handle()
     {
-        $appName = admin_setting('app_name', 'XBoard');
+        $appName = admin_setting('app_name', 'Portal');
         $this->config = $this->loadConfig();
         $this->buildOutbounds();
         $this->buildRule();
@@ -406,8 +406,8 @@ class SingBox extends AbstractProtocol
             'server_port' => $server['port'],
             'congestion_control' => data_get($protocol_settings, 'congestion_control', 'cubic'),
             'udp_relay_mode' => data_get($protocol_settings, 'udp_relay_mode', 'native'),
-            'zero_rtt_handshake' => true,
-            'heartbeat' => '10s',
+            'zero_rtt_handshake' => (bool) data_get($protocol_settings, 'zero_rtt_handshake', false),
+            'heartbeat' => (string) data_get($protocol_settings, 'heartbeat', '10s'),
             'tls' => [
                 'enabled' => true,
                 'insecure' => (bool) data_get($protocol_settings, 'tls.allow_insecure', false),

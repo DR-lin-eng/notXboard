@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_VERSION="2026-03-11"
+GO_MIN_VERSION="1.22.0"
+GO_FALLBACK_VERSION="1.24.1"
+GO_INSTALL_VERSION=""
+GO_INSTALL_ROOT="/usr/local"
+GO_PROFILE_PATH="/etc/profile.d/notx-go.sh"
+
+PANEL_URL=""
+TOKEN=""
+INSTALL_DIR="/opt/notx-tcping-agent"
+SRC_DIR=""
+BINARY_PATH="/usr/local/bin/notx-tcping-agent"
+ENV_FILE="/etc/notx-tcping-agent.env"
+SERVICE_NAME="notx-tcping-agent"
+SKIP_START=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  tcping-agent-install.sh --panel <https://panel.example.com> --token <agent-token> [options]
+
+Required:
+  --panel        Panel base URL with http(s) scheme
+  --token        TCPing agent token
+
+Options:
+  --install-dir  Working directory (default: /opt/notx-tcping-agent)
+  --binary       Binary install path (default: /usr/local/bin/notx-tcping-agent)
+  --env-file     Environment file (default: /etc/notx-tcping-agent.env)
+  --service-name systemd service name (default: notx-tcping-agent)
+  --go-version   Force a specific Go version for auto-install, e.g. 1.24.1
+  --skip-start   Only install files, do not start service
+  -h, --help     Show this help
+EOF
+}
+
+die() {
+  echo "[tcping-agent-install] $*" >&2
+  exit 1
+}
+
+log() {
+  echo "[tcping-agent-install] $*"
+}
+
+has_unsafe_text() {
+  local value="$1"
+  [[ "$value" =~ [[:cntrl:]] || "$value" == *\"* || "$value" == *"'"* || "$value" == *\\* ]]
+}
+
+validate_http_url() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" == http://* || "$value" == https://* ]] || die "$name must include http:// or https://"
+  if [[ "$value" =~ [[:space:]] ]] || has_unsafe_text "$value"; then
+    die "$name contains unsafe characters"
+  fi
+}
+
+validate_token() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[A-Za-z0-9._:-]{16,512}$ ]] || die "$name contains unsupported characters"
+}
+
+validate_path() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" =~ ^/[A-Za-z0-9._@%+=,/:+-]+$ ]] || die "$name must be an absolute path without spaces or shell metacharacters"
+}
+
+validate_service_name() {
+  local value="$1"
+  [[ "$value" =~ ^[A-Za-z0-9_.@-]{1,128}$ ]] || die "--service-name contains unsupported characters"
+}
+
+validate_go_version() {
+  local value="$1"
+  [[ -z "$value" || "$value" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || die "--go-version must look like 1.24.1"
+}
+
+download_file() {
+  local remote="$1"
+  local local_path="$2"
+  log "Downloading ${remote}"
+  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 15 "${remote}" -o "${local_path}"
+}
+
+normalize_version() {
+  local raw="${1#go}"
+  raw="${raw%%[^0-9.]*}"
+  printf '%s\n' "${raw}"
+}
+
+version_to_parts() {
+  local normalized
+  normalized="$(normalize_version "$1")"
+  local major="0"
+  local minor="0"
+  local patch="0"
+  IFS='.' read -r major minor patch <<<"${normalized}"
+  printf '%s %s %s\n' "${major:-0}" "${minor:-0}" "${patch:-0}"
+}
+
+version_ge() {
+  local left_major left_minor left_patch
+  local right_major right_minor right_patch
+  read -r left_major left_minor left_patch <<<"$(version_to_parts "$1")"
+  read -r right_major right_minor right_patch <<<"$(version_to_parts "$2")"
+
+  if (( left_major != right_major )); then
+    (( left_major > right_major ))
+    return
+  fi
+  if (( left_minor != right_minor )); then
+    (( left_minor > right_minor ))
+    return
+  fi
+  (( left_patch >= right_patch ))
+}
+
+current_go_version() {
+  if ! command -v go >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local version_text=""
+  version_text="$(go env GOVERSION 2>/dev/null || true)"
+  if [[ -z "${version_text}" ]]; then
+    version_text="$(go version 2>/dev/null | awk '{print $3}')"
+  fi
+  version_text="$(normalize_version "${version_text}")"
+  [[ -n "${version_text}" ]] || return 1
+  printf '%s\n' "${version_text}"
+}
+
+detect_go_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)
+      printf 'amd64\n'
+      ;;
+    aarch64|arm64)
+      printf 'arm64\n'
+      ;;
+    armv6l|armv7l)
+      printf 'armv6l\n'
+      ;;
+    ppc64le)
+      printf 'ppc64le\n'
+      ;;
+    s390x)
+      printf 's390x\n'
+      ;;
+    *)
+      die "Unsupported CPU architecture for automatic Go install: $(uname -m)"
+      ;;
+  esac
+}
+
+discover_go_version() {
+  local latest=""
+  local payload=""
+  payload="$(curl -fsSL --retry 2 --connect-timeout 10 'https://go.dev/dl/?mode=json' 2>/dev/null || true)"
+  if [[ -z "${payload}" ]]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    latest="$(
+      printf '%s' "${payload}" | python3 -c 'import json, sys
+data = json.load(sys.stdin)
+print((data[0].get("version", "").removeprefix("go")) if data else "", end="")' 2>/dev/null || true
+    )"
+  fi
+
+  if [[ -z "${latest}" ]]; then
+    latest="$(
+      printf '%s' "${payload}" | tr -d '\n' | sed -n 's/.*"version":"go\([0-9][^"]*\)".*/\1/p' | head -n 1
+    )"
+  fi
+
+  printf '%s\n' "$(normalize_version "${latest}")"
+}
+
+install_go() {
+  [[ "$(uname -s)" == "Linux" ]] || die "Automatic Go install currently supports Linux only"
+  command -v tar >/dev/null 2>&1 || die "tar is required for automatic Go installation"
+
+  local go_arch
+  local go_version
+  local archive_name
+  local download_url
+  local tmp_dir
+  local archive_path
+  local installed_version
+
+  go_arch="$(detect_go_arch)"
+  go_version="$(normalize_version "${GO_INSTALL_VERSION}")"
+  if [[ -z "${go_version}" ]]; then
+    go_version="$(discover_go_version)"
+  fi
+  if [[ -z "${go_version}" ]]; then
+    go_version="${GO_FALLBACK_VERSION}"
+    log "Unable to detect latest stable Go release automatically, falling back to Go ${go_version}"
+  fi
+
+  archive_name="go${go_version}.linux-${go_arch}.tar.gz"
+  download_url="https://go.dev/dl/${archive_name}"
+  tmp_dir="$(mktemp -d)"
+  archive_path="${tmp_dir}/${archive_name}"
+
+  log "Installing Go ${go_version} for linux-${go_arch}"
+  download_file "${download_url}" "${archive_path}"
+
+  rm -rf "${GO_INSTALL_ROOT}/go"
+  tar -C "${GO_INSTALL_ROOT}" -xzf "${archive_path}"
+  ln -sf "${GO_INSTALL_ROOT}/go/bin/go" /usr/local/bin/go
+  ln -sf "${GO_INSTALL_ROOT}/go/bin/gofmt" /usr/local/bin/gofmt
+
+  cat > "${GO_PROFILE_PATH}" <<EOF
+export PATH=${GO_INSTALL_ROOT}/go/bin:\$PATH
+EOF
+  chmod 0644 "${GO_PROFILE_PATH}"
+  export PATH="${GO_INSTALL_ROOT}/go/bin:${PATH}"
+
+  installed_version="$(current_go_version || true)"
+  rm -rf "${tmp_dir}"
+
+  [[ -n "${installed_version}" ]] || die "Go installation completed, but go command is still unavailable"
+  version_ge "${installed_version}" "${GO_MIN_VERSION}" || die "Installed Go ${installed_version} is lower than required ${GO_MIN_VERSION}"
+  log "Go ${installed_version} is ready"
+}
+
+ensure_go() {
+  local installed_version=""
+  if installed_version="$(current_go_version)"; then
+    if version_ge "${installed_version}" "${GO_MIN_VERSION}"; then
+      log "Detected Go ${installed_version}"
+      return 0
+    fi
+    log "Detected Go ${installed_version}, but Go ${GO_MIN_VERSION}+ is required. Upgrading automatically."
+  else
+    log "Go not found. Installing Go ${GO_MIN_VERSION}+ automatically."
+  fi
+
+  install_go
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --panel)
+      PANEL_URL="$2"; shift 2;;
+    --token)
+      TOKEN="$2"; shift 2;;
+    --install-dir)
+      INSTALL_DIR="$2"; shift 2;;
+    --binary)
+      BINARY_PATH="$2"; shift 2;;
+    --env-file)
+      ENV_FILE="$2"; shift 2;;
+    --service-name)
+      SERVICE_NAME="$2"; shift 2;;
+    --go-version)
+      GO_INSTALL_VERSION="$2"; shift 2;;
+    --skip-start)
+      SKIP_START=1; shift;;
+    -h|--help)
+      usage; exit 0;;
+    *)
+      die "Unknown argument: $1";;
+  esac
+done
+
+[[ -n "$PANEL_URL" ]] || die "Missing --panel"
+[[ -n "$TOKEN" ]] || die "Missing --token"
+validate_http_url "--panel" "$PANEL_URL"
+validate_token "--token" "$TOKEN"
+validate_path "--install-dir" "$INSTALL_DIR"
+validate_path "--binary" "$BINARY_PATH"
+validate_path "--env-file" "$ENV_FILE"
+validate_service_name "$SERVICE_NAME"
+validate_go_version "$GO_INSTALL_VERSION"
+
+if [[ $EUID -ne 0 ]]; then
+  die "Please run as root"
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  die "curl is required"
+fi
+
+PANEL_URL="${PANEL_URL%/}"
+SRC_DIR="${INSTALL_DIR}/src"
+BUILD_DIR="${INSTALL_DIR}/build"
+
+log "Version: ${SCRIPT_VERSION}"
+log "Using panel: ${PANEL_URL}"
+
+mkdir -p "$SRC_DIR" "$BUILD_DIR" "$(dirname "$BINARY_PATH")" "$(dirname "$ENV_FILE")"
+ensure_go
+
+download_file "${PANEL_URL}/tcping-agent-src/go.mod" "${SRC_DIR}/go.mod"
+download_file "${PANEL_URL}/tcping-agent-src/main.go" "${SRC_DIR}/main.go"
+
+pushd "$SRC_DIR" >/dev/null
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.agentVersion=${SCRIPT_VERSION}" -o "$BINARY_PATH" .
+popd >/dev/null
+
+chmod +x "$BINARY_PATH"
+
+cat > "$ENV_FILE" <<EOF
+PANEL_URL=${PANEL_URL}
+TCPING_AGENT_TOKEN=${TOKEN}
+EOF
+
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=notXboard TCPing Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${ENV_FILE}
+ExecStart=${BINARY_PATH}
+Restart=always
+RestartSec=5
+User=root
+WorkingDirectory=${INSTALL_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[tcping-agent-install] Binary installed at ${BINARY_PATH}"
+echo "[tcping-agent-install] Environment file written to ${ENV_FILE}"
+echo "[tcping-agent-install] Service file written to ${SERVICE_FILE}"
+
+if [[ $SKIP_START -eq 1 ]]; then
+  echo "[tcping-agent-install] Installation completed. Start later with:"
+  echo "  systemctl daemon-reload && systemctl enable --now ${SERVICE_NAME}"
+  exit 0
+fi
+
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  systemctl daemon-reload
+  systemctl enable --now "${SERVICE_NAME}"
+  systemctl --no-pager --full status "${SERVICE_NAME}" || true
+  echo "[tcping-agent-install] Service started: ${SERVICE_NAME}"
+else
+  echo "[tcping-agent-install] systemd not found. Run manually:"
+  echo "  PANEL_URL=${PANEL_URL} TCPING_AGENT_TOKEN=${TOKEN} ${BINARY_PATH}"
+fi

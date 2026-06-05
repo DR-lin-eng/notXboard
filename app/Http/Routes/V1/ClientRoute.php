@@ -13,11 +13,14 @@ class ClientRoute
             'prefix' => 'client',
             'middleware' => 'client'
         ], function ($router) {
-            // Client
-            $router->get('/subscribe', [ClientController::class, 'subscribe'])->name('client.subscribe.legacy');
             // App
             $router->get('/app/getConfig', [AppController::class, 'getConfig']);
             $router->get('/app/getVersion', [AppController::class, 'getVersion']);
+            // Client (legacy path replaced with per-user random segment)
+            $router->get('/{path}', [ClientController::class, 'subscribe'])
+                ->where('path', '[a-zA-Z]{6,32}')
+                ->middleware('throttle:60,1')
+                ->name('client.subscribe.legacy');
         });
     }
 }

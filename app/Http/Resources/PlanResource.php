@@ -4,6 +4,7 @@
 namespace App\Http\Resources;
 
 use App\Models\Plan;
+use App\Models\User;
 use App\Services\PlanService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -19,8 +20,25 @@ class PlanResource extends JsonResource
      */
     public function toArray(Request $request): array
     {
+        $visibilityScope = Plan::normalizeVisibilityScope($this->resource['visibility_scope'] ?? null);
+        $shareToken = (string) ($this->resource['share_token'] ?? '');
+
         return [
             'id' => $this->resource['id'],
+            'scope' => $this->resource['scope'] ?? Plan::SCOPE_LEGACY,
+            'owner_user_id' => $this->resource['owner_user_id'] ?? null,
+            'owner_display_name' => $this->resolveOwnerDisplayName(),
+            'owner' => $this->resolveOwnerPayload(),
+            'min_trust_level' => $this->resource['min_trust_level'] ?? null,
+            'allow_trial' => $this->hasTrialQuota(),
+            'free_quota_gb_by_trust_level' => $this->resource['free_quota_gb_by_trust_level'] ?? null,
+            'paid_quota_gb' => (int) ($this->resource['transfer_enable'] ?? 0),
+            'is_unlimited_traffic' => (bool) ($this->resource['is_unlimited_traffic'] ?? false),
+            'node_ids' => $this->resource['node_ids'] ?? null,
+            'visibility_scope' => $visibilityScope,
+            'access_user_ids' => $this->resource['access_user_ids'] ?? [],
+            'share_token' => $shareToken ?: null,
+            'share_purchase_link' => $shareToken ? $this->buildSharePurchaseLink($request, $shareToken) : null,
             'group_id' => $this->resource['group_id'],
             'name' => $this->resource['name'],
             'tags' => $this->resource['tags'],
@@ -118,5 +136,84 @@ class PlanResource extends JsonResource
             Plan::RESET_TRAFFIC_YEARLY => __('Yearly'),
             default => __('Monthly')
         };
+    }
+
+    private function hasTrialQuota(): bool
+    {
+        $quota = $this->resource['free_quota_gb_by_trust_level'] ?? null;
+        if (!is_array($quota)) {
+            return false;
+        }
+
+        foreach ($quota as $value) {
+            if (is_numeric($value) && (float) $value > 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function buildSharePurchaseLink(Request $request, string $shareToken): string
+    {
+        $base = rtrim((string) (admin_setting('app_url') ?: $request->getSchemeAndHttpHost()), '/');
+        return $base . '/app/#/plan-link/' . rawurlencode($shareToken);
+    }
+
+    private function resolveOwner(): ?User
+    {
+        $resource = $this->resource;
+        if (!$resource || !is_object($resource)) {
+            return null;
+        }
+
+        if (method_exists($resource, 'relationLoaded') && $resource->relationLoaded('owner')) {
+            $owner = $resource->getRelation('owner');
+            return $owner instanceof User ? $owner : null;
+        }
+
+        $owner = $resource->owner ?? null;
+        return $owner instanceof User ? $owner : null;
+    }
+
+    private function resolveOwnerDisplayName(): string
+    {
+        $owner = $this->resolveOwner();
+        if (!$owner) {
+            return '未知';
+        }
+
+        $linuxDoName = trim((string) ($owner->linux_do_name ?? ''));
+        if ($linuxDoName !== '') {
+            return $linuxDoName;
+        }
+
+        $linuxDoUsername = trim((string) ($owner->linux_do_username ?? ''));
+        if ($linuxDoUsername !== '') {
+            return $linuxDoUsername;
+        }
+
+        $email = trim((string) ($owner->email ?? ''));
+        if ($email !== '') {
+            return $email;
+        }
+
+        return '用户#' . (int) ($owner->id ?? 0);
+    }
+
+    private function resolveOwnerPayload(): ?array
+    {
+        $owner = $this->resolveOwner();
+        if (!$owner) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $owner->id,
+            'email' => (string) ($owner->email ?? ''),
+            'linux_do_username' => (string) ($owner->linux_do_username ?? ''),
+            'linux_do_name' => (string) ($owner->linux_do_name ?? ''),
+            'display_name' => $this->resolveOwnerDisplayName(),
+        ];
     }
 }

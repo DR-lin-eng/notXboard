@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Exceptions\ApiException;
+use App\Services\Auth\BannedUserGuard;
 use Illuminate\Support\Facades\Auth;
 use Closure;
 use App\Models\User;
@@ -24,6 +25,8 @@ class Admin
         if (!$user || !$user->is_admin) {
             return response()->json(['message' => 'Unauthorized'], 403);
         }
+
+        app(BannedUserGuard::class)->rejectIfBanned($user);
         
         return $next($request);
     }

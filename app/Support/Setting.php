@@ -16,7 +16,7 @@ class Setting
 
     public function __construct()
     {
-        $this->cache = Cache::store('redis');
+        $this->cache = $this->resolveCacheStore();
     }
 
     /**
@@ -79,7 +79,7 @@ class Setting
         foreach ($keys as $index => $item) {
             $isNumericIndex = is_numeric($index);
             $key = strtolower($isNumericIndex ? $item : $index);
-            $default = $isNumericIndex ? config('v2board.' . $item) : (config('v2board.' . $key) ?? $item);
+            $default = $isNumericIndex ? null : $item;
             
             $result[$item] = Arr::get($this->loadedSettings, $key, $default);
         }
@@ -136,5 +136,34 @@ class Setting
     {
         $this->cache->forget(self::CACHE_KEY);
         $this->loadedSettings = null;
+    }
+
+    private function resolveCacheStore(): Repository
+    {
+        $stores = [];
+
+        if (config('cache.stores.redis')) {
+            $stores[] = 'redis';
+        }
+
+        $defaultStore = config('cache.default');
+        if (is_string($defaultStore) && $defaultStore !== '') {
+            $stores[] = $defaultStore;
+        }
+
+        $stores[] = 'array';
+
+        foreach (array_values(array_unique($stores)) as $store) {
+            try {
+                $repository = Cache::store($store);
+                $repository->get('__setting_cache_probe__');
+
+                return $repository;
+            } catch (\Throwable) {
+                continue;
+            }
+        }
+
+        return Cache::store('array');
     }
 }

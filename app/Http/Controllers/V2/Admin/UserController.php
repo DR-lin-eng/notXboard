@@ -6,10 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\UserGenerate;
 use App\Http\Requests\Admin\UserSendMail;
 use App\Http\Requests\Admin\UserUpdate;
-use App\Jobs\SendEmailJob;
 use App\Models\Plan;
+use App\Models\UserBanRecord;
 use App\Models\User;
-use App\Services\AuthService;
+use App\Services\UserBanService;
 use App\Services\UserService;
 use App\Traits\QueryOperators;
 use App\Utils\Helper;
@@ -19,10 +19,146 @@ use Illuminate\Http\JsonResponse;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class UserController extends Controller
 {
     use QueryOperators;
+
+    private const FILTERABLE_FIELDS = [
+        'id',
+        'invite_user_id',
+        'telegram_id',
+        'email',
+        'balance',
+        'discount',
+        'commission_type',
+        'commission_rate',
+        'commission_balance',
+        't',
+        'u',
+        'd',
+        'transfer_enable',
+        'banned',
+        'is_admin',
+        'is_staff',
+        'is_super_admin',
+        'last_login_at',
+        'uuid',
+        'group_id',
+        'group_ids',
+        'plan_id',
+        'speed_limit',
+        'remind_expire',
+        'remind_traffic',
+        'token',
+        'subscribe_path',
+        'subscribe_key',
+        'subscribe_salt',
+        'expired_at',
+        'remarks',
+        'linux_do_id',
+        'linux_do_username',
+        'linux_do_name',
+        'trust_level',
+        'is_silenced',
+        'api_key',
+        'device_limit',
+        'concurrent_ip_limit',
+        'created_at',
+        'updated_at',
+        'total_used',
+    ];
+
+    private const SORTABLE_FIELDS = [
+        'id',
+        'invite_user_id',
+        'telegram_id',
+        'email',
+        'balance',
+        'discount',
+        'commission_type',
+        'commission_rate',
+        'commission_balance',
+        't',
+        'u',
+        'd',
+        'transfer_enable',
+        'banned',
+        'is_admin',
+        'is_staff',
+        'is_super_admin',
+        'last_login_at',
+        'group_id',
+        'plan_id',
+        'speed_limit',
+        'remind_expire',
+        'remind_traffic',
+        'expired_at',
+        'trust_level',
+        'is_silenced',
+        'device_limit',
+        'concurrent_ip_limit',
+        'created_at',
+        'updated_at',
+        'total_used',
+    ];
+
+    private const RELATION_FILTERABLE_FIELDS = [
+        'plan' => ['id', 'name'],
+        'invite_user' => ['id', 'email', 'linux_do_username', 'linux_do_name'],
+        'group' => ['id', 'name'],
+    ];
+
+    private function normalizeBaseFilterField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::FILTERABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'filter' => ['包含非法用户筛选字段'],
+            ]);
+        }
+
+        return $field === 'group_ids' ? 'group_id' : $field;
+    }
+
+    private function normalizeSortField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::SORTABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'sort' => ['包含非法用户排序字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function parseRelationFilterField(string $field): ?array
+    {
+        if (!str_contains($field, '.')) {
+            return null;
+        }
+
+        [$relation, $relationField] = explode('.', $field, 2);
+        $allowedFields = self::RELATION_FILTERABLE_FIELDS[$relation] ?? null;
+
+        if (!$allowedFields || !in_array($relationField, $allowedFields, true)) {
+            throw ValidationException::withMessages([
+                'filter' => ['包含非法用户关联筛选字段'],
+            ]);
+        }
+
+        return [$relation, $relationField];
+    }
+
+    private function applySafeSort(Builder $builder, string $field, string $direction): void
+    {
+        if ($field === 'total_used') {
+            $builder->orderByRaw('(u + d) ' . $direction);
+            return;
+        }
+
+        $builder->orderBy($field, $direction);
+    }
 
     public function resetSecret(Request $request)
     {
@@ -31,6 +167,12 @@ class UserController extends Controller
             return $this->fail([400202, '用户不存在']);
         $user->token = Helper::guid();
         $user->uuid = Helper::guid(true);
+        $user->subscribe_path = Helper::randomLetters(10);
+        $user->subscribe_key = Helper::randomLetters(8);
+        $user->subscribe_salt = Helper::randomLetters(6);
+        if ($user->subscribe_salt === $user->subscribe_key) {
+            $user->subscribe_salt = Helper::randomLetters(6);
+        }
         return $this->success($user->save());
     }
 
@@ -61,7 +203,13 @@ class UserController extends Controller
         }
 
         collect($request->input('filter'))->each(function ($filter) use ($builder) {
-            $field = $filter['id'];
+            $field = $filter['id'] ?? null;
+            if (!is_string($field)) {
+                throw ValidationException::withMessages([
+                    'filter' => ['包含非法用户筛选字段'],
+                ]);
+            }
+
             $value = $filter['value'];
 
             $builder->where(function ($query) use ($field, $value) {
@@ -81,8 +229,8 @@ class UserController extends Controller
     private function buildFilterQuery(Builder $query, string $field, mixed $value): void
     {
         // 处理关联查询
-        if (str_contains($field, '.')) {
-            [$relation, $relationField] = explode('.', $field);
+        if ($relationField = $this->parseRelationFilterField($field)) {
+            [$relation, $relationField] = $relationField;
             $query->whereHas($relation, function ($q) use ($relationField, $value) {
                 if (is_array($value)) {
                     $q->whereIn($relationField, $value);
@@ -96,14 +244,21 @@ class UserController extends Controller
             return;
         }
 
+        $field = $this->normalizeBaseFilterField($field);
+
         // 处理数组值的 'in' 操作
         if (is_array($value)) {
-            $query->whereIn($field === 'group_ids' ? 'group_id' : $field, $value);
+            $query->whereIn($field, $value);
             return;
         }
 
         // 处理基于运算符的过滤
         if (!is_string($value) || !str_contains($value, ':')) {
+            if ($field === 'total_used' && is_numeric($value)) {
+                $query->where(DB::raw('(u + d)'), '=', (float) $value);
+                return;
+            }
+
             $query->where($field, 'like', "%{$value}%");
             return;
         }
@@ -140,9 +295,9 @@ class UserController extends Controller
         }
 
         collect($request->input('sort'))->each(function ($sort) use ($builder) {
-            $field = $sort['id'];
+            $field = $this->normalizeSortField($sort['id'] ?? null);
             $direction = $sort['desc'] ? 'DESC' : 'ASC';
-            $builder->orderBy($field, $direction);
+            $this->applySafeSort($builder, $field, $direction);
         });
     }
 
@@ -183,7 +338,7 @@ class UserController extends Controller
         $user = $user->toArray();
         $user['balance'] = $user['balance'] / 100;
         $user['commission_balance'] = $user['commission_balance'] / 100;
-        $user['subscribe_url'] = Helper::getSubscribeUrl($user['token']);
+        $user['subscribe_url'] = Helper::getSubscribeUrl($user);
         return $user;
     }
 
@@ -194,7 +349,12 @@ class UserController extends Controller
         ], [
             'id.required' => '用户ID不能为空'
         ]);
-        $user = User::find($request->input('id'))->load('invite_user');
+        $user = User::find($request->input('id'));
+        if (!$user) {
+            return $this->fail([400202, '用户不存在']);
+        }
+
+        $user->load('invite_user');
         return $this->success($user);
     }
 
@@ -233,10 +393,10 @@ class UserController extends Controller
             $params['invite_user_id'] = null;
         }
 
-        if (isset($params['banned']) && (int) $params['banned'] === 1) {
-            $authService = new AuthService($user);
-            $authService->removeAllSessions();
-        }
+        $targetBanState = array_key_exists('banned', $params) ? (bool) $params['banned'] : null;
+        $banReason = trim((string) ($params['ban_reason'] ?? ''));
+        unset($params['banned'], $params['ban_reason']);
+
         if (isset($params['balance'])) {
             $params['balance'] = $params['balance'] * 100;
         }
@@ -245,7 +405,28 @@ class UserController extends Controller
         }
 
         try {
-            $user->update($params);
+            if (!empty($params)) {
+                $user->update($params);
+            }
+
+            $banService = app(UserBanService::class);
+            if ($targetBanState === true) {
+                $currentBanReason = trim((string) ($user->ban_reason ?? ''));
+                $effectiveReason = $banReason !== '' ? $banReason : trim((string) ($user->ban_reason ?? ''));
+                if ($effectiveReason === '') {
+                    return $this->fail([422, '封禁用户时必须填写封禁原因']);
+                }
+
+                if (!$user->banned || $effectiveReason !== $currentBanReason) {
+                    $banService->banUser($user, $request->user(), $effectiveReason, [
+                        'source' => 'manual',
+                    ]);
+                }
+            } elseif ($targetBanState === false && $user->banned) {
+                $banService->unbanUser($user, $request->user(), $banReason !== '' ? $banReason : null, [
+                    'source' => 'manual',
+                ]);
+            }
         } catch (\Exception $e) {
             Log::error($e);
             return $this->fail([500, '保存失败']);
@@ -261,7 +442,7 @@ class UserController extends Controller
      */
     public function dumpCSV(Request $request)
     {
-        ini_set('memory_limit', '-1');
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         gc_enable(); // 启用垃圾回收
 
         // 优化查询：使用with预加载plan关系，避免N+1问题
@@ -276,6 +457,9 @@ class UserController extends Controller
                 'd',
                 'expired_at',
                 'token',
+                'subscribe_path',
+                'subscribe_key',
+                'subscribe_salt',
                 'plan_id'
             ]);
 
@@ -307,14 +491,14 @@ class UserController extends Controller
                 foreach ($users as $user) {
                     try {
                         $row = [
-                            $user->email,
-                            number_format($user->balance / 100, 2),
-                            number_format($user->commission_balance / 100, 2),
-                            Helper::trafficConvert($user->transfer_enable),
-                            Helper::trafficConvert($user->transfer_enable - ($user->u + $user->d)),
-                            $user->expired_at ? date('Y-m-d H:i:s', $user->expired_at) : '长期有效',
-                            $user->plan ? $user->plan->name : '无订阅',
-                            Helper::getSubscribeUrl($user->token)
+                            Helper::sanitizeForCsv($user->email),
+                            Helper::sanitizeForCsv(number_format($user->balance / 100, 2)),
+                            Helper::sanitizeForCsv(number_format($user->commission_balance / 100, 2)),
+                            Helper::sanitizeForCsv(Helper::trafficConvert($user->transfer_enable)),
+                            Helper::sanitizeForCsv(Helper::trafficConvert($user->transfer_enable - ($user->u + $user->d))),
+                            Helper::sanitizeForCsv($user->expired_at ? date('Y-m-d H:i:s', $user->expired_at) : '长期有效'),
+                            Helper::sanitizeForCsv($user->plan ? $user->plan->name : '无订阅'),
+                            Helper::sanitizeForCsv(Helper::getSubscribeUrl($user))
                         ];
                         fputcsv($output, $row);
                     } catch (\Exception $e) {
@@ -410,8 +594,15 @@ class UserController extends Controller
                     $expireDate = $user['expired_at'] === NULL ? '长期有效' : date('Y-m-d H:i:s', $user['expired_at']);
                     $createDate = date('Y-m-d H:i:s', $user['created_at']);
                     $password = $request->input('password') ?? $user['email'];
-                    $subscribeUrl = Helper::getSubscribeUrl($user['token']);
-                    fputcsv($handle, [$user['email'], $password, $expireDate, $user['uuid'], $createDate, $subscribeUrl]);
+                    $subscribeUrl = Helper::getSubscribeUrl($user);
+                    fputcsv($handle, [
+                        Helper::sanitizeForCsv($user['email']),
+                        Helper::sanitizeForCsv($password),
+                        Helper::sanitizeForCsv($expireDate),
+                        Helper::sanitizeForCsv($user['uuid']),
+                        Helper::sanitizeForCsv($createDate),
+                        Helper::sanitizeForCsv($subscribeUrl),
+                    ]);
                 }
                 fclose($handle);
             };
@@ -426,7 +617,7 @@ class UserController extends Controller
                 'expired_at' => $user['expired_at'] === NULL ? '长期有效' : date('Y-m-d H:i:s', $user['expired_at']),
                 'uuid' => $user['uuid'],
                 'created_at' => date('Y-m-d H:i:s', $user['created_at']),
-                'subscribe_url' => Helper::getSubscribeUrl($user['token']),
+                'subscribe_url' => Helper::getSubscribeUrl($user),
             ];
         });
         return response()->json([
@@ -438,16 +629,17 @@ class UserController extends Controller
 
     public function sendMail(UserSendMail $request)
     {
-        ini_set('memory_limit', '-1');
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         $sortType = in_array($request->input('sort_type'), ['ASC', 'DESC']) ? $request->input('sort_type') : 'DESC';
-        $sort = $request->input('sort') ? $request->input('sort') : 'created_at';
-        $builder = User::orderBy($sort, $sortType);
+        $sort = $this->normalizeSortField($request->input('sort') ?: 'created_at');
+        $builder = User::query();
+        $this->applySafeSort($builder, $sort, $sortType);
         $this->applyFiltersAndSorts($request, $builder);
 
         $subject = $request->input('subject');
         $content = $request->input('content');
         $templateValue = [
-            'name' => admin_setting('app_name', 'XBoard'),
+            'name' => admin_setting('app_name', 'Portal'),
             'url' => admin_setting('app_url'),
             'content' => $content
         ];
@@ -456,12 +648,12 @@ class UserController extends Controller
 
         $builder->chunk($chunkSize, function ($users) use ($subject, $templateValue, &$totalProcessed) {
             foreach ($users as $user) {
-                dispatch(new SendEmailJob([
+                \App\Services\MailService::dispatchEmail([
                     'email' => $user->email,
                     'subject' => $subject,
                     'template_name' => 'notify',
                     'template_value' => $templateValue
-                ], 'send_email_mass'));
+                ], 'send_email_mass');
             }
         });
 
@@ -470,20 +662,76 @@ class UserController extends Controller
 
     public function ban(Request $request)
     {
-        $sortType = in_array($request->input('sort_type'), ['ASC', 'DESC']) ? $request->input('sort_type') : 'DESC';
-        $sort = $request->input('sort') ? $request->input('sort') : 'created_at';
-        $builder = User::orderBy($sort, $sortType);
+        $request->validate([
+            'reason' => 'required|string|max:500',
+        ], [
+            'reason.required' => '批量封禁时必须填写封禁原因',
+            'reason.max' => '封禁原因长度不能超过500个字符',
+        ]);
+
+        $builder = User::query();
         $this->applyFilters($request, $builder);
+        $builder->where('banned', 0)->orderBy('id');
+        $reason = trim((string) $request->input('reason'));
+        $banService = app(UserBanService::class);
+        $affected = 0;
+
         try {
-            $builder->update([
-                'banned' => 1
-            ]);
+            foreach ($builder->cursor() as $user) {
+                $banService->banUser($user, $request->user(), $reason, [
+                    'source' => 'batch',
+                    'notify' => false,
+                ]);
+                $affected++;
+            }
         } catch (\Exception $e) {
             Log::error($e);
             return $this->fail([500, '处理失败']);
         }
 
-        return $this->success(true);
+        return $this->success([
+            'updated' => $affected,
+        ]);
+    }
+
+    public function banRecords(Request $request)
+    {
+        $current = max(1, (int) $request->input('current', 1));
+        $pageSize = max(1, min(100, (int) $request->input('pageSize', 20)));
+
+        $query = UserBanRecord::query()
+            ->with([
+                'user:id,email',
+                'admin:id,email',
+            ])
+            ->orderByDesc('id');
+
+        if ($request->filled('user_id')) {
+            $query->where('user_id', (int) $request->input('user_id'));
+        }
+
+        if ($request->filled('action')) {
+            $query->where('action', (string) $request->input('action'));
+        }
+
+        $records = $query->paginate($pageSize, ['*'], 'page', $current);
+
+        $records->getCollection()->transform(function (UserBanRecord $record): array {
+            return [
+                'id' => (int) $record->id,
+                'user_id' => (int) $record->user_id,
+                'user_email' => (string) ($record->user?->email ?? '-'),
+                'admin_id' => $record->admin_id ? (int) $record->admin_id : null,
+                'admin_email' => (string) ($record->admin?->email ?? 'system'),
+                'action' => (string) $record->action,
+                'reason' => (string) $record->reason,
+                'source' => (string) $record->source,
+                'context' => $record->context,
+                'created_at' => optional($record->created_at)->timestamp,
+            ];
+        });
+
+        return $this->paginate($records);
     }
 
     /**

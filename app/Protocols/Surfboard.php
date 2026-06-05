@@ -24,7 +24,7 @@ class Surfboard extends AbstractProtocol
         $servers = $this->servers;
         $user = $this->user;
 
-        $appName = admin_setting('app_name', 'XBoard');
+        $appName = admin_setting('app_name', 'Portal');
 
         $proxies = '';
         $proxyGroup = '';
@@ -62,7 +62,7 @@ class Surfboard extends AbstractProtocol
             ? File::get(base_path(self::CUSTOM_TEMPLATE_FILE))
             : File::get(base_path(self::DEFAULT_TEMPLATE_FILE)));
         // Subscription link
-        $subsURL = Helper::getSubscribeUrl($user['token']);
+        $subsURL = Helper::getSubscribeUrl($user);
         $subsDomain = request()->header('Host');
 
         $config = str_replace('$subs_link', $subsURL, $config);

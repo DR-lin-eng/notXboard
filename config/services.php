@@ -30,4 +30,14 @@ return [
         'region' => env('AWS_V2BOARD_REGION', 'us-east-1'),
     ],
 
+    'linux_do' => [
+        'client_id' => env('LINUX_DO_CLIENT_ID'),
+        'client_secret' => env('LINUX_DO_CLIENT_SECRET'),
+    ],
+
+    'google_cloud' => [
+        'key_file' => env('GOOGLE_CLOUD_KEY_FILE'),
+        'storage_bucket' => env('GOOGLE_CLOUD_STORAGE_BUCKET'),
+    ],
+
 ];

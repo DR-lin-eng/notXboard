@@ -12,6 +12,8 @@ use Illuminate\Support\Str;
 
 class PluginController extends Controller
 {
+    private const PLUGIN_CODE_RULE = 'regex:/^[a-z0-9_]+$/';
+
     protected PluginManager $pluginManager;
     protected PluginConfigService $configService;
 
@@ -122,7 +124,7 @@ class PluginController extends Controller
     public function install(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         try {
@@ -143,7 +145,7 @@ class PluginController extends Controller
     public function uninstall(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         $code = $request->input('code');
@@ -172,7 +174,7 @@ class PluginController extends Controller
     public function upgrade(Request $request)
     {
         $request->validate([
-            'code' => 'required|string',
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE],
         ]);
         try {
             $this->pluginManager->update($request->input('code'));
@@ -192,7 +194,7 @@ class PluginController extends Controller
     public function enable(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         try {
@@ -213,7 +215,7 @@ class PluginController extends Controller
     public function disable(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         $this->pluginManager->disable($request->input('code'));
@@ -229,7 +231,7 @@ class PluginController extends Controller
     public function getConfig(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         try {
@@ -250,7 +252,7 @@ class PluginController extends Controller
     public function updateConfig(Request $request)
     {
         $request->validate([
-            'code' => 'required|string',
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE],
             'config' => 'required|array'
         ]);
 
@@ -307,7 +309,7 @@ class PluginController extends Controller
     public function delete(Request $request)
     {
         $request->validate([
-            'code' => 'required|string'
+            'code' => ['required', 'string', self::PLUGIN_CODE_RULE]
         ]);
 
         $code = $request->input('code');

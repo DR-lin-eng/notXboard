@@ -89,7 +89,7 @@ class KnowledgeController extends Controller
         if (!$this->userService->isAvailable($user)) {
             $this->formatAccessData($knowledge['body']);
         }
-        $subscribeUrl = Helper::getSubscribeUrl($user['token']);
+        $subscribeUrl = Helper::getSubscribeUrl($user);
         $knowledge['body'] = $this->replacePlaceholders($knowledge['body'], $subscribeUrl);
 
         return $knowledge;
@@ -101,7 +101,7 @@ class KnowledgeController extends Controller
             [
                 'type' => 'regex',
                 'pattern' => '/<!--access start-->(.*?)<!--access end-->/s',
-                'replacement' => '<div class="v2board-no-access">' . __('You must have a valid subscription to view content in this area') . '</div>'
+                'replacement' => '<div class="no-access">' . __('You must have a valid subscription to view content in this area') . '</div>'
             ]
         ];
 
@@ -114,7 +114,7 @@ class KnowledgeController extends Controller
             [
                 'type' => 'string',
                 'search' => '{{siteName}}',
-                'replacement' => admin_setting('app_name', 'XBoard')
+                'replacement' => admin_setting('app_name', 'Portal')
             ],
             [
                 'type' => 'string',

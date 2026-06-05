@@ -8,16 +8,61 @@ use App\Http\Requests\Admin\CouponGenerate;
 use App\Http\Requests\Admin\CouponSave;
 use App\Models\Coupon;
 use App\Utils\Helper;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class CouponController extends Controller
 {
-    private function applyFiltersAndSorts(Request $request, $builder)
+    private const FILTERABLE_FIELDS = [
+        'id',
+        'code',
+        'name',
+        'owner_user_id',
+        'source_plan_id',
+        'type',
+        'value',
+        'show',
+        'limit_use',
+        'limit_use_with_user',
+        'limit_plan_ids',
+        'limit_period',
+        'started_at',
+        'ended_at',
+        'created_at',
+        'updated_at',
+    ];
+
+    private const SORTABLE_FIELDS = self::FILTERABLE_FIELDS;
+
+    private function normalizeFilterField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::FILTERABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'filter' => ['包含非法优惠券筛选字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function normalizeSortField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::SORTABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'sort' => ['包含非法优惠券排序字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function applyFiltersAndSorts(Request $request, Builder $builder)
     {
         if ($request->has('filter')) {
             collect($request->input('filter'))->each(function ($filter) use ($builder) {
-                $key = $filter['id'];
+                $key = $this->normalizeFilterField($filter['id'] ?? null);
                 $value = $filter['value'];
                 $builder->where(function ($query) use ($key, $value) {
                     if (is_array($value)) {
@@ -31,7 +76,7 @@ class CouponController extends Controller
 
         if ($request->has('sort')) {
             collect($request->input('sort'))->each(function ($sort) use ($builder) {
-                $key = $sort['id'];
+                $key = $this->normalizeSortField($sort['id'] ?? null);
                 $value = $sort['desc'] ? 'DESC' : 'ASC';
                 $builder->orderBy($key, $value);
             });

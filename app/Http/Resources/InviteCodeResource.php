@@ -19,6 +19,9 @@ class InviteCodeResource extends JsonResource
             "code" => $this['code'],
             "pv"    => $this['pv'],
             "status" => $this['status'],
+            "assigned_plan_id" => $this['assigned_plan_id'] ?? null,
+            "assigned_period" => $this['assigned_period'] ?? null,
+            "assigned_plan_name" => $this->plan?->name,
             "created_at" => $this['created_at'],
             "updated_at" => $this['updated_at']
         ];

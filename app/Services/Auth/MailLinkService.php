@@ -2,7 +2,7 @@
 
 namespace App\Services\Auth;
 
-use App\Jobs\SendEmailJob;
+use App\Services\MailService;
 use App\Models\User;
 use App\Utils\CacheKey;
 use App\Utils\Helper;
@@ -19,6 +19,10 @@ class MailLinkService
      */
     public function handleMailLink(string $email, ?string $redirect = null): array
     {
+        if (config('ops.telegram_only_mode')) {
+            return [false, [403, __('Email login is disabled in Telegram-only mode')]];
+        }
+
         if (!(int) admin_setting('login_with_mail_link_enable')) {
             return [false, [404, null]];
         }
@@ -32,12 +36,16 @@ class MailLinkService
             return [true, true]; // 成功但用户不存在，保护用户隐私
         }
 
+        if ($user->banned) {
+            return [false, [400, $user->getSuspensionMessage()]];
+        }
+
         $code = Helper::guid();
         $key = CacheKey::get('TEMP_TOKEN', $code);
         Cache::put($key, $user->id, 300);
         Cache::put(CacheKey::get('LAST_SEND_LOGIN_WITH_MAIL_LINK_TIMESTAMP', $email), time(), 60);
 
-        $redirectUrl = '/#/login?verify=' . $code . '&redirect=' . ($redirect ? $redirect : 'dashboard');
+        $redirectUrl = '/app/#/login?verify=' . $code . '&redirect=' . ($redirect ? $redirect : 'dashboard');
         if (admin_setting('app_url')) {
             $link = admin_setting('app_url') . $redirectUrl;
         } else {
@@ -58,14 +66,14 @@ class MailLinkService
      */
     private function sendMailLinkEmail(User $user, string $link): void
     {
-        SendEmailJob::dispatch([
+        MailService::dispatchEmail([
             'email' => $user->email,
             'subject' => __('Login to :name', [
-                'name' => admin_setting('app_name', 'XBoard')
+                'name' => admin_setting('app_name', 'Portal')
             ]),
             'template_name' => 'login',
             'template_value' => [
-                'name' => admin_setting('app_name', 'XBoard'),
+                'name' => admin_setting('app_name', 'Portal'),
                 'link' => $link,
                 'url' => admin_setting('app_url')
             ]
@@ -89,7 +97,7 @@ class MailLinkService
 
         $user = User::find($userId);
 
-        if (!$user || $user->banned) {
+        if (!$user) {
             return null;
         }
 

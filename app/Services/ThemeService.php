@@ -11,11 +11,117 @@ use ZipArchive;
 
 class ThemeService
 {
+    public const DEFAULT_THEME = 'Maintainable';
     private const SYSTEM_THEME_DIR = 'theme/';
     private const USER_THEME_DIR = '/storage/theme/';
     private const CONFIG_FILE = 'config.json';
     private const SETTING_PREFIX = 'theme_';
-    private const SYSTEM_THEMES = ['Xboard', 'v2board'];
+    private const SYSTEM_THEMES = [self::DEFAULT_THEME, 'portal'];
+    private const THEME_NAME_PATTERN = '/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/';
+    private const MAX_ARCHIVE_BYTES = 10485760;
+    private const MAX_ARCHIVE_ENTRIES = 512;
+    private const MAX_EXTRACTED_BYTES = 52428800;
+    private const MAX_ENTRY_BYTES = 10485760;
+
+    /**
+     * Normalize theme name and fallback to system default when empty.
+     */
+    private function normalizeThemeName(?string $theme): string
+    {
+        $theme = trim((string) $theme);
+        return $theme !== '' ? $theme : self::DEFAULT_THEME;
+    }
+
+    private function isValidThemeName(string $theme): bool
+    {
+        return preg_match(self::THEME_NAME_PATTERN, $theme) === 1
+            && !str_contains($theme, '..')
+            && !str_contains($theme, '/')
+            && !str_contains($theme, '\\');
+    }
+
+    private function assertValidThemeName(string $theme): string
+    {
+        $normalized = $this->normalizeThemeName($theme);
+        if (!$this->isValidThemeName($normalized)) {
+            throw new Exception('Invalid theme name');
+        }
+
+        return $normalized;
+    }
+
+    private function extractZipSafely(ZipArchive $zip, string $destination): void
+    {
+        File::ensureDirectoryExists($destination);
+        if ($zip->numFiles > self::MAX_ARCHIVE_ENTRIES) {
+            throw new Exception('Theme package contains too many files');
+        }
+
+        $totalBytes = 0;
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entryName = (string) $zip->getNameIndex($i);
+            if ($entryName === '') {
+                continue;
+            }
+
+            $normalized = str_replace('\\', '/', $entryName);
+            $normalized = ltrim($normalized, '/');
+
+            if ($normalized === '' || preg_match('#(^|/)\.\.(?:/|$)#', $normalized)) {
+                throw new Exception('Theme package contains unsafe paths');
+            }
+
+            $targetPath = $destination . '/' . $normalized;
+
+            if (str_ends_with($normalized, '/')) {
+                File::ensureDirectoryExists($targetPath);
+                continue;
+            }
+
+            $stat = $zip->statIndex($i);
+            if ($stat === false) {
+                throw new Exception('Failed to read theme package entry metadata');
+            }
+            $declaredSize = (int) ($stat['size'] ?? 0);
+            if ($declaredSize > self::MAX_ENTRY_BYTES || $totalBytes + $declaredSize > self::MAX_EXTRACTED_BYTES) {
+                throw new Exception('Theme package is too large');
+            }
+
+            File::ensureDirectoryExists(dirname($targetPath));
+
+            $stream = $zip->getStream($entryName);
+            if ($stream === false) {
+                throw new Exception('Failed to read theme package entry');
+            }
+
+            $output = fopen($targetPath, 'wb');
+            if ($output === false) {
+                fclose($stream);
+                throw new Exception('Failed to create theme package entry');
+            }
+
+            $entryBytes = 0;
+            try {
+                while (!feof($stream)) {
+                    $chunk = fread($stream, 8192);
+                    if ($chunk === false) {
+                        throw new Exception('Failed to extract theme package entry');
+                    }
+                    $entryBytes += strlen($chunk);
+                    $totalBytes += strlen($chunk);
+                    if ($entryBytes > self::MAX_ENTRY_BYTES || $totalBytes > self::MAX_EXTRACTED_BYTES) {
+                        throw new Exception('Theme package is too large');
+                    }
+                    if (fwrite($output, $chunk) === false) {
+                        throw new Exception('Failed to extract theme package entry');
+                    }
+                }
+            } finally {
+                fclose($stream);
+                fclose($output);
+            }
+        }
+    }
 
     public function __construct()
     {
@@ -102,6 +208,10 @@ class ThemeService
      */
     public function upload(UploadedFile $file): bool
     {
+        if (($file->getSize() ?: 0) > self::MAX_ARCHIVE_BYTES) {
+            throw new Exception('Theme package size cannot exceed 10MB');
+        }
+
         $zip = new ZipArchive;
         $tmpPath = storage_path('tmp/' . uniqid());
 
@@ -118,7 +228,7 @@ class ThemeService
                 throw new Exception('Theme config file not found');
             }
 
-            $zip->extractTo($tmpPath);
+            $this->extractZipSafely($zip, $tmpPath);
             $zip->close();
 
             $sourcePath = $tmpPath . '/' . rtrim(dirname($configEntry), '.');
@@ -133,7 +243,9 @@ class ThemeService
                 throw new Exception('Theme name not configured');
             }
 
-            if (in_array($config['name'], self::SYSTEM_THEMES)) {
+            $themeName = $this->assertValidThemeName((string) $config['name']);
+
+            if (in_array($themeName, self::SYSTEM_THEMES, true)) {
                 throw new Exception('Cannot upload theme with same name as system theme');
             }
 
@@ -146,7 +258,7 @@ class ThemeService
                 File::makeDirectory($userThemePath, 0755, true);
             }
 
-            $targetPath = $userThemePath . $config['name'];
+            $targetPath = $userThemePath . $themeName;
             if (File::exists($targetPath)) {
                 $oldConfigFile = $targetPath . '/config.json';
                 if (!File::exists($oldConfigFile)) {
@@ -156,11 +268,11 @@ class ThemeService
                 $oldVersion = $oldConfig['version'] ?? '0.0.0';
                 $newVersion = $config['version'] ?? '0.0.0';
                 if (version_compare($newVersion, $oldVersion, '>')) {
-                    $this->cleanupThemeFiles($config['name']);
+                    $this->cleanupThemeFiles($themeName);
                     File::deleteDirectory($targetPath);
                     File::copyDirectory($sourcePath, $targetPath);
                     // 更新主题时保留用户配置
-                    $this->initConfig($config['name'], true);
+                    $this->initConfig($themeName, true);
                     return true;
                 } else {
                     throw new Exception('Theme exists and not a newer version');
@@ -168,7 +280,7 @@ class ThemeService
             }
 
             File::copyDirectory($sourcePath, $targetPath);
-            $this->initConfig($config['name']);
+            $this->initConfig($themeName);
 
             return true;
 
@@ -190,7 +302,8 @@ class ThemeService
             return true;
         }
 
-        $currentTheme = admin_setting('current_theme');
+        $theme = $this->assertValidThemeName($theme);
+        $currentTheme = $this->normalizeThemeName(admin_setting('current_theme'));
 
         try {
             $themePath = $this->getThemePath($theme);
@@ -207,11 +320,18 @@ class ThemeService
             }
 
             $targetPath = public_path('theme/' . $theme);
+            if (File::exists($targetPath)) {
+                File::deleteDirectory($targetPath);
+            }
+
             if (!File::copyDirectory($themePath, $targetPath)) {
                 throw new Exception('Failed to copy theme files');
             }
 
-            admin_setting(['current_theme' => $theme]);
+            admin_setting([
+                'current_theme' => $theme,
+                'frontend_theme' => $theme
+            ]);
             return true;
 
         } catch (Exception $e) {
@@ -226,6 +346,7 @@ class ThemeService
     public function delete(string $theme): bool
     {
         try {
+            $theme = $this->assertValidThemeName($theme);
             if (in_array($theme, self::SYSTEM_THEMES)) {
                 throw new Exception('System theme cannot be deleted');
             }
@@ -263,6 +384,10 @@ class ThemeService
      */
     public function getThemePath(string $theme): ?string
     {
+        $theme = $this->normalizeThemeName($theme);
+        if (!$this->isValidThemeName($theme)) {
+            return null;
+        }
         $systemPath = base_path(self::SYSTEM_THEME_DIR . $theme);
         if (File::exists($systemPath)) {
             return $systemPath;
@@ -281,6 +406,7 @@ class ThemeService
      */
     public function getConfig(string $theme): ?array
     {
+        $theme = $this->assertValidThemeName($theme);
         $config = admin_setting(self::SETTING_PREFIX . $theme);
         if ($config === null) {
             $this->initConfig($theme);
@@ -294,6 +420,7 @@ class ThemeService
      */
     public function updateConfig(string $theme, array $config): bool
     {
+        $theme = $this->assertValidThemeName($theme);
         try {
             if (!$this->getThemePath($theme)) {
                 throw new Exception('Theme not found');
@@ -341,6 +468,7 @@ class ThemeService
     public function cleanupThemeFiles(string $theme): void
     {
         try {
+            $theme = $this->assertValidThemeName($theme);
             $publicThemePath = public_path('theme/' . $theme);
             if (File::exists($publicThemePath)) {
                 File::deleteDirectory($publicThemePath);
@@ -367,7 +495,7 @@ class ThemeService
     public function refreshCurrentTheme(): bool
     {
         try {
-            $currentTheme = admin_setting('current_theme');
+            $currentTheme = $this->assertValidThemeName((string) admin_setting('current_theme'));
             if (!$currentTheme) {
                 return false;
             }
@@ -404,6 +532,7 @@ class ThemeService
      */
     private function initConfig(string $theme, bool $preserveExisting = false): void
     {
+        $theme = $this->assertValidThemeName($theme);
         $config = $this->readConfigFile($theme);
         if (!$config) {
             return;

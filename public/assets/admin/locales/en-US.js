@@ -1,5 +1,5 @@
-window.XBOARD_TRANSLATIONS = window.XBOARD_TRANSLATIONS || {};
-window.XBOARD_TRANSLATIONS['en-US'] = {
+window.Portal_TRANSLATIONS = window.Portal_TRANSLATIONS || {};
+window.Portal_TRANSLATIONS['en-US'] = {
   "payment": {
     "title": "Payment Configuration",
     "description": "Configure payment methods including Alipay, WeChat Pay, etc.",
@@ -1879,7 +1879,7 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
   },
   "theme": {
     "title": "Theme Configuration",
-    "description": "Theme configuration, including theme colors, font sizes, etc. If you deploy V2board in a front-end and back-end separated way, theme configuration will not take effect.",
+    "description": "Theme configuration, including theme colors, font sizes, etc. If you deploy the portal with separate front-end and back-end services, theme configuration will not take effect.",
     "upload": {
       "button": "Upload Theme",
       "title": "Upload Theme",
@@ -1982,7 +1982,7 @@ window.XBOARD_TRANSLATIONS['en-US'] = {
     "description": "Configure node communication and synchronization settings, including communication key, polling interval, load balancing and other advanced options.",
     "server_token": {
       "title": "Communication Key",
-      "description": "The key for communication between Xboard and nodes to prevent unauthorized data access.",
+      "description": "The key for communication between the panel and nodes to prevent unauthorized data access.",
       "placeholder": "Please enter communication key"
     },
     "server_pull_interval": {

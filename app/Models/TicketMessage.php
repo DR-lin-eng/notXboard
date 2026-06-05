@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property \Illuminate\Support\Carbon $created_at
  * @property \Illuminate\Support\Carbon $updated_at
  * @property-read \App\Models\Ticket $ticket 关联的工单
+ * @property-read \App\Models\User $user 关联的发送用户
  * @property-read bool $is_from_user 消息是否由工单发起人发送
  * @property-read bool $is_from_admin 消息是否由管理员发送
  */
@@ -36,6 +37,11 @@ class TicketMessage extends Model
     public function ticket(): BelongsTo
     {
         return $this->belongsTo(Ticket::class, 'ticket_id', 'id');
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id', 'id');
     }
 
     /**

@@ -9,6 +9,8 @@ use App\Models\Order;
 use App\Models\Plan;
 use App\Models\Server;
 use App\Models\User;
+use App\Services\CoreJobDispatchService;
+use App\Services\LegacyTrafficDispatchService;
 use App\Services\Plugin\HookManager;
 use App\Services\TrafficResetService;
 use App\Models\TrafficResetLog;
@@ -124,10 +126,20 @@ class UserService
         list($server, $protocol, $data) = HookManager::filter('traffic.before_process', [$server, $protocol, $data]);
 
         $timestamp = strtotime(date('Y-m-d'));
-        collect($data)->chunk(1000)->each(function ($chunk) use ($timestamp, $server, $protocol) {
-            TrafficFetchJob::dispatch($server, $chunk->toArray(), $protocol, $timestamp);
-            StatUserJob::dispatch($server, $chunk->toArray(), $protocol, 'd');
-            StatServerJob::dispatch($server, $chunk->toArray(), $protocol, 'd');
+        $dispatchService = app(CoreJobDispatchService::class);
+        $legacyTrafficService = app(LegacyTrafficDispatchService::class);
+        collect($data)->chunk(1000)->each(function ($chunk) use ($timestamp, $server, $protocol, $dispatchService, $legacyTrafficService) {
+            $payload = $chunk->toArray();
+            if ($dispatchService->shouldDispatchSync()) {
+                $legacyTrafficService->applyTrafficFetch($server, $payload);
+                $legacyTrafficService->applyUserStat($server, $payload, 'd');
+                $legacyTrafficService->applyServerStat($server, $payload, $protocol, 'd');
+                return;
+            }
+
+            $dispatchService->dispatch(new TrafficFetchJob($server, $payload, $protocol, $timestamp));
+            $dispatchService->dispatch(new StatUserJob($server, $payload, $protocol, 'd'));
+            $dispatchService->dispatch(new StatServerJob($server, $payload, $protocol, 'd'));
         });
     }
 
@@ -169,11 +181,18 @@ class UserService
             : Hash::make($data['email']);
         $user->uuid = Helper::guid(true);
         $user->token = Helper::guid();
+        $user->subscribe_path = Helper::randomLetters(10);
+        $user->subscribe_key = Helper::randomLetters(8);
+        $user->subscribe_salt = Helper::randomLetters(6);
+        if ($user->subscribe_salt === $user->subscribe_key) {
+            $user->subscribe_salt = Helper::randomLetters(6);
+        }
 
         // 默认设置
         $user->remind_expire = admin_setting('default_remind_expire', 1);
         $user->remind_traffic = admin_setting('default_remind_traffic', 1);
         $user->expired_at = 0;
+        $user->concurrent_ip_limit = 3;
 
         // 可选字段
         $this->setOptionalFields($user, $data);
@@ -199,7 +218,8 @@ class UserService
             'group_id',
             'speed_limit',
             'expired_at',
-            'transfer_enable'
+            'transfer_enable',
+            'concurrent_ip_limit',
         ];
 
         foreach ($optionalFields as $field) {

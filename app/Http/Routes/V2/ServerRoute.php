@@ -21,6 +21,7 @@ class ServerRoute
             $route->post('alive', [UniProxyController::class, 'alive']);
             $route->get('alivelist', [UniProxyController::class, 'alivelist']);
             $route->post('status', [UniProxyController::class, 'status']);
+            $route->post('audit', [UniProxyController::class, 'audit']);
         });
     }
 }

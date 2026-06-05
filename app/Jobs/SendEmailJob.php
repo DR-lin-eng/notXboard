@@ -34,6 +34,10 @@ class SendEmailJob implements ShouldQueue
      */
     public function handle()
     {
+        if (config('ops.telegram_only_mode')) {
+            return;
+        }
+
         $mailLog = MailService::sendEmail($this->params);
         if ($mailLog['error']) {
             $this->release(); //发送失败将触发重试

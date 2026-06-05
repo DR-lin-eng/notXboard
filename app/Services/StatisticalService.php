@@ -24,7 +24,7 @@ class StatisticalService
 
     public function __construct()
     {
-        ini_set('memory_limit', -1);
+        ini_set('memory_limit', (string) env('APP_MEMORY_LIMIT', '512M'));
         $this->redis = Redis::connection();
 
     }

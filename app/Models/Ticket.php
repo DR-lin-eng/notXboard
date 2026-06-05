@@ -5,12 +5,15 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use App\Models\ServerNode;
 
 /**
  * App\Models\Ticket
  *
  * @property int $id
  * @property int $user_id 用户ID
+ * @property int|null $node_id 节点ID
+ * @property int|null $assigned_admin_user_id 负责人（个人管理员/超管）
  * @property string $subject 工单主题
  * @property string|null $level 工单等级
  * @property int $status 工单状态
@@ -29,7 +32,9 @@ class Ticket extends Model
     protected $guarded = ['id'];
     protected $casts = [
         'created_at' => 'timestamp',
-        'updated_at' => 'timestamp'
+        'updated_at' => 'timestamp',
+        'node_id' => 'integer',
+        'assigned_admin_user_id' => 'integer',
     ];
 
     const STATUS_OPENING = 0;
@@ -42,6 +47,16 @@ class Ticket extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id', 'id');
+    }
+
+    public function node(): BelongsTo
+    {
+        return $this->belongsTo(ServerNode::class, 'node_id', 'id');
+    }
+
+    public function assignedAdmin(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assigned_admin_user_id', 'id');
     }
     
     /**

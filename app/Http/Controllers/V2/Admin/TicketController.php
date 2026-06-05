@@ -5,16 +5,56 @@ namespace App\Http\Controllers\V2\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\Ticket;
 use App\Services\TicketService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class TicketController extends Controller
 {
-    private function applyFiltersAndSorts(Request $request, $builder)
+    private const FILTERABLE_FIELDS = [
+        'id',
+        'user_id',
+        'node_id',
+        'assigned_admin_user_id',
+        'subject',
+        'level',
+        'status',
+        'reply_status',
+        'last_reply_user_id',
+        'created_at',
+        'updated_at',
+    ];
+
+    private const SORTABLE_FIELDS = self::FILTERABLE_FIELDS;
+
+    private function normalizeFilterField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::FILTERABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'filter' => ['包含非法工单筛选字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function normalizeSortField(mixed $field): string
+    {
+        if (!is_string($field) || !in_array($field, self::SORTABLE_FIELDS, true)) {
+            throw ValidationException::withMessages([
+                'sort' => ['包含非法工单排序字段'],
+            ]);
+        }
+
+        return $field;
+    }
+
+    private function applyFiltersAndSorts(Request $request, Builder $builder)
     {
         if ($request->has('filter')) {
             collect($request->input('filter'))->each(function ($filter) use ($builder) {
-                $key = $filter['id'];
+                $key = $this->normalizeFilterField($filter['id'] ?? null);
                 $value = $filter['value'];
                 $builder->where(function ($query) use ($key, $value) {
                     if (is_array($value)) {
@@ -28,7 +68,7 @@ class TicketController extends Controller
 
         if ($request->has('sort')) {
             collect($request->input('sort'))->each(function ($sort) use ($builder) {
-                $key = $sort['id'];
+                $key = $this->normalizeSortField($sort['id'] ?? null);
                 $value = $sort['desc'] ? 'DESC' : 'ASC';
                 $builder->orderBy($key, $value);
             });
@@ -129,8 +169,7 @@ class TicketController extends Controller
         ]);
         try {
             $ticket = Ticket::findOrFail($request->input('id'));
-            $ticket->status = Ticket::STATUS_CLOSED;
-            $ticket->save();
+            app(TicketService::class)->closeByActor($ticket, $request->user());
             return $this->success(true);
         } catch (ModelNotFoundException $e) {
             return $this->fail([400202, '工单不存在']);

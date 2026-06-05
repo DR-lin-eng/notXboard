@@ -35,6 +35,10 @@ class PlanSave extends FormRequest
             'device_limit' => 'integer|nullable|min:0',
             'capacity_limit' => 'integer|nullable|min:0',
             'tags' => 'array|nullable',
+            'show' => 'boolean|nullable',
+            'sell' => 'boolean|nullable',
+            'renew' => 'boolean|nullable',
+            'sort' => 'integer|nullable',
         ];
     }
 
@@ -138,6 +142,10 @@ class PlanSave extends FormRequest
             'capacity_limit.integer' => '容量限制必须是整数',
             'capacity_limit.min' => '容量限制不能为负数',
             'tags.array' => '标签格式必须是数组',
+            'show.boolean' => '显示开关格式错误',
+            'sell.boolean' => '售卖开关格式错误',
+            'renew.boolean' => '续费开关格式错误',
+            'sort.integer' => '排序必须是整数',
         ];
     }
 

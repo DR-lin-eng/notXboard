@@ -4,6 +4,8 @@ namespace App\Utils;
 
 use App\Services\Plugin\HookManager;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\Http;
+use App\Models\User;
 
 class Helper
 {
@@ -14,21 +16,18 @@ class Helper
 
     public static function getServerKey($timestamp, $length)
     {
-        return base64_encode(substr(md5($timestamp), 0, $length));
+        $key = self::getAppKeyBytes();
+        $hash = hash_hmac('sha256', (string) $timestamp, $key, true);
+        return base64_encode(substr($hash, 0, $length));
     }
 
     public static function guid($format = false)
     {
-        if (function_exists('com_create_guid') === true) {
-            return md5(trim(com_create_guid(), '{}'));
-        }
-        $data = openssl_random_pseudo_bytes(16);
+        $data = random_bytes(16);
         $data[6] = chr(ord($data[6]) & 0x0f | 0x40); // set version to 0100
         $data[8] = chr(ord($data[8]) & 0x3f | 0x80); // set bits 6-7 to 10
-        if ($format) {
-            return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
-        }
-        return md5(vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4)) . '-' . time());
+        $uuid = vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+        return $format ? $uuid : bin2hex($data);
     }
 
     public static function generateOrderNo(): string
@@ -39,9 +38,23 @@ class Helper
 
     public static function exchange($from, $to)
     {
-        $result = file_get_contents('https://api.exchangerate.host/latest?symbols=' . $to . '&base=' . $from);
-        $result = json_decode($result, true);
-        return $result['rates'][$to];
+        $from = strtoupper(trim((string) $from));
+        $to = strtoupper(trim((string) $to));
+        if (!preg_match('/^[A-Z]{3,10}$/', $from) || !preg_match('/^[A-Z]{3,10}$/', $to)) {
+            throw new \InvalidArgumentException('Invalid currency code');
+        }
+
+        $result = Http::timeout(10)
+            ->connectTimeout(3)
+            ->acceptJson()
+            ->get('https://api.exchangerate.host/latest', [
+                'symbols' => $to,
+                'base' => $from,
+            ])
+            ->throw()
+            ->json();
+
+        return $result['rates'][$to] ?? null;
     }
 
     public static function randomChar($len, $special = false)
@@ -64,10 +77,9 @@ class Helper
         }
 
         $charsLen = count($chars) - 1;
-        shuffle($chars);
         $str = '';
         for ($i = 0; $i < $len; $i++) {
-            $str .= $chars[mt_rand(0, $charsLen)];
+            $str .= $chars[random_int(0, $charsLen)];
         }
         return $str;
     }
@@ -83,11 +95,27 @@ class Helper
     public static function multiPasswordVerify($algo, $salt, $password, $hash)
     {
         switch($algo) {
-            case 'md5': return md5($password) === $hash;
-            case 'sha256': return hash('sha256', $password) === $hash;
-            case 'md5salt': return md5($password . $salt) === $hash;
+            case 'md5': return hash_equals((string) $hash, md5($password));
+            case 'sha256': return hash_equals((string) $hash, hash('sha256', $password));
+            case 'md5salt': return hash_equals((string) $hash, md5($password . $salt));
             default: return password_verify($password, $hash);
         }
+    }
+
+    public static function sanitizeForCsv(mixed $value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+        $stringValue = (string) $value;
+        if ($stringValue === '') {
+            return $stringValue;
+        }
+        $trimmed = ltrim($stringValue);
+        if ($trimmed !== '' && in_array($trimmed[0], ['=', '+', '-', '@', "\t"], true)) {
+            return "'" . $stringValue;
+        }
+        return $stringValue;
     }
 
     public static function emailSuffixVerify($email, $suffixs)
@@ -119,31 +147,146 @@ class Helper
         }
     }
 
-    public static function getSubscribeUrl(string $token, $subscribeUrl = null)
+    public static function getSubscribeUrl($userOrToken, $subscribeUrl = null): ?string
     {
-        $path = route('client.subscribe', ['token' => $token], false);
+        $user = null;
+        if ($userOrToken instanceof User) {
+            $user = $userOrToken;
+        } elseif (is_array($userOrToken)) {
+            $user = $userOrToken;
+        } else {
+            $token = (string) $userOrToken;
+            if ($token !== '') {
+                $user = User::where('token', $token)->first();
+            }
+        }
+
+        if (!$user) {
+            return null;
+        }
+
+        $token = null;
+        $pathKey = null;
+        $queryKey = null;
+        $querySalt = null;
+
+        if ($user instanceof User) {
+            if (!$user->subscribe_path || !$user->subscribe_key || !$user->subscribe_salt) {
+                $freshUser = $user->id ? User::where('id', $user->id)->first() : null;
+                if ($freshUser) {
+                    $user = $freshUser;
+                }
+            }
+            $user->ensureSubscribeSecrets();
+            $token = $user->token;
+            $pathKey = $user->subscribe_path;
+            $queryKey = $user->subscribe_key;
+            $querySalt = $user->subscribe_salt;
+        } elseif (is_array($user)) {
+            $token = $user['token'] ?? null;
+            $pathKey = $user['subscribe_path'] ?? null;
+            $queryKey = $user['subscribe_key'] ?? null;
+            $querySalt = $user['subscribe_salt'] ?? null;
+            if (!$pathKey || !$queryKey || !$querySalt) {
+                $model = $token ? User::where('token', $token)->first() : null;
+                if (!$model) {
+                    return null;
+                }
+                $model->ensureSubscribeSecrets();
+                $token = $model->token;
+                $pathKey = $model->subscribe_path;
+                $queryKey = $model->subscribe_key;
+                $querySalt = $model->subscribe_salt;
+            }
+        }
+
+        if (!$token || !$pathKey || !$queryKey || !$querySalt) {
+            return null;
+        }
+
+        $path = route('client.subscribe', ['path' => $pathKey], false);
+        $queryString = http_build_query([
+            $queryKey => $token,
+            $querySalt => '1',
+        ]);
         
         if ($subscribeUrl) {
-            $finalUrl = rtrim($subscribeUrl, '/') . $path;
+            $finalUrl = rtrim($subscribeUrl, '/') . $path . '?' . $queryString;
             return HookManager::filter('subscribe.url', $finalUrl);
         }
         
-        $urlString = (string)admin_setting('subscribe_url', '');
-        $subscribeUrlList = $urlString ? explode(',', $urlString) : [];
-        
+        $subscribeUrlList = self::getSubscribeBaseUrls();
+
         if (empty($subscribeUrlList)) {
-            return HookManager::filter('subscribe.url', url($path));
+            return HookManager::filter('subscribe.url', url($path) . '?' . $queryString);
         }
         
         $selectedUrl = self::replaceByPattern(Arr::random($subscribeUrlList));
-        $finalUrl = rtrim($selectedUrl, '/') . $path;
+        $finalUrl = rtrim($selectedUrl, '/') . $path . '?' . $queryString;
         
         return HookManager::filter('subscribe.url', $finalUrl);
+    }
+
+    private static function getSubscribeBaseUrls(): array
+    {
+        $fullUrlList = collect(self::splitMultiValues((string) admin_setting('subscribe_url', '')))
+            ->map(fn (string $item) => self::replaceByPattern($item))
+            ->filter(fn ($item) => is_string($item) && trim($item) !== '')
+            ->values()
+            ->all();
+
+        $rootDomainList = collect(self::splitMultiValues((string) admin_setting('subscribe_root_domains', '')))
+            ->map(fn (string $item) => self::buildRandomSubscribeBaseUrl($item))
+            ->filter(fn ($item) => is_string($item) && trim($item) !== '')
+            ->values()
+            ->all();
+
+        return array_values(array_unique(array_merge($fullUrlList, $rootDomainList)));
+    }
+
+    private static function splitMultiValues(string $input): array
+    {
+        return array_values(array_filter(array_map(
+            fn ($item) => trim((string) $item),
+            preg_split('/[\s,]+/', $input) ?: []
+        )));
+    }
+
+    private static function buildRandomSubscribeBaseUrl(string $raw): ?string
+    {
+        $value = trim($raw);
+        if ($value === '') {
+            return null;
+        }
+
+        if (str_contains($value, '://')) {
+            $parsed = parse_url($value, PHP_URL_HOST);
+            $value = is_string($parsed) ? $parsed : '';
+        }
+
+        $value = trim($value, " \t\n\r\0\x0B.");
+        $value = preg_replace('/^\*\./', '', $value);
+        if (!$value) {
+            return null;
+        }
+
+        return 'https://' . self::randomLetters(6) . '.' . $value;
     }
 
     public static function randomPort($range): int {
         $portRange = explode('-', $range);
         return random_int((int)$portRange[0], (int)$portRange[1]);
+    }
+
+    public static function randomLetters(int $len): string
+    {
+        $chars = 'abcdefghijklmnopqrstuvwxyz';
+        $max = strlen($chars) - 1;
+        $result = '';
+        for ($i = 0; $i < $len; $i++) {
+            $result .= $chars[random_int(0, $max)];
+        }
+        return $result;
     }
 
     public static function base64EncodeUrlSafe($data)
@@ -211,5 +354,17 @@ class Helper
     public static function transferToGB(float $transfer_enable): float
     {
         return $transfer_enable / 1073741824;
+    }
+
+    private static function getAppKeyBytes(): string
+    {
+        $key = (string) config('app.key', '');
+        if (str_starts_with($key, 'base64:')) {
+            $decoded = base64_decode(substr($key, 7), true);
+            if ($decoded !== false) {
+                return $decoded;
+            }
+        }
+        return $key;
     }
 }

@@ -17,11 +17,16 @@ class AuthService
 
     public function generateAuthData(): array
     {
+        $expireDaysRaw = admin_setting('login_token_expire_days', 365);
+        $expireDays = is_numeric($expireDaysRaw) ? (int) $expireDaysRaw : 365;
+        $expireDays = max(0, min(3650, $expireDays));
+        $expiresAt = $expireDays > 0 ? now()->addDays(max(1, $expireDays)) : null;
+
         // Create a new Sanctum token with device info
         $token = $this->user->createToken(
             Str::random(20), // token name (device identifier)
             ['*'], // abilities
-            now()->addYear() // expiration
+            $expiresAt // expiration
         );
 
         // Format token: remove ID prefix and add Bearer
@@ -54,12 +59,18 @@ class AuthService
 
     public static function findUserByBearerToken(string $bearerToken): ?User
     {
-        $token = str_replace('Bearer ', '', $bearerToken);
-        
+        $token = trim(preg_replace('/^Bearer\s+/i', '', $bearerToken) ?? '');
+        if ($token === '') {
+            return null;
+        }
+
         $accessToken = PersonalAccessToken::findToken($token);
-        
+        if (!$accessToken || ($accessToken->expires_at && $accessToken->expires_at->isPast())) {
+            return null;
+        }
+
         $tokenable = $accessToken?->tokenable;
-        
+
         return $tokenable instanceof User ? $tokenable : null;
     }
 

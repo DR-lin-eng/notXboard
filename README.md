@@ -1,100 +1,141 @@
-# Xboard
+# notXboard
 
-<div align="center">
+notXboard 是一个面向共享节点平台场景的增强版 XBoard。
 
-[![Telegram](https://img.shields.io/badge/Telegram-Channel-blue)](https://t.me/XboardOfficial)
-![PHP](https://img.shields.io/badge/PHP-8.2+-green.svg)
-![MySQL](https://img.shields.io/badge/MySQL-5.7+-blue.svg)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+它不是单纯的“机场面板二开”，而是把平台角色拆成了三层：
 
-</div>
+- 普通用户：购买套餐、使用节点、提交工单、申请退款
+- 个人管理员：管理自己负责的节点、节点套餐、节点工单、节点访问控制
+- 超级管理员：管理全局配置、支付方式、争议裁决、系统任务与平台运营
 
-## 📖 Introduction
+当前仓库已经默认转向 `Rust gateway + Docker` 运行面，PHP/Laravel 保留为兼容层，而不是默认入口。
 
-Xboard is a modern panel system built on Laravel 11, focusing on providing a clean and efficient user experience.
+## 当前推荐架构
 
-## ✨ Features
+- 默认基础栈：`gateway + mysql + redis`
+- 根级 [Dockerfile](/Volumes/移动/一些资料文档/notXboard/Dockerfile:1) 默认构建 Rust 网关镜像
+- PHP 兼容镜像使用 [Dockerfile.php-compat](/Volumes/移动/一些资料文档/notXboard/Dockerfile.php-compat:1)
+- 兼容服务按职责拆分：
+  - [docker-compose.compat.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.compat.yml:1)：旧 PHP 页面 / 兼容入口
+  - [docker-compose.queue.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.queue.yml:1)：异步通知 / 批量发信
+  - [docker-compose.scheduler.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.scheduler.yml:1)：少量 PHP 定时任务兼容层
+- 默认未命中路由不会隐式回退到 PHP；如果你还需要旧 PHP 页面或旧入口，必须显式叠加 compat compose
 
-- 🚀 Built with Laravel 12 + Octane for significant performance gains
-- 🎨 Redesigned admin interface (React + Shadcn UI)
-- 📱 Modern user frontend (Vue3 + TypeScript)
-- 🐳 Ready-to-use Docker deployment solution
-- 🎯 Optimized system architecture for better maintainability
+## 快速开始
 
-## 🚀 Quick Start
+默认部署优先走 Docker。
+
+1. 复制环境变量模板：
 
 ```bash
-git clone -b compose --depth 1 https://github.com/cedar2025/Xboard && \
-cd Xboard && \
-docker compose run -it --rm \
-    -e ENABLE_SQLITE=true \
-    -e ENABLE_REDIS=true \
-    -e ADMIN_ACCOUNT=admin@demo.com \
-    web php artisan xboard:install && \
-docker compose up -d
+cp .env.example .env
+chmod 600 .env
 ```
 
-> After installation, visit: http://SERVER_IP:7001  
-> ⚠️ Make sure to save the admin credentials shown during installation
+2. 至少补齐这些配置：
 
-## 📖 Documentation
+```env
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://your-domain.com
+APP_KEY=base64:replace-me
 
-### 🔄 Upgrade Notice
-> 🚨 **Important:** This version involves significant changes. Please strictly follow the upgrade documentation and backup your database before upgrading. Note that upgrading and migration are different processes, do not confuse them.
+DB_CONNECTION=mysql
+DB_HOST=mysql
+DB_PORT=3306
+DB_DATABASE=xboard
+DB_USERNAME=xboard
+DB_PASSWORD=change-me
+DB_ROOT_PASSWORD=change-me-root
 
-### Development Guides
-- [Plugin Development Guide](./docs/en/development/plugin-development-guide.md) - Complete guide for developing XBoard plugins
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_PASSWORD=
 
-### Deployment Guides
-- [Deploy with 1Panel](./docs/en/installation/1panel.md)
-- [Deploy with Docker Compose](./docs/en/installation/docker-compose.md)
-- [Deploy with aaPanel](./docs/en/installation/aapanel.md)
-- [Deploy with aaPanel + Docker](./docs/en/installation/aapanel-docker.md) (Recommended)
+QUEUE_CONNECTION=sync
+CORE_JOB_SYNC_EXECUTION=true
+PHP_HTTP_API_COMPAT=false
+PHP_SERVER_INGRESS_COMPAT=false
+PHP_WEB_COMPAT=false
+RUST_GATEWAY_OWNS_SCHEDULER=true
+MAIL_SYNC_SEND=true
+TELEGRAM_SYNC_SEND=true
+```
 
-### Migration Guides
-- [Migrate from v2board dev](./docs/en/migration/v2board-dev.md)
-- [Migrate from v2board 1.7.4](./docs/en/migration/v2board-1.7.4.md)
-- [Migrate from v2board 1.7.3](./docs/en/migration/v2board-1.7.3.md)
+3. 启动默认栈：
 
-## 🛠️ Tech Stack
-
-- Backend: Laravel 11 + Octane
-- Admin Panel: React + Shadcn UI + TailwindCSS
-- User Frontend: Vue3 + TypeScript + NaiveUI
-- Deployment: Docker + Docker Compose
-- Caching: Redis + Octane Cache
-
-## 📷 Preview
-![Admin Preview](./docs/images/admin.png)
-
-![User Preview](./docs/images/user.png)
-
-## ⚠️ Disclaimer
-
-This project is for learning and communication purposes only. Users are responsible for any consequences of using this project.
-
-## 🌟 Maintenance Notice
-
-This project is currently under light maintenance. We will:
-- Fix critical bugs and security issues
-- Review and merge important pull requests
-- Provide necessary updates for compatibility
-
-However, new feature development may be limited.
-
-## 🔔 Important Notes
-
-1. Restart required after modifying admin path:
 ```bash
-docker compose restart
+docker compose up -d mysql redis gateway
+docker compose ps
 ```
 
-2. For aaPanel installations, restart the Octane daemon process
+4. 首次初始化：
 
-## 🤝 Contributing
+```bash
+APP_PORT="${APP_PORT:-8000}"
+curl -X POST "http://127.0.0.1:${APP_PORT}/bootstrap/full" \
+  -H 'Content-Type: application/json' \
+  --data "{\"app_name\":\"notXboard\",\"app_url\":\"http://127.0.0.1:${APP_PORT}\",\"admin_email\":\"admin@example.com\",\"admin_password\":\"ChangeMe123!\"}"
+```
 
-Issues and Pull Requests are welcome to help improve the project.
+5. 反代到宿主机 `127.0.0.1:${APP_PORT:-8000}`。
 
-## 📈 Star History
+如果你不是新装整套环境，而是要复用现有宿主机 MySQL / Redis，只改 `.env` 的 `DB_HOST` / `REDIS_HOST` 等连接参数，然后只启动你需要的容器即可。详细写法见 `docs/deployment-docker.md`。
 
-[![Stargazers over time](https://starchart.cc/cedar2025/Xboard.svg)](https://starchart.cc/cedar2025/Xboard)
+## 主要能力
+
+- Rust 网关已承接默认在线流量入口与核心初始化链路
+- 共享节点体系：支持节点负责人、节点套餐、节点级访问控制与节点统计
+- V2bX / UniProxy 接入：支持 `server/config`、`user`、`alive`、`push` 等链路
+- Linux DO Connect OAuth2 登录
+- EPay / EasyPay / CodePay / VPay 兼容支付
+- 退款、争议、投票与超管最终裁决
+- 可维护前端主题与 Rust 渲染页面
+- Rust 原生后台 scheduler、数据库备份与系统任务入口
+
+## 文档导航
+
+按用途看：
+
+- Docker 部署：[`docs/deployment-docker.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment-docker.md:1)
+- 宝塔 / BT 面板部署：[`docs/deployment-bt.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment-bt.md:1)
+- 非 Docker / 旧 PHP 兼容部署：[`docs/deployment.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment.md:1)
+- EPay 兼容支付说明：[`docs/epay.md`](/Volumes/移动/一些资料文档/notXboard/docs/epay.md:1)
+- Linux DO OAuth 集成：[`docs/LINUX_DO_OAUTH_INTEGRATION.md`](/Volumes/移动/一些资料文档/notXboard/docs/LINUX_DO_OAUTH_INTEGRATION.md:1)
+- Rust / PHP 兼容面审计：[`docs/rust-compat-audit.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-compat-audit.md:1)
+- Rust 性能与运行说明：[`docs/rust-performance-notes.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-performance-notes.md:1)
+- 默认栈验证清单：[`docs/rust-verification-checklist.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-verification-checklist.md:1)
+- Rust schema 基线说明：[`docs/rust-schema-baseline.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-schema-baseline.md:1)
+
+## 开发与验证
+
+常用命令：
+
+```bash
+# 隔离网络下验证默认 Rust 栈
+bash tools/verify_rust_default_stack_isolated.sh
+
+# 本地默认 Rust 栈验证
+bash tools/verify_rust_default_stack.sh
+
+# 查看 compose 生效配置
+docker compose config
+```
+
+如果你在做兼容层工作，建议先确认自己改的是哪一层：
+
+- `rust-gateway/`：默认在线入口、默认页面、默认后台任务
+- `app/` / `routes/` / `resources/views/`：PHP 兼容层
+- `theme/portal/`：前端静态资源
+- `docker-compose*.yml`：部署拓扑与兼容层开关
+
+## 迁移提示
+
+如果你是从旧 PHP 主运行面迁过来，最重要的不是“把容器起起来”，而是先确认你到底需不需要 compat 层：
+
+- 只跑当前推荐栈：优先 `gateway + mysql + redis`
+- 还需要旧页面：再叠加 `php`
+- 还需要异步通知：再叠加 `queue`
+- 还需要少量旧调度任务：再叠加 `scheduler`
+
+根 README 只保留入口信息。更细的部署参数、兼容边界、支付细节和 OAuth 说明，请直接看上面的对应文档。

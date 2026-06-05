@@ -32,3 +32,7 @@ docker-compose.yaml
 bun.lockb
 compose.yaml
 .scribe
+.codex
+.composer
+.kiro
+rust-gateway/target

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Plan;
 use App\Models\User;
+use App\Models\UserPlanSubscription;
 use App\Exceptions\ApiException;
 use Illuminate\Database\Eloquent\Collection;
 
@@ -22,14 +23,28 @@ class PlanService
      *
      * @return Collection
      */
-    public function getAvailablePlans(): Collection
+    public function getAvailablePlans(?User $user = null): Collection
     {
-        return Plan::where('show', true)
+        return Plan::query()
+            ->with(['owner:id,email,linux_do_username,linux_do_name'])
+            ->where('show', true)
             ->where('sell', true)
+            ->where(function ($query) {
+                $query->whereNull('visibility_scope')
+                    ->orWhere('visibility_scope', Plan::VISIBILITY_PUBLIC);
+            })
             ->orderBy('sort')
             ->get()
             ->filter(function ($plan) {
                 return $this->hasCapacity($plan);
+            })
+            ->when($user, function (Collection $plans) use ($user) {
+                return $plans->filter(function (Plan $plan) use ($user) {
+                    if ($plan->min_trust_level === null) {
+                        return true;
+                    }
+                    return (int) ($user->trust_level ?? 0) >= (int) $plan->min_trust_level;
+                });
             });
     }
 
@@ -55,21 +70,42 @@ class PlanService
      * @param User $user
      * @return bool
      */
-    public function isPlanAvailableForUser(Plan $plan, User $user): bool
+    public function isPlanAvailableForUser(Plan $plan, User $user, ?string $purchaseToken = null): bool
     {
-        // 如果是续费
-        if ($user->plan_id === $plan->id) {
+        if ($plan->min_trust_level !== null && (int) ($user->trust_level ?? 0) < (int) $plan->min_trust_level) {
+            return false;
+        }
+
+        // 如果有该套餐的有效订阅实例，则按续费规则
+        if ($this->hasActiveSubscription($user, $plan->id)) {
             return $plan->renew;
         }
 
-        // 如果是新购
-        return $plan->show && $plan->sell && $this->hasCapacity($plan);
+        if (!$plan->sell || !$this->hasCapacity($plan)) {
+            return false;
+        }
+
+        $scope = Plan::normalizeVisibilityScope($plan->visibility_scope ?? null);
+        if ($scope === Plan::VISIBILITY_LINK_ONLY) {
+            $token = trim((string) $purchaseToken);
+            return $token !== '' && $token === (string) ($plan->share_token ?? '');
+        }
+
+        if ($scope === Plan::VISIBILITY_ASSIGNED_ONLY) {
+            return $plan->hasAssignedUser((int) $user->id);
+        }
+
+        return (bool) $plan->show;
     }
 
-    public function validatePurchase(User $user, string $period): void
+    public function validatePurchase(User $user, string $period, array $context = []): void
     {
         if (!$this->plan) {
             throw new ApiException(__('Subscription plan does not exist'));
+        }
+
+        if ($this->plan->min_trust_level !== null && (int) ($user->trust_level ?? 0) < (int) $this->plan->min_trust_level) {
+            throw new ApiException(__('Insufficient trust level'));
         }
 
         // 转换周期格式为新版格式
@@ -85,11 +121,12 @@ class PlanService
             return;
         }
 
-        if ($user->plan_id !== $this->plan->id && !$this->hasCapacity($this->plan)) {
+        if (!$this->hasActiveSubscription($user, $this->plan->id) && !$this->hasCapacity($this->plan)) {
             throw new ApiException(__('Current product is sold out'));
         }
 
-        $this->validatePlanAvailability($user);
+        $purchaseToken = trim((string) ($context['purchase_token'] ?? ''));
+        $this->validatePlanAvailability($user, $purchaseToken);
     }
 
     /**
@@ -142,24 +179,40 @@ class PlanService
 
     protected function validateResetTrafficPurchase(User $user): void
     {
-        if (!app(UserService::class)->isAvailable($user) || $this->plan->id !== $user->plan_id) {
+        if (!$this->hasActiveSubscription($user, $this->plan->id)) {
             throw new ApiException(__('Subscription has expired or no active subscription, unable to purchase Data Reset Package'));
         }
     }
 
-    protected function validatePlanAvailability(User $user): void
+    protected function validatePlanAvailability(User $user, ?string $purchaseToken = null): void
     {
-        if ((!$this->plan->show && !$this->plan->renew) || (!$this->plan->show && $user->plan_id !== $this->plan->id)) {
-            throw new ApiException(__('This subscription has been sold out, please choose another subscription'));
-        }
+        $hasActiveCurrentPlan = $this->hasActiveSubscription($user, $this->plan->id);
 
-        if (!$this->plan->renew && $user->plan_id == $this->plan->id) {
+        if ($hasActiveCurrentPlan && !$this->plan->renew) {
             throw new ApiException(__('This subscription cannot be renewed, please change to another subscription'));
         }
 
-        if (!$this->plan->show && $this->plan->renew && !app(UserService::class)->isAvailable($user)) {
+        if ($hasActiveCurrentPlan) {
+            return;
+        }
+
+        if (!$this->plan->sell) {
             throw new ApiException(__('This subscription has expired, please change to another subscription'));
         }
+
+        $scope = Plan::normalizeVisibilityScope($this->plan->visibility_scope ?? null);
+        if ($scope === Plan::VISIBILITY_LINK_ONLY) {
+            $token = trim((string) $purchaseToken);
+            if ($token !== '' && $token === (string) ($this->plan->share_token ?? '')) {
+                return;
+            }
+        } elseif ($scope === Plan::VISIBILITY_ASSIGNED_ONLY && $this->plan->hasAssignedUser((int) $user->id)) {
+            return;
+        } elseif ((bool) $this->plan->show) {
+            return;
+        }
+
+        throw new ApiException(__('This subscription has been sold out, please choose another subscription'));
     }
 
     public function hasCapacity(Plan $plan): bool
@@ -168,21 +221,31 @@ class PlanService
             return true;
         }
 
-        $activeUserCount = User::where('plan_id', $plan->id)
-            ->where(function ($query) {
-                $query->where('expired_at', '>=', time())
-                    ->orWhereNull('expired_at');
-            })
-            ->count();
+        $activeUserCount = UserPlanSubscription::query()
+            ->where('plan_id', $plan->id)
+            ->active(time())
+            ->distinct('user_id')
+            ->count('user_id');
 
         return ($plan->capacity_limit - $activeUserCount) > 0;
+    }
+
+    private function hasActiveSubscription(User $user, int $planId): bool
+    {
+        return UserPlanSubscription::query()
+            ->where('user_id', $user->id)
+            ->where('plan_id', $planId)
+            ->active(time())
+            ->exists();
     }
 
     public function getAvailablePeriods(Plan $plan): array
     {
         return array_filter(
             $plan->getActivePeriods(),
-            fn($period) => isset($plan->prices[$period]) && $plan->prices[$period] > 0
+            fn($period) => isset($plan->prices[$period])
+                && is_numeric($plan->prices[$period])
+                && (float) $plan->prices[$period] >= 0
         );
     }
 

@@ -15,7 +15,7 @@ class PaymentService
     protected $pluginManager;
     protected $class;
 
-    public function __construct($method, $id = NULL, $uuid = NULL)
+    public function __construct($method, $id = NULL, $uuid = NULL, ?array $overrideConfig = null)
     {
         $this->method = $method;
         $this->pluginManager = app(PluginManager::class);
@@ -38,6 +38,9 @@ class PaymentService
             $this->config['id'] = $payment['id'];
             $this->config['uuid'] = $payment['uuid'];
             $this->config['notify_domain'] = $payment['notify_domain'] ?? '';
+        }
+        if (is_array($overrideConfig) && !empty($overrideConfig)) {
+            $this->config = array_merge($this->config, $overrideConfig);
         }
 
         $paymentMethods = $this->getAvailablePaymentMethods();
@@ -72,9 +75,14 @@ class PaymentService
             $notifyUrl = $this->config['notify_domain'] . $parseUrl['path'];
         }
 
+        $returnUrl = $order['return_url'] ?? null;
+        if (!$returnUrl) {
+            $returnUrl = source_base_url('/app#/order/' . $order['trade_no']);
+        }
+
         return $this->payment->pay([
             'notify_url' => $notifyUrl,
-            'return_url' => source_base_url('/#/order/' . $order['trade_no']),
+            'return_url' => $returnUrl,
             'trade_no' => $order['trade_no'],
             'total_amount' => $order['total_amount'],
             'user_id' => $order['user_id'],

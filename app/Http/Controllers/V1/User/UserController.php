@@ -13,11 +13,13 @@ use App\Models\User;
 use App\Services\Auth\LoginService;
 use App\Services\AuthService;
 use App\Services\Plugin\HookManager;
+use App\Services\SubscriptionQuotaService;
 use App\Services\UserService;
 use App\Utils\CacheKey;
 use App\Utils\Helper;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class UserController extends Controller
 {
@@ -94,6 +96,7 @@ class UserController extends Controller
                 'last_login_at',
                 'created_at',
                 'banned',
+                'ban_reason',
                 'remind_expire',
                 'remind_traffic',
                 'expired_at',
@@ -142,7 +145,10 @@ class UserController extends Controller
                 'uuid',
                 'device_limit',
                 'speed_limit',
-                'next_reset_at'
+                'next_reset_at',
+                'subscribe_path',
+                'subscribe_key',
+                'subscribe_salt'
             ])
             ->first();
         if (!$user) {
@@ -150,15 +156,29 @@ class UserController extends Controller
         }
         if ($user->plan_id) {
             $user['plan'] = Plan::find($user->plan_id);
+            // Keep overview usable even if legacy plan_id points to a deleted plan.
             if (!$user['plan']) {
-                return $this->fail([400, __('Subscription plan does not exist')]);
+                $user['plan'] = null;
+                $user['plan_missing'] = true;
+                $user['plan_missing_message'] = __('Subscription plan does not exist');
             }
         }
-        $user['subscribe_url'] = Helper::getSubscribeUrl($user['token']);
+        $user['subscribe_url'] = Helper::getSubscribeUrl($user);
         $userService = new UserService();
         $user['reset_day'] = $userService->getResetDay($user);
         $user = HookManager::filter('user.subscribe.response', $user);
         return $this->success($user);
+    }
+
+    public function getPlanQuotaUsage(Request $request)
+    {
+        $user = User::find($request->user()->id);
+        if (!$user) {
+            return $this->fail([400, __('The user does not exist')]);
+        }
+
+        $summary = app(SubscriptionQuotaService::class)->getUserPlanUsageSummary($user);
+        return $this->success($summary);
     }
 
     public function resetSecurity(Request $request)
@@ -169,10 +189,16 @@ class UserController extends Controller
         }
         $user->uuid = Helper::guid(true);
         $user->token = Helper::guid();
+        $user->subscribe_path = Helper::randomLetters(10);
+        $user->subscribe_key = Helper::randomLetters(8);
+        $user->subscribe_salt = Helper::randomLetters(6);
+        if ($user->subscribe_salt === $user->subscribe_key) {
+            $user->subscribe_salt = Helper::randomLetters(6);
+        }
         if (!$user->save()) {
             return $this->fail([400, __('Reset failed')]);
         }
-        return $this->success(Helper::getSubscribeUrl($user->token));
+        return $this->success(Helper::getSubscribeUrl($user));
     }
 
     public function update(UserUpdate $request)
@@ -197,18 +223,31 @@ class UserController extends Controller
 
     public function transfer(UserTransfer $request)
     {
-        $user = User::find($request->user()->id);
-        if (!$user) {
+        $transferAmount = (int) $request->input('transfer_amount');
+        $success = DB::transaction(function () use ($request, $transferAmount) {
+            $user = User::query()->lockForUpdate()->find($request->user()->id);
+            if (!$user) {
+                return 'missing';
+            }
+            if ((int) $user->commission_balance < $transferAmount) {
+                return 'insufficient';
+            }
+
+            $user->commission_balance = (int) $user->commission_balance - $transferAmount;
+            $user->balance = (int) $user->balance + $transferAmount;
+            return $user->save() ? true : false;
+        });
+
+        if ($success === 'missing') {
             return $this->fail([400, __('The user does not exist')]);
         }
-        if ($request->input('transfer_amount') > $user->commission_balance) {
+        if ($success === 'insufficient') {
             return $this->fail([400, __('Insufficient commission balance')]);
         }
-        $user->commission_balance = $user->commission_balance - $request->input('transfer_amount');
-        $user->balance = $user->balance + $request->input('transfer_amount');
-        if (!$user->save()) {
+        if ($success === false) {
             return $this->fail([400, __('Transfer failed')]);
         }
+
         return $this->success(true);
     }
 

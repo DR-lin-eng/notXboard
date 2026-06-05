@@ -28,7 +28,7 @@ class Surge extends AbstractProtocol
         $servers = $this->servers;
         $user = $this->user;
 
-        $appName = admin_setting('app_name', 'XBoard');
+        $appName = admin_setting('app_name', 'Portal');
 
         $proxies = '';
         $proxyGroup = '';
@@ -67,7 +67,7 @@ class Surge extends AbstractProtocol
 
         // Subscription link
         $subsDomain = request()->header('Host');
-        $subsURL = Helper::getSubscribeUrl($user['token'], $subsDomain ? 'https://' . $subsDomain : null);
+        $subsURL = Helper::getSubscribeUrl($user, $subsDomain ? 'https://' . $subsDomain : null);
 
         $config = str_replace('$subs_link', $subsURL, $config);
         $config = str_replace('$subs_domain', $subsDomain, $config);
