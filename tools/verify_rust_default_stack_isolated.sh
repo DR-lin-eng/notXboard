@@ -93,7 +93,7 @@ docker network create "${NETWORK_NAME}" >/dev/null
 
 if [ "${BUILD_IMAGE}" = "1" ]; then
   echo "[2/12] build Rust gateway image: ${GATEWAY_IMAGE}"
-  docker build -f rust-gateway/Dockerfile -t "${GATEWAY_IMAGE}" .
+  docker build -t "${GATEWAY_IMAGE}" rust-gateway
 else
   echo "[2/12] reuse Rust gateway image: ${GATEWAY_IMAGE}"
 fi

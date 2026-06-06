@@ -8,18 +8,14 @@ notXboard 是一个面向共享节点平台场景的增强版 XBoard。
 - 个人管理员：管理自己负责的节点、节点套餐、节点工单、节点访问控制
 - 超级管理员：管理全局配置、支付方式、争议裁决、系统任务与平台运营
 
-当前仓库已经默认转向 `Rust gateway + Docker` 运行面，PHP/Laravel 保留为兼容层，而不是默认入口。
+当前仓库已经默认转向 `Rust gateway + Docker` 运行面，默认部署、默认构建和默认运行路径都不再依赖 PHP 兼容层。
 
 ## 当前推荐架构
 
 - 默认基础栈：`gateway + mysql + redis`
-- 根级 [Dockerfile](/Volumes/移动/一些资料文档/notXboard/Dockerfile:1) 默认构建 Rust 网关镜像
-- PHP 兼容镜像使用 [Dockerfile.php-compat](/Volumes/移动/一些资料文档/notXboard/Dockerfile.php-compat:1)
-- 兼容服务按职责拆分：
-  - [docker-compose.compat.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.compat.yml:1)：旧 PHP 页面 / 兼容入口
-  - [docker-compose.queue.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.queue.yml:1)：异步通知 / 批量发信
-  - [docker-compose.scheduler.yml](/Volumes/移动/一些资料文档/notXboard/docker-compose.scheduler.yml:1)：少量 PHP 定时任务兼容层
-- 默认未命中路由不会隐式回退到 PHP；如果你还需要旧 PHP 页面或旧入口，必须显式叠加 compat compose
+- 根级 [Dockerfile](/Volumes/移动/一些资料文档/notXboard/Dockerfile:1) 与 [rust-gateway/Dockerfile](/Volumes/移动/一些资料文档/notXboard/rust-gateway/Dockerfile:1) 都构建 Rust 网关镜像
+- 默认 `docker compose` 已直接以 `rust-gateway/` 自身作为 `gateway` 构建上下文
+- 默认未命中路由不会隐式回退到 PHP
 
 ## 快速开始
 
@@ -52,14 +48,7 @@ REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_PASSWORD=
 
-QUEUE_CONNECTION=sync
-CORE_JOB_SYNC_EXECUTION=true
-PHP_HTTP_API_COMPAT=false
-PHP_SERVER_INGRESS_COMPAT=false
-PHP_WEB_COMPAT=false
 RUST_GATEWAY_OWNS_SCHEDULER=true
-MAIL_SYNC_SEND=true
-TELEGRAM_SYNC_SEND=true
 ```
 
 3. 启动默认栈：
@@ -98,8 +87,6 @@ curl -X POST "http://127.0.0.1:${APP_PORT}/bootstrap/full" \
 按用途看：
 
 - Docker 部署：[`docs/deployment-docker.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment-docker.md:1)
-- 宝塔 / BT 面板部署：[`docs/deployment-bt.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment-bt.md:1)
-- 非 Docker / 旧 PHP 兼容部署：[`docs/deployment.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment.md:1)
 - EPay 兼容支付说明：[`docs/epay.md`](/Volumes/移动/一些资料文档/notXboard/docs/epay.md:1)
 - Linux DO OAuth 集成：[`docs/LINUX_DO_OAUTH_INTEGRATION.md`](/Volumes/移动/一些资料文档/notXboard/docs/LINUX_DO_OAUTH_INTEGRATION.md:1)
 - Rust / PHP 兼容面审计：[`docs/rust-compat-audit.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-compat-audit.md:1)
@@ -122,20 +109,11 @@ bash tools/verify_rust_default_stack.sh
 docker compose config
 ```
 
-如果你在做兼容层工作，建议先确认自己改的是哪一层：
+如果你在做默认运行面相关工作，建议先确认自己改的是哪一层：
 
 - `rust-gateway/`：默认在线入口、默认页面、默认后台任务
-- `app/` / `routes/` / `resources/views/`：PHP 兼容层
+- `app/` / `routes/` / `resources/views/`：仍待清理的 PHP 历史代码面
 - `theme/portal/`：前端静态资源
-- `docker-compose*.yml`：部署拓扑与兼容层开关
-
-## 迁移提示
-
-如果你是从旧 PHP 主运行面迁过来，最重要的不是“把容器起起来”，而是先确认你到底需不需要 compat 层：
-
-- 只跑当前推荐栈：优先 `gateway + mysql + redis`
-- 还需要旧页面：再叠加 `php`
-- 还需要异步通知：再叠加 `queue`
-- 还需要少量旧调度任务：再叠加 `scheduler`
+- `docker-compose.yml`：默认 Rust 运行面部署拓扑
 
 根 README 只保留入口信息。更细的部署参数、兼容边界、支付细节和 OAuth 说明，请直接看上面的对应文档。

@@ -73,9 +73,9 @@ python3 tools/scheduler_coverage_audit.py
 - 默认数据库初始化：Rust `/bootstrap/full`
 - 默认 Docker 基础栈：`gateway + mysql + redis`
 - 默认 `docker build .` 入口：Rust 网关镜像
-- 默认 Rust gateway 镜像不再复制 Laravel `app/`、`config/`、内置 PHP `plugins/` 与 theme source
-- 默认内置主题 catalog/template 由 Rust resources 提供，运行时只保留 public assets 与 `/app/state/theme` 用户可写主题目录
-- PHP 兼容镜像入口：`Dockerfile.php-compat`
+- 默认 `docker compose` 的 `gateway` 构建上下文：`rust-gateway/`
+- 默认 Rust gateway 镜像不再复制 Laravel `app/`、`config/`、内置 PHP `plugins/`、theme source、仓库根级 `resources/` 与 `public/`
+- 默认内置主题 catalog/template 与运行时静态资源都由 `rust-gateway/resources/**` 提供，运行时只保留 `/app/runtime/**` 与 `/app/state/**`
 - 内置插件调度审计：
   - `python3 tools/plugin_scheduler_audit.py`
   - 当前结果：`7` 个内置插件中，`0` 个覆写 `schedule()`，兼容面状态为 `dormant`
@@ -128,36 +128,18 @@ python3 tools/cli_surface_audit.py
 当前默认 Rust-first 部署口径已经进一步收紧为：
 
 - `.env.example`
-  - `QUEUE_CONNECTION=sync`
-  - `CORE_JOB_SYNC_EXECUTION=true`
-  - `PHP_HTTP_API_COMPAT=false`
-  - `PHP_WEB_COMPAT=false`
-  - `MAIL_SYNC_SEND=true`
-  - `TELEGRAM_SYNC_SEND=true`
+  - 不再暴露默认 PHP compat 路由、页面和同步执行开关
 - `docker-compose.yml`
   - 默认仅保留 `gateway + mysql + redis`
-- `docker-compose.compat.yml`
-  - 仅在需要基础 PHP 兼容层时叠加
-  - 显式恢复：
-    - `QUEUE_CONNECTION=redis`
-    - `CORE_JOB_SYNC_EXECUTION=false`
-    - `PHP_HTTP_API_COMPAT=true`
-    - `PHP_WEB_COMPAT=true`
-- `docker-compose.queue.yml`
-  - 仅在需要异步通知 / 批量发信时叠加
-- `docker-compose.scheduler.yml`
-  - 仅在需要极少数自定义 PHP 定时任务时叠加
-- `queue` / `scheduler`
-  - 已按后台 worker 职责单独成层
-  - 不再依赖 `php` Web compat 容器存活
-  - 默认也不再加载 PHP HTTP / Web 路由
+  - `gateway` 构建上下文已收缩到 `rust-gateway/`
+- Rust 默认镜像
+  - 仅复制 `rust-gateway/resources/**`
+  - 不再复制仓库根级 `resources/`、`public/`、`theme/portal/assets`
 
 含义：
 
-- 默认栈下，残留 PHP job 会优先同步执行，不再默认要求 Horizon worker
-- compat overlay 下，旧异步队列与 PHP 定时任务能力仍可按需保留，便于兼容回退与渐进迁移
-- 默认栈下，PHP API 路由默认也不再加载
-- 默认栈下，PHP 页面路由默认也不再加载
+- 默认栈下，PHP 兼容部署层已经不再作为受支持运行方式提供
+- 默认栈下，PHP API / Web compat 开关也不再作为默认部署入口暴露
 
 当前默认路径已经进一步收口：
 
@@ -170,8 +152,8 @@ python3 tools/cli_surface_audit.py
   - `TrafficFetchJob` / `StatUserJob` / `StatServerJob` / `UpdateAliveDataJob` 仅在 compat 异步模式下继续承担包装角色
 
 - 通知 / 批量发信：
-  - 默认 `MAIL_SYNC_SEND=true`
-  - 默认 `TELEGRAM_SYNC_SEND=true`
+  - `config/ops.php` 已固定为默认同步发送
+  - 不再通过环境变量暴露 PHP compat 发送模式切换
   - Rust admin `POST /api/v2/{admin_path}/user/sendMail` 已直接承接后台批量发信
   - Rust 公共 Telegram 广播能力已抽到共享模块：
     - `rust-gateway/src/telegram_notify_support.rs`
@@ -190,9 +172,7 @@ python3 tools/cli_surface_audit.py
   - 当前已切到 Rust 邮件链的工单通知包括：
     - 用户创建节点工单后通知对应管理员
     - 管理员 / 节点管理员回复工单后通知用户
-  - 当前仍保留异步队列价值的主要是：
-    - `SendEmailJob`
-    - `SendTelegramJob`
+  - `SendEmailJob` / `SendTelegramJob` 仅保留为历史兼容实现，不属于默认部署依赖
 - 定时任务兼容层：
   - 核心 scheduler 命令已由 Rust `16 / 16` 覆盖
   - 插件调度审计结果为 `dormant`
@@ -209,39 +189,19 @@ python3 tools/cli_surface_audit.py
   - `/api/v1/server/ShadowsocksTidalab/*`
   - `/api/v1/server/TrojanTidalab/*`
   - `/api/v1/server/UniProxy/*`
+  - `/`
+  - `/app`
+  - `/login/linux-do`
+  - `/{subscribe_path}/{token_or_path}`
+- Laravel 默认 `RouteServiceProvider` 已不再装载 `app/Http/Routes/V1` / `V2`
+- `routes/web.php` 已收缩为仅保留 `/healthz`
 
-因此默认部署下，legacy server 流量入口本身已经不需要 PHP 容器承载。
+因此默认部署下，legacy server 流量入口、页面入口和订阅入口都不再需要 PHP runtime 承载。
 
-当前工作树行为也已验证：
+当前保留下来的 PHP route 文件主要只承担两类作用：
 
-- `PHP_HTTP_API_COMPAT=false` 且 `PHP_SERVER_INGRESS_COMPAT=false`
-  - `php artisan route:list --path=api/v1/server`
-    - 无匹配路由
-  - `php artisan route:list --path=api/v2/server`
-    - 无匹配路由
-- `PHP_HTTP_API_COMPAT=true` 且 `PHP_SERVER_INGRESS_COMPAT=true`
-  - `api/v1/server/*`
-    - `ShadowsocksTidalab`
-    - `TrojanTidalab`
-    - `UniProxy`
-  - `api/v2/server/*`
-    - `UniProxy`
-
-这说明兼容 PHP API / server ingress 现在已经变成显式 opt-in，而不是默认并存面。
-
-页面入口当前工作树行为也已验证：
-
-- `PHP_WEB_COMPAT=false`
-  - `php artisan route:list --path=app`
-    - 无匹配路由
-  - `php artisan route:list --path=login/linux-do`
-    - 无匹配路由
-- `PHP_WEB_COMPAT=true`
-  - `GET /app`
-  - `GET /login/linux-do`
-  - 会重新出现
-
-这说明兼容 PHP 页面入口也已经变成显式 opt-in。
+- 作为 `tools/route_coverage_audit.py` 的历史语义基线
+- 作为后续彻底删除 PHP 代码前的对照来源
 
 最新运行证据：
 

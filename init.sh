@@ -19,51 +19,12 @@ Optional:
   --app-port PORT
   --env-file PATH
   --project-name NAME
-  --php-compat           Run the legacy PHP installer flow instead
 
 Examples:
   sh init.sh --admin-email admin@example.com --admin-password 'ChangeMe123!'
   sh init.sh --app-url https://example.com --admin-email admin@example.com --admin-password 'ChangeMe123!'
   sh init.sh --project-name notxboard-init-dev --admin-email admin@example.com --admin-password 'ChangeMe123!'
-  sh init.sh --php-compat
 EOF
-}
-
-run_php_compat_install() {
-  echo "Running legacy PHP compatibility installer..."
-
-  if [ ! -f "artisan" ]; then
-    echo "Please run this script from the project root."
-    exit 1
-  fi
-
-  if ! command -v php >/dev/null 2>&1; then
-    echo "PHP is required for --php-compat."
-    exit 1
-  fi
-
-  if command -v composer >/dev/null 2>&1; then
-    COMPOSER_CMD="composer"
-  else
-    if [ ! -f "composer.phar" ]; then
-      if command -v curl >/dev/null 2>&1; then
-        curl -sS https://getcomposer.org/installer | php
-      elif command -v wget >/dev/null 2>&1; then
-        wget -q -O composer-setup.php https://getcomposer.org/installer
-        php composer-setup.php
-        rm -f composer-setup.php
-      else
-        echo "curl or wget is required to download Composer."
-        exit 1
-      fi
-    fi
-    COMPOSER_CMD="php composer.phar"
-  fi
-
-  $COMPOSER_CMD install --no-dev --optimize-autoloader
-  php artisan storage:link || true
-  php artisan xboard:install
-  chmod -R 775 storage bootstrap/cache || true
 }
 
 ADMIN_EMAIL=""
@@ -73,7 +34,6 @@ APP_URL=""
 APP_PORT="${APP_PORT:-8000}"
 ENV_FILE=".env"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
-PHP_COMPAT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -105,10 +65,6 @@ while [ $# -gt 0 ]; do
       PROJECT_NAME="${2:-}"
       shift 2
       ;;
-    --php-compat)
-      PHP_COMPAT=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -121,11 +77,6 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
-
-if [ "$PHP_COMPAT" = "1" ]; then
-  run_php_compat_install
-  exit 0
-fi
 
 if [ ! -f "docker-compose.yml" ]; then
   echo "Please run this script from the project root."

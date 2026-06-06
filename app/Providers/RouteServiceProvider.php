@@ -92,10 +92,8 @@ class RouteServiceProvider extends ServiceProvider
      */
     public function map()
     {
-        $this->mapApiRoutes();
+        // The supported default HTTP surface now runs through rust-gateway.
         $this->mapWebRoutes();
-
-        //
     }
 
     /**
@@ -110,66 +108,5 @@ class RouteServiceProvider extends ServiceProvider
         Route::middleware('web')
             ->namespace($this->namespace)
             ->group(base_path('routes/web.php'));
-    }
-
-    /**
-     * Define the "api" routes for the application.
-     *
-     * These routes are typically stateless.
-     *
-     * @return void
-     */
-    protected function mapApiRoutes()
-    {
-        Route::group([
-            'prefix' => '/api/v1',
-            'middleware' => 'api',
-            'namespace' => $this->namespace
-        ], function ($router) {
-            foreach (glob(app_path('Http//Routes//V1') . '/*.php') as $file) {
-                if (!$this->shouldLoadPhpRouteFile($file)) {
-                    continue;
-                }
-                $this->app->make('App\\Http\\Routes\\V1\\' . basename($file, '.php'))->map($router);
-            }
-        });
-
-
-        Route::group([
-            'prefix' => '/api/v2',
-            'middleware' => 'api',
-            'namespace' => $this->namespace
-        ], function ($router) {
-            foreach (glob(app_path('Http//Routes//V2') . '/*.php') as $file) {
-                if (!$this->shouldLoadPhpRouteFile($file)) {
-                    continue;
-                }
-                $this->app->make('App\\Http\\Routes\\V2\\' . basename($file, '.php'))->map($router);
-            }
-        });
-    }
-
-    private function shouldLoadPhpRouteFile(string $file): bool
-    {
-        $basename = basename($file, '.php');
-        if (!$this->shouldLoadPhpApiCompatRoutes()) {
-            return false;
-        }
-        if ($basename !== 'ServerRoute') {
-            return true;
-        }
-
-        return filter_var(
-            (string) env('PHP_SERVER_INGRESS_COMPAT', false),
-            FILTER_VALIDATE_BOOLEAN
-        );
-    }
-
-    private function shouldLoadPhpApiCompatRoutes(): bool
-    {
-        return filter_var(
-            (string) env('PHP_HTTP_API_COMPAT', false),
-            FILTER_VALIDATE_BOOLEAN
-        );
     }
 }

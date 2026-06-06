@@ -17,10 +17,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp "${BIN_PATH}" "${BUILD_DIR}/notxboard-gateway"
-cp -R "${ROOT_DIR}/resources" "${BUILD_DIR}/resources"
-cp -R "${ROOT_DIR}/public" "${BUILD_DIR}/public"
-mkdir -p "${BUILD_DIR}/theme/portal"
-cp -R "${ROOT_DIR}/theme/portal/assets" "${BUILD_DIR}/theme/portal/assets"
+cp -R "${ROOT_DIR}/rust-gateway/resources" "${BUILD_DIR}/resources"
 
 cat > "${BUILD_DIR}/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
@@ -30,8 +27,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY notxboard-gateway /usr/local/bin/notxboard-gateway
 COPY resources /app/runtime/resources
-COPY public /app/runtime/public
-COPY theme/portal/assets /app/runtime/public/theme/portal/assets
+COPY resources/public /app/runtime/public
 RUN rm -f /app/runtime/public/theme/Maintainable/dashboard.blade.php /app/runtime/public/theme/Maintainable/config.json \
     && mkdir -p /app/state/theme /app/state/plugins
 ENV RUST_LOG=info

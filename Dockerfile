@@ -13,9 +13,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /workspace/rust-gateway/target/release/notxboard-gateway /usr/local/bin/notxboard-gateway
-COPY resources /app/runtime/resources
-COPY public /app/runtime/public
-COPY theme/portal/assets /app/runtime/public/theme/portal/assets
+COPY rust-gateway/resources /app/runtime/resources
+COPY rust-gateway/resources/public /app/runtime/public
 RUN rm -f /app/runtime/public/theme/Maintainable/dashboard.blade.php /app/runtime/public/theme/Maintainable/config.json \
     && mkdir -p /app/state/theme /app/state/plugins
 ENV RUST_LOG=info

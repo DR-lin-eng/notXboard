@@ -1,0 +1,9 @@
+{
+  "name": "Maintainable",
+  "title": "Maintainable UI",
+  "description": "A maintainable, server-hosted UI (no obfuscated SPA).",
+  "version": "0.1.0",
+  "author": "notXboard",
+  "configs": []
+}
+

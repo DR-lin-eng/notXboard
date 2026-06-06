@@ -1,9 +1,9 @@
 FROM rust:1.89-bookworm AS builder
 WORKDIR /workspace/rust-gateway
-COPY rust-gateway/Cargo.toml ./Cargo.toml
-COPY rust-gateway/Cargo.lock ./Cargo.lock
-COPY rust-gateway/src ./src
-COPY rust-gateway/resources ./resources
+COPY Cargo.toml ./Cargo.toml
+COPY Cargo.lock ./Cargo.lock
+COPY src ./src
+COPY resources ./resources
 ENV CARGO_BUILD_JOBS=1
 RUN cargo build --release -j 1
 
@@ -14,8 +14,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /workspace/rust-gateway/target/release/notxboard-gateway /usr/local/bin/notxboard-gateway
 COPY resources /app/runtime/resources
-COPY public /app/runtime/public
-COPY theme/portal/assets /app/runtime/public/theme/portal/assets
+COPY resources/public /app/runtime/public
 RUN rm -f /app/runtime/public/theme/Maintainable/dashboard.blade.php /app/runtime/public/theme/Maintainable/config.json \
     && mkdir -p /app/state/theme /app/state/plugins
 ENV RUST_LOG=info
