@@ -102,9 +102,7 @@ python3 tools/cli_surface_audit.py
 
 - legacy CLI 基线命令总数：`22`
 - 已有 Rust 等效能力：`22`
-- 仍然 PHP-only 的命令：`0`
-
-当前仍为 PHP-only 的手工命令：无
+- 冻结保留为兼容基线的命令：`22`
 
 结论：
 
@@ -118,75 +116,14 @@ python3 tools/cli_surface_audit.py
   - `POST /api/v2/{admin_path}/system/resetAllUserSecurity`
   - `POST /api/v2/{admin_path}/system/resetUserPassword`
 
-## 5. Next Migration Priority
+## 5. Current No-PHP State
 
-按当前审计结果，下一阶段最高优先级是：
+当前工作树已经达到以下状态：
 
-1. 把已 service 化的 legacy traffic / alive / order 路径继续推进到 Rust 等效实现
-   - `LegacyTrafficDispatchService`
-   - `OrderService::handleTradeNo(...)`
-2. 明确默认 legacy server 流量入口只应走 Rust router
-   - `ShadowsocksTidalab`
-   - `TrojanTidalab`
-   - `UniProxy`
-3. 量化并迁移插件调度兼容面
-
-## 6. Current Queue Compatibility Strategy
-
-当前默认 Rust-first 部署口径已经进一步收紧为：
-
-- `.env.example`
-  - 不再暴露默认 PHP compat 路由、页面和同步执行开关
-- `docker-compose.yml`
-  - 默认仅保留 `gateway + mysql + redis`
-  - `gateway` 构建上下文已收缩到 `rust-gateway/`
-- Rust 默认镜像
-  - 仅复制 `rust-gateway/resources/**`
-  - 不再复制仓库根级 `resources/`、`public/`、`theme/portal/assets`
-
-含义：
-
-- 默认栈下，PHP 兼容部署层已经完全退出受支持运行方式
-- 默认栈下，legacy API / Web compat 开关已经不再存在于源码树
-
-当前默认路径已经进一步收口：
-
-- 订单链：
-  - `OrderService::handleTradeNo(...)` 已成为默认执行入口
-  - `OrderHandleJob` 已从 legacy PHP 树移除
-- legacy submit / stat / alive：
-  - 已抽离到 `LegacyTrafficDispatchService`
-  - 默认路径已直接调用 service
-  - `TrafficFetchJob` / `StatUserJob` / `StatServerJob` / `UpdateAliveDataJob` 已从 legacy PHP 树移除
-
-- 通知 / 批量发信：
-  - `config/ops.php` 仅保留 `telegram_only_mode`
-  - PHP 邮件 / Telegram 兼容链已收口为同步执行
-  - Rust admin `POST /api/v2/{admin_path}/user/sendMail` 已直接承接后台批量发信
-  - Rust 公共 Telegram 广播能力已抽到共享模块：
-    - `rust-gateway/src/telegram_notify_support.rs`
-  - Rust 工单邮件通知能力已抽到共享模块：
-    - `rust-gateway/src/ticket_notify_support.rs`
-  - 当前已切到 Rust 广播链的 Telegram 通知包括：
-    - 运维告警 `ops_alert`
-    - 风险审查提醒 `risk_review`
-    - Rust 批量封禁后的 super-admin 通知
-    - Rust 后台公告发布 `notice.published`
-    - Rust 支付成功通知 `payment.success`
-  - Rust 退款链通知：
-      - `refund.vote.started`
-      - `refund.vote.cast`
-      - `refund.status.changed`
-  - 当前已切到 Rust 邮件链的工单通知包括：
-    - 用户创建节点工单后通知对应管理员
-    - 管理员 / 节点管理员回复工单后通知用户
-  - `SendEmailJob` / `SendTelegramJob` 已从 legacy PHP 树移除
-- 定时任务兼容层：
-  - 核心 scheduler 命令已由 Rust `16 / 16` 覆盖
-  - 插件调度审计结果为 `dormant`
-  - 因此 `scheduler` 服务当前更接近“极少数自定义 PHP 定时任务兼容层”
-
-这意味着当前仓库自带的 PHP 业务树、HTTP 层、命令层、provider 层、启动层和测试层都已从源码树移除。
+- 仓库自带的 PHP 业务树、HTTP 层、命令层、provider 层、启动层和测试层都已从源码树移除
+- 根级 `app/`、`config/`、`database/`、`resources/views/`、`theme/`、`plugins/` 中的 PHP 源文件已全部移除
+- `artisan`、`bootstrap/app.php`、`public/index.php`、`phpunit.xml`、`phpstan.neon`、`tools/php/` 已移除
+- 默认运行面仅保留 Rust 网关镜像、Rust 资源目录和冻结兼容基线
 
 同时，默认 Docker / Rust router 口径下：
 
