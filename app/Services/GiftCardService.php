@@ -3,13 +3,12 @@
 namespace App\Services;
 
 use App\Exceptions\ApiException;
-use App\Http\Resources\PlanResource;
 use App\Models\GiftCardCode;
 use App\Models\GiftCardTemplate;
 use App\Models\GiftCardUsage;
 use App\Models\Plan;
-use App\Models\TrafficResetLog;
 use App\Models\User;
+use App\Models\TrafficResetLog;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -282,7 +281,7 @@ class GiftCardService
         if ($this->template->type === GiftCardTemplate::TYPE_PLAN) {
             $plan = Plan::find($this->code->template->rewards['plan_id']);
             if ($plan) {
-                $info['plan_info'] = PlanResource::make($plan)->toArray(request());
+                $info['plan_info'] = $this->serializePlan($plan);
             }
         }
         return $info;
@@ -330,5 +329,172 @@ class GiftCardService
             'ip' => request()->ip(),
             'user_agent' => request()->userAgent(),
         ]);
+    }
+
+    private function serializePlan(Plan $plan): array
+    {
+        $visibilityScope = Plan::normalizeVisibilityScope($plan->visibility_scope ?? null);
+        $shareToken = (string) ($plan->share_token ?? '');
+
+        return [
+            'id' => $plan->id,
+            'scope' => $plan->scope ?? Plan::SCOPE_LEGACY,
+            'owner_user_id' => $plan->owner_user_id ?? null,
+            'owner_display_name' => $this->resolvePlanOwnerDisplayName($plan),
+            'owner' => $this->resolvePlanOwnerPayload($plan),
+            'min_trust_level' => $plan->min_trust_level ?? null,
+            'allow_trial' => $this->planHasTrialQuota($plan),
+            'free_quota_gb_by_trust_level' => $plan->free_quota_gb_by_trust_level ?? null,
+            'paid_quota_gb' => (int) ($plan->transfer_enable ?? 0),
+            'is_unlimited_traffic' => (bool) ($plan->is_unlimited_traffic ?? false),
+            'node_ids' => $plan->node_ids ?? null,
+            'visibility_scope' => $visibilityScope,
+            'access_user_ids' => $plan->access_user_ids ?? [],
+            'share_token' => $shareToken !== '' ? $shareToken : null,
+            'share_purchase_link' => $shareToken !== '' ? $this->buildPlanSharePurchaseLink($shareToken) : null,
+            'group_id' => $plan->group_id,
+            'name' => $plan->name,
+            'tags' => $plan->tags,
+            'content' => $this->formatPlanContent($plan),
+            ...$this->planPeriodPrices($plan),
+            'capacity_limit' => $this->formatPlanCapacityLimit($plan),
+            'transfer_enable' => $plan->transfer_enable,
+            'speed_limit' => $plan->speed_limit,
+            'device_limit' => $plan->device_limit,
+            'show' => (bool) $plan->show,
+            'sell' => (bool) $plan->sell,
+            'renew' => (bool) $plan->renew,
+            'reset_traffic_method' => $plan->reset_traffic_method,
+            'sort' => $plan->sort,
+            'created_at' => $plan->created_at,
+            'updated_at' => $plan->updated_at,
+        ];
+    }
+
+    private function planPeriodPrices(Plan $plan): array
+    {
+        $result = [];
+        foreach (Plan::LEGACY_PERIOD_MAPPING as $legacyPeriod => $newPeriod) {
+            $price = $plan->prices[$newPeriod] ?? null;
+            $result[$legacyPeriod] = $price !== null ? (float) $price * 100 : null;
+        }
+
+        return $result;
+    }
+
+    private function formatPlanCapacityLimit(Plan $plan): int|string|null
+    {
+        $limit = $plan->capacity_limit;
+
+        return match (true) {
+            $limit === null => null,
+            $limit <= 0 => __('Sold out'),
+            default => (int) $limit,
+        };
+    }
+
+    private function formatPlanContent(Plan $plan): string
+    {
+        $content = $plan->content ?? '';
+
+        $replacements = [
+            '{{transfer}}' => $plan->transfer_enable,
+            '{{speed}}' => $plan->speed_limit === null ? __('No Limit') : $plan->speed_limit,
+            '{{devices}}' => $plan->device_limit === null ? __('No Limit') : $plan->device_limit,
+            '{{reset_method}}' => $this->planResetMethodText($plan),
+        ];
+
+        return str_replace(array_keys($replacements), array_values($replacements), $content);
+    }
+
+    private function planResetMethodText(Plan $plan): string
+    {
+        $method = $plan->reset_traffic_method;
+        if ($method === Plan::RESET_TRAFFIC_FOLLOW_SYSTEM) {
+            $method = admin_setting('reset_traffic_method', Plan::RESET_TRAFFIC_MONTHLY);
+        }
+
+        return match ($method) {
+            Plan::RESET_TRAFFIC_FIRST_DAY_MONTH => __('First Day of Month'),
+            Plan::RESET_TRAFFIC_MONTHLY => __('Monthly'),
+            Plan::RESET_TRAFFIC_NEVER => __('Never'),
+            Plan::RESET_TRAFFIC_FIRST_DAY_YEAR => __('First Day of Year'),
+            Plan::RESET_TRAFFIC_YEARLY => __('Yearly'),
+            default => __('Monthly'),
+        };
+    }
+
+    private function planHasTrialQuota(Plan $plan): bool
+    {
+        $quota = $plan->free_quota_gb_by_trust_level ?? null;
+        if (!is_array($quota)) {
+            return false;
+        }
+
+        foreach ($quota as $value) {
+            if (is_numeric($value) && (float) $value > 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function buildPlanSharePurchaseLink(string $shareToken): string
+    {
+        $request = request();
+        $requestBase = method_exists($request, 'getSchemeAndHttpHost')
+            ? (string) $request->getSchemeAndHttpHost()
+            : '';
+        $base = rtrim((string) (admin_setting('app_url') ?: $requestBase), '/');
+
+        return $base . '/app/#/plan-link/' . rawurlencode($shareToken);
+    }
+
+    private function resolvePlanOwner(Plan $plan): ?User
+    {
+        $owner = $plan->owner ?? null;
+        return $owner instanceof User ? $owner : null;
+    }
+
+    private function resolvePlanOwnerDisplayName(Plan $plan): string
+    {
+        $owner = $this->resolvePlanOwner($plan);
+        if (!$owner) {
+            return '未知';
+        }
+
+        $linuxDoName = trim((string) ($owner->linux_do_name ?? ''));
+        if ($linuxDoName !== '') {
+            return $linuxDoName;
+        }
+
+        $linuxDoUsername = trim((string) ($owner->linux_do_username ?? ''));
+        if ($linuxDoUsername !== '') {
+            return $linuxDoUsername;
+        }
+
+        $email = trim((string) ($owner->email ?? ''));
+        if ($email !== '') {
+            return $email;
+        }
+
+        return '用户#' . (int) ($owner->id ?? 0);
+    }
+
+    private function resolvePlanOwnerPayload(Plan $plan): ?array
+    {
+        $owner = $this->resolvePlanOwner($plan);
+        if (!$owner) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $owner->id,
+            'email' => (string) ($owner->email ?? ''),
+            'linux_do_username' => (string) ($owner->linux_do_username ?? ''),
+            'linux_do_name' => (string) ($owner->linux_do_name ?? ''),
+            'display_name' => $this->resolvePlanOwnerDisplayName($plan),
+        ];
     }
 }
