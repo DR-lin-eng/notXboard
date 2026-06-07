@@ -169,16 +169,6 @@ return [
         /*
          * Application Service Providers...
          */
-        App\Providers\AuthServiceProvider::class,
-        // App\Providers\BroadcastServiceProvider::class,
-        App\Providers\EventServiceProvider::class,
-        App\Providers\HorizonServiceProvider::class,
-        App\Providers\SettingServiceProvider::class,
-        App\Providers\OctaneServiceProvider::class,
-        App\Providers\PluginServiceProvider::class,
-        App\Providers\ProtocolServiceProvider::class,
-        App\Providers\LinuxDoOAuthServiceProvider::class,
-
     ],
 
     /*
