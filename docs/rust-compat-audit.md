@@ -154,15 +154,15 @@ python3 tools/cli_surface_audit.py
 
 - 订单链：
   - `OrderService::handleTradeNo(...)` 已成为默认执行入口
-  - `OrderHandleJob` 仅保留为 compat 包装
+  - `OrderHandleJob` 已从 legacy PHP 树移除
 - legacy submit / stat / alive：
   - 已抽离到 `LegacyTrafficDispatchService`
-  - 默认路径会优先直接调用 service
-  - `TrafficFetchJob` / `StatUserJob` / `StatServerJob` / `UpdateAliveDataJob` 仅在 compat 异步模式下继续承担包装角色
+  - 默认路径已直接调用 service
+  - `TrafficFetchJob` / `StatUserJob` / `StatServerJob` / `UpdateAliveDataJob` 已从 legacy PHP 树移除
 
 - 通知 / 批量发信：
-  - `config/ops.php` 已固定为默认同步发送
-  - 不再通过环境变量暴露 PHP compat 发送模式切换
+  - `config/ops.php` 仅保留 `telegram_only_mode`
+  - PHP 邮件 / Telegram 兼容链已收口为同步执行
   - Rust admin `POST /api/v2/{admin_path}/user/sendMail` 已直接承接后台批量发信
   - Rust 公共 Telegram 广播能力已抽到共享模块：
     - `rust-gateway/src/telegram_notify_support.rs`
@@ -181,7 +181,7 @@ python3 tools/cli_surface_audit.py
   - 当前已切到 Rust 邮件链的工单通知包括：
     - 用户创建节点工单后通知对应管理员
     - 管理员 / 节点管理员回复工单后通知用户
-  - `SendEmailJob` / `SendTelegramJob` 仅保留为历史兼容实现，不属于默认部署依赖
+  - `SendEmailJob` / `SendTelegramJob` 已从 legacy PHP 树移除
 - 定时任务兼容层：
   - 核心 scheduler 命令已由 Rust `16 / 16` 覆盖
   - 插件调度审计结果为 `dormant`

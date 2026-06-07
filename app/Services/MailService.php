@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Jobs\SendEmailJob;
 use App\Models\MailLog;
 use App\Models\User;
 use App\Utils\CacheKey;
@@ -15,12 +14,7 @@ class MailService
 {
     public static function dispatchEmail(array $params, string $queue = 'send_email'): void
     {
-        if ((bool) config('ops.mail_sync_send')) {
-            self::sendEmail($params);
-            return;
-        }
-
-        SendEmailJob::dispatch($params, $queue);
+        self::sendEmail($params);
     }
 
     /**

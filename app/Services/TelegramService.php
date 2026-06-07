@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Exceptions\ApiException;
-use App\Jobs\SendTelegramJob;
 use App\Models\User;
 use App\Services\Plugin\HookManager;
 use Illuminate\Http\Client\PendingRequest;
@@ -164,17 +163,12 @@ class TelegramService
         array $options = [],
         ?array $context = null
     ): void {
-        if ((bool) config('ops.telegram_sync_send', false)) {
-            if (is_array($context) && !empty($context)) {
-                $this->sendContextMessage($chatId, $text, $context, $parseMode, $options);
-                return;
-            }
-
-            $this->sendMessage($chatId, $text, $parseMode, $options);
+        if (is_array($context) && !empty($context)) {
+            $this->sendContextMessage($chatId, $text, $context, $parseMode, $options);
             return;
         }
 
-        SendTelegramJob::dispatch($chatId, $text, $parseMode, $options, $context);
+        $this->sendMessage($chatId, $text, $parseMode, $options);
     }
 
     public function sendMessageWithAdmin(
