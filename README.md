@@ -8,14 +8,14 @@ notXboard 是一个面向共享节点平台场景的增强版 XBoard。
 - 个人管理员：管理自己负责的节点、节点套餐、节点工单、节点访问控制
 - 超级管理员：管理全局配置、支付方式、争议裁决、系统任务与平台运营
 
-当前仓库已经默认转向 `Rust gateway + Docker` 运行面，默认部署、默认构建和默认运行路径都不再依赖 PHP 兼容层。
+当前仓库已经完成 Rust-only 运行面收口，默认部署、默认构建、默认运行路径以及仓库自带源码都不再依赖 PHP。
 
 ## 当前推荐架构
 
 - 默认基础栈：`gateway + mysql + redis`
 - 根级 [Dockerfile](/Volumes/移动/一些资料文档/notXboard/Dockerfile:1) 与 [rust-gateway/Dockerfile](/Volumes/移动/一些资料文档/notXboard/rust-gateway/Dockerfile:1) 都构建 Rust 网关镜像
 - 默认 `docker compose` 已直接以 `rust-gateway/` 自身作为 `gateway` 构建上下文
-- 默认未命中路由不会隐式回退到 PHP
+- 默认未命中路由不会隐式回退到旧运行时
 
 ## 快速开始
 
@@ -88,11 +88,9 @@ curl -X POST "http://127.0.0.1:${APP_PORT}/bootstrap/full" \
 
 - Docker 部署：[`docs/deployment-docker.md`](/Volumes/移动/一些资料文档/notXboard/docs/deployment-docker.md:1)
 - EPay 兼容支付说明：[`docs/epay.md`](/Volumes/移动/一些资料文档/notXboard/docs/epay.md:1)
-- Linux DO OAuth 集成：[`docs/LINUX_DO_OAUTH_INTEGRATION.md`](/Volumes/移动/一些资料文档/notXboard/docs/LINUX_DO_OAUTH_INTEGRATION.md:1)
-- Rust / PHP 兼容面审计：[`docs/rust-compat-audit.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-compat-audit.md:1)
+- Rust 兼容面审计：[`docs/rust-compat-audit.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-compat-audit.md:1)
 - Rust 性能与运行说明：[`docs/rust-performance-notes.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-performance-notes.md:1)
 - 默认栈验证清单：[`docs/rust-verification-checklist.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-verification-checklist.md:1)
-- Rust schema 基线说明：[`docs/rust-schema-baseline.md`](/Volumes/移动/一些资料文档/notXboard/docs/rust-schema-baseline.md:1)
 
 ## 开发与验证
 
@@ -112,8 +110,7 @@ docker compose config
 如果你在做默认运行面相关工作，建议先确认自己改的是哪一层：
 
 - `rust-gateway/`：默认在线入口、默认页面、默认后台任务
-- `app/` / `routes/` / `resources/views/`：仍待清理的 PHP 历史代码面
-- `theme/portal/`：前端静态资源
+- `tools/compat_baselines/`：冻结的 legacy 路由 / scheduler / CLI 基线
 - `docker-compose.yml`：默认 Rust 运行面部署拓扑
 
 根 README 只保留入口信息。更细的部署参数、兼容边界、支付细节和 OAuth 说明，请直接看上面的对应文档。

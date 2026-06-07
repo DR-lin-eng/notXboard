@@ -6,7 +6,7 @@
 
 ## 配置位置
 
-在后台“支付方式”中启用插件 `EPay/易支付`，按表单填写配置项。默认 Rust 栈的内置插件元数据来自 `rust-gateway/resources/plugins/builtin_plugins.json`；PHP `plugins/Epay` 仅作为兼容层源码保留。
+在后台“支付方式”中启用插件 `EPay/易支付`，按表单填写配置项。默认 Rust 栈的内置插件元数据来自 `rust-gateway/resources/plugins/builtin_plugins.json`。
 
 ## 参数说明（提交）
 

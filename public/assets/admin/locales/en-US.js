@@ -2997,8 +2997,8 @@ window.Portal_TRANSLATIONS['en-US'] = {
       "rememberMe": "Remember me",
       "resetPassword": {
         "title": "Reset Password",
-        "description": "Execute the following command in the site directory to reset your password",
-        "command": "php artisan reset:password admin-email"
+        "description": "Use the admin system password reset action or redeploy with a new admin password",
+        "command": "Admin system reset password action"
       },
       "validation": {
         "emailRequired": "Please enter your email address",

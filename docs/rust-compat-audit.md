@@ -1,6 +1,6 @@
 # Rust Compatibility Audit
 
-本文件用于量化 notXboard 从 PHP 底层向 Rust 底层迁移后的剩余兼容面。
+本文件用于量化 notXboard 完成 Rust-only 收口后保留的兼容基线。
 
 ## 1. HTTP Route Coverage
 
@@ -83,11 +83,10 @@ python3 tools/scheduler_coverage_audit.py
 - 内置插件调度审计：
   - `python3 tools/plugin_scheduler_audit.py`
   - 当前结果：`7` 个内置插件中，`0` 个覆写 `schedule()`，兼容面状态为 `dormant`
-- PHP 兼容 profile 主要仍用于：
-  - 少量尚未迁移的非 HTTP / 非核心 scheduler 兼容面
-  - 将来可能新增的插件自定义调度
+- 仓库自带 PHP 源码：`0`
+- 剩余 legacy 语义仅保留为冻结基线、兼容格式和历史运行证据
 
-## 4. PHP CLI Surface
+## 4. Legacy CLI Surface
 
 审计脚本：
 
@@ -101,7 +100,7 @@ python3 tools/cli_surface_audit.py
 
 当前结果：
 
-- PHP artisan 命令总数：`22`
+- legacy CLI 基线命令总数：`22`
 - 已有 Rust 等效能力：`22`
 - 仍然 PHP-only 的命令：`0`
 
@@ -109,7 +108,7 @@ python3 tools/cli_surface_audit.py
 
 结论：
 
-- 当前 PHP artisan 命令面已全部具备 Rust runtime/API/scheduler 等效能力。
+- 当前 legacy CLI 基线已全部具备 Rust runtime/API/scheduler 等效能力。
 - 审计优先读取 `tools/compat_baselines/cli_commands.json` 中固化的 CLI 基线。
 - 默认在线请求链路、默认数据库初始化链路、核心定时任务链路都已不再依赖 PHP artisan 命令。
 - 已新增的 Rust maintenance 入口包括：
@@ -147,8 +146,8 @@ python3 tools/cli_surface_audit.py
 
 含义：
 
-- 默认栈下，PHP 兼容部署层已经不再作为受支持运行方式提供
-- 默认栈下，PHP API / Web compat 开关也不再作为默认部署入口暴露
+- 默认栈下，PHP 兼容部署层已经完全退出受支持运行方式
+- 默认栈下，legacy API / Web compat 开关已经不再存在于源码树
 
 当前默认路径已经进一步收口：
 
@@ -187,8 +186,7 @@ python3 tools/cli_surface_audit.py
   - 插件调度审计结果为 `dormant`
   - 因此 `scheduler` 服务当前更接近“极少数自定义 PHP 定时任务兼容层”
 
-这意味着当前剩余 PHP 底层面，已经从“默认直接依赖 Laravel queue job”
-收缩为“默认仍通过少量 PHP service 执行 legacy 业务逻辑”。
+这意味着当前仓库自带的 PHP 业务树、HTTP 层、命令层、provider 层、启动层和测试层都已从源码树移除。
 
 同时，默认 Docker / Rust router 口径下：
 
@@ -202,15 +200,14 @@ python3 tools/cli_surface_audit.py
   - `/app`
   - `/login/linux-do`
   - `/{subscribe_path}/{token_or_path}`
-- Laravel 默认应用注册已不再包含 `RouteServiceProvider`
-- 默认 Rust 运行面已不再保留 `routes/web.php`
+- Laravel 默认应用注册与启动入口已从仓库移除
+- 默认 Rust 运行面已不再保留 `routes/web.php` / `artisan` / `public/index.php`
 
 因此默认部署下，legacy server 流量入口、页面入口和订阅入口都不再需要 PHP runtime 承载。
 
-当前保留下来的 PHP route 文件主要只承担两类作用：
+当前保留下来的 legacy route / scheduler / CLI 语义只承担一类作用：
 
-- 作为 `tools/compat_baselines/php_routes.json.gz.b64` 的历史语义来源
-- 作为后续彻底删除 PHP 代码前的对照来源
+- 作为 `tools/compat_baselines/*` 中冻结基线的来源
 
 最新运行证据：
 

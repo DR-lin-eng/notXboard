@@ -2119,8 +2119,8 @@ window.Portal_TRANSLATIONS['ko-KR'] = {
       "rememberMe": "로그인 상태 유지",
       "resetPassword": {
         "title": "비밀번호 재설정",
-        "description": "비밀번호를 재설정하려면 사이트 디렉토리에서 다음 명령을 실행하세요",
-        "command": "php artisan reset:password 관리자-이메일"
+        "description": "관리자 시스템의 비밀번호 재설정 기능을 사용하거나 재배포 시 새 관리자 비밀번호를 설정하세요",
+        "command": "관리자 시스템 비밀번호 재설정"
       },
       "validation": {
         "emailRequired": "이메일을 입력해주세요",

@@ -2963,8 +2963,8 @@ window.Portal_TRANSLATIONS['zh-CN'] = {
       "rememberMe": "记住我",
       "resetPassword": {
         "title": "重置密码",
-        "description": "在站点目录下执行以下命令找回密码",
-        "command": "php artisan reset:password 管理员邮箱"
+        "description": "请使用后台系统重置密码功能，或重新部署时写入新的管理员密码",
+        "command": "后台系统重置密码"
       },
       "validation": {
         "emailRequired": "请输入邮箱地址",
