@@ -15,8 +15,7 @@ WORKDIR /app
 COPY --from=builder /workspace/rust-gateway/target/release/notxboard-gateway /usr/local/bin/notxboard-gateway
 COPY resources /app/runtime/resources
 COPY resources/public /app/runtime/public
-RUN rm -f /app/runtime/public/theme/Maintainable/dashboard.blade.php /app/runtime/public/theme/Maintainable/config.json \
-    && mkdir -p /app/state/theme /app/state/plugins
+RUN mkdir -p /app/state/theme /app/state/plugins
 ENV RUST_LOG=info
 ENV RUST_RUNTIME_ROOT=/app/runtime
 ENV RUST_STATE_ROOT=/app/state

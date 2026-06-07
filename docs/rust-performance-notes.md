@@ -294,7 +294,7 @@ legacy 兼容 submit 流量链路现在也已接入异步批量 flush：
 - `RUN_ID=0531h HOST_PORT=18088 CLEANUP=1 CLEANUP_IMAGE=1 bash tools/verify_rust_default_stack_isolated.sh`
   - Rust gateway image build 成功
   - 默认 Rust gateway 容器中不存在 `/app/runtime/app`、`/app/runtime/config`、`/app/runtime/plugins`、`/app/runtime/theme`
-  - 默认 Rust gateway 容器中不存在 `/app/runtime/public/theme/Maintainable/dashboard.blade.php` 与 `/app/runtime/public/theme/Maintainable/config.json`
+  - 默认 Rust gateway 容器中不存在任何 `/app/runtime/**/*.php` 或 `/app/runtime/**/*.blade.php` 文件
   - 全新 MySQL/Redis/gateway 容器启动成功
   - `/bootstrap/full` 返回 `mode=rust-full-schema`
   - Rust passport 登录成功

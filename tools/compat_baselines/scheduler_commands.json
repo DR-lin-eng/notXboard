@@ -1,0 +1,66 @@
+[
+  {
+    "command": "xboard:statistics",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "check:order",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "check:commission",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "check:ticket",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "check:server",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "reset:traffic",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "reset:log",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "subscription:rotate-credentials",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "send:remindMail",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "horizon:snapshot",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "cleanup:expired-online-status",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "cleanup:expired-node-sessions",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "oauth:sync-linux-do-users",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "refunds:finalize-votes",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "review:user-risk",
+    "source": "app/Console/Kernel.php"
+  },
+  {
+    "command": "backup:database",
+    "source": "app/Console/Kernel.php"
+  }
+]

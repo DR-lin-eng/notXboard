@@ -1,0 +1,90 @@
+[
+  {
+    "signature": "backup:database {upload?}",
+    "source": "app/Console/Commands/BackupDatabase.php"
+  },
+  {
+    "signature": "check:commission",
+    "source": "app/Console/Commands/CheckCommission.php"
+  },
+  {
+    "signature": "check:order",
+    "source": "app/Console/Commands/CheckOrder.php"
+  },
+  {
+    "signature": "check:server",
+    "source": "app/Console/Commands/CheckServer.php"
+  },
+  {
+    "signature": "check:ticket",
+    "source": "app/Console/Commands/CheckTicket.php"
+  },
+  {
+    "signature": "cleanup:expired-node-sessions {--minutes=10 : Consider sessions expired after N minutes}",
+    "source": "app/Console/Commands/CleanupExpiredNodeSessions.php"
+  },
+  {
+    "signature": "cleanup:expired-online-status",
+    "source": "app/Console/Commands/CleanupExpiredOnlineStatus.php"
+  },
+  {
+    "signature": "clear:user",
+    "source": "app/Console/Commands/ClearUser.php"
+  },
+  {
+    "signature": "log:export {days=1 : The number of days to export logs for}",
+    "source": "app/Console/Commands/ExportV2Log.php"
+  },
+  {
+    "signature": "refunds:finalize-votes {--limit=200}",
+    "source": "app/Console/Commands/FinalizeRefundVotes.php"
+  },
+  {
+    "signature": "hook:list",
+    "source": "app/Console/Commands/HookList.php"
+  },
+  {
+    "signature": "reset:log",
+    "source": "app/Console/Commands/ResetLog.php"
+  },
+  {
+    "signature": "reset:password {email} {password?}",
+    "source": "app/Console/Commands/ResetPassword.php"
+  },
+  {
+    "signature": "reset:traffic {--fix-null : 修正模式，重新计算next_reset_at为null的用户} {--force : 强制模式，重新计算所有用户的重置时间}",
+    "source": "app/Console/Commands/ResetTraffic.php"
+  },
+  {
+    "signature": "reset:user",
+    "source": "app/Console/Commands/ResetUser.php"
+  },
+  {
+    "signature": "review:user-risk {--force : 忽略时间间隔立即执行} {--limit= : 本次最多扫描的共享 IP 数量}",
+    "source": "app/Console/Commands/ReviewUserRisk.php"
+  },
+  {
+    "signature": "subscription:rotate-credentials",
+    "source": "app/Console/Commands/RotateSubscriptionCredentials.php"
+  },
+  {
+    "signature": "send:remindMail \n                            {--chunk-size=500 : 每批处理的用户数量}\n                            {--force : 强制执行，跳过确认}",
+    "source": "app/Console/Commands/SendRemindMail.php"
+  },
+  {
+    "signature": "oauth:sync-linux-do-users {--chunk=200 : Chunk size}",
+    "source": "app/Console/Commands/SyncLinuxDoUsers.php"
+  },
+  {
+    "signature": "test\n        {--filter= : Only run tests matching the given pattern}\n        {--testsuite= : Only run the given testsuite}\n        {--stop-on-failure : Stop after the first failure}",
+    "source": "app/Console/Commands/Test.php"
+  },
+  {
+    "signature": "xboard:install",
+    "source": "app/Console/Commands/XboardInstall.php"
+  },
+  {
+    "signature": "xboard:statistics",
+    "source": "app/Console/Commands/XboardStatistics.php"
+  }
+]

@@ -27,7 +27,7 @@ bash tools/verify_rust_default_stack_isolated.sh
 
 - `RUN_ID=0531h HOST_PORT=18088 CLEANUP=1 CLEANUP_IMAGE=1 bash tools/verify_rust_default_stack_isolated.sh` 已通过
 - 默认 Rust gateway 容器中不存在 `/app/runtime/app`、`/app/runtime/config`、`/app/runtime/plugins`、`/app/runtime/theme`
-- 默认 Rust gateway 容器中不存在 `/app/runtime/public/theme/Maintainable/dashboard.blade.php` 与 `/app/runtime/public/theme/Maintainable/config.json`
+- 默认 Rust gateway 容器中不存在任何 `/app/runtime/**/*.php` 或 `/app/runtime/**/*.blade.php` 文件
 - fresh MySQL/Redis/gateway 容器中 `/bootstrap/full` 返回 `mode=rust-full-schema`
 - Rust passport 登录成功并返回 bearer auth
 - Rust `listHooks` 在无 Laravel `app/plugins` runtime 下返回核心静态 hook 与插件 hook

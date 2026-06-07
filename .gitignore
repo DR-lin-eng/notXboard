@@ -36,3 +36,4 @@ compose.yaml
 .composer
 .kiro
 rust-gateway/target
+tools/__pycache__/

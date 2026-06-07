@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Audit scheduled Laravel console commands against the current Rust-owned
+Audit the frozen legacy scheduler baseline against the current Rust-owned
 background scheduler implementation.
 
-This focuses on the core command schedule declared in `app/Console/Kernel.php`.
+This prefers `tools/compat_baselines/scheduler_commands.json` when present.
 Plugin-defined schedules remain a separate compatibility surface.
 """
 
@@ -45,9 +45,14 @@ CORE_RUST_SCHEDULER_COVERAGE = {
     "review:user-risk": "risk_review_support::run_scheduled_risk_review",
     "backup:database": "backup_support::run_scheduled_database_backup",
 }
+SCHEDULER_BASELINE_PATH = Path("tools/compat_baselines/scheduler_commands.json")
 
 
 def parse_kernel_schedule(root: Path) -> list[str]:
+    baseline = load_scheduler_baseline(root)
+    if baseline is not None:
+        return [item["command"] for item in baseline]
+
     kernel = root / "app" / "Console" / "Kernel.php"
     commands: list[str] = []
     for line in kernel.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -60,15 +65,27 @@ def parse_kernel_schedule(root: Path) -> list[str]:
     return commands
 
 
+def load_scheduler_baseline(root: Path) -> list[dict[str, str]] | None:
+    path = root / SCHEDULER_BASELINE_PATH
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def audit_scheduler(root: Path) -> dict[str, object]:
-    commands = parse_kernel_schedule(root)
+    baseline = load_scheduler_baseline(root)
+    commands = [item["command"] for item in baseline] if baseline is not None else parse_kernel_schedule(root)
     results: list[ScheduledCommand] = []
     for command in commands:
         rust_coverage = CORE_RUST_SCHEDULER_COVERAGE.get(command)
         results.append(
             ScheduledCommand(
                 command=command,
-                source="app/Console/Kernel.php",
+                source=(
+                    next((item["source"] for item in baseline if item["command"] == command), "app/Console/Kernel.php")
+                    if baseline is not None
+                    else "app/Console/Kernel.php"
+                ),
                 rust_coverage=rust_coverage,
                 status="covered" if rust_coverage else "missing",
             )

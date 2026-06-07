@@ -141,8 +141,8 @@ docker run -d --rm \
 
 wait_for_http "http://127.0.0.1:${HOST_PORT}/bootstrap/status" 90
 
-echo "[5/12] verify Rust runtime excludes Laravel app/config/plugins/theme sources"
-docker exec "${GATEWAY_CONTAINER}" sh -c 'test ! -e /app/runtime/app && test ! -e /app/runtime/config && test ! -e /app/runtime/plugins && test ! -e /app/runtime/theme && test ! -e /app/runtime/public/theme/Maintainable/dashboard.blade.php && test ! -e /app/runtime/public/theme/Maintainable/config.json && test -f /app/runtime/public/theme/portal/assets/umi.js'
+echo "[5/12] verify Rust runtime excludes Laravel app/config/plugins/theme sources and PHP artifacts"
+docker exec "${GATEWAY_CONTAINER}" sh -c 'test ! -e /app/runtime/app && test ! -e /app/runtime/config && test ! -e /app/runtime/plugins && test ! -e /app/runtime/theme && test -z "$(find /app/runtime -type f \( -name "*.php" -o -name "*.blade.php" \) -print -quit)" && test -f /app/runtime/public/theme/portal/assets/umi.js'
 
 echo "[6/12] bootstrap full schema through Rust"
 curl -fsS -X POST "http://127.0.0.1:${HOST_PORT}/bootstrap/full" \

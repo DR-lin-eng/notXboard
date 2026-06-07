@@ -189,7 +189,7 @@ fn theme_template_exists(name: &str) -> bool {
 
 fn theme_template_path(name: &str) -> Option<std::path::PathBuf> {
     let source = theme_source_path(name)?;
-    let path = source.join("dashboard.blade.php");
+    let path = source.join("dashboard.html");
     path.is_file().then_some(path)
 }
 
@@ -354,7 +354,7 @@ fn scan_theme_root(root: std::path::PathBuf, is_system: bool, current_theme: &st
             continue;
         }
         let config_path = dir.join("config.json");
-        let dashboard_path = dir.join("dashboard.blade.php");
+        let dashboard_path = dir.join("dashboard.html");
         if !config_path.exists() || !dashboard_path.exists() {
             continue;
         }

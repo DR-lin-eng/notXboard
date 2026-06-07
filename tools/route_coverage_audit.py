@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Audit HTTP route coverage between the legacy PHP route declarations and the
+Audit HTTP route coverage between the frozen legacy route baseline and the
 current Rust gateway registrations.
 
 This is intentionally lightweight and repo-local:
 - no third-party dependencies
 - path/method coverage only
 - treats `/api/v2/{admin_path}/...` as the normalized secure-admin surface
+- prefers `tools/compat_baselines/php_routes.json.gz.b64` when present
 """
 
 from __future__ import annotations
 
+import base64
 import argparse
+import gzip
 import json
 import re
 from collections import Counter, defaultdict
@@ -25,6 +28,7 @@ ROUTE_PATH_RE = re.compile(r"\$[A-Za-z_]\w*->(?:get|post|put|delete|any|match)\(
 STRING_RE = re.compile(r"'([^']*)'")
 PREFIX_VALUE_RE = re.compile(r"'prefix'\s*=>\s*(.+?)(?:,|\])")
 RUST_ROUTE_PATH_RE = re.compile(r'\.route\("([^"]+)",')
+ROUTE_BASELINE_PATH = Path("tools/compat_baselines/php_routes.json.gz.b64")
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,10 @@ def normalize_php_route_path(version: str, prefixes: list[str], route_path: str)
 
 
 def parse_php_routes(root: Path) -> list[RouteRecord]:
+    baseline = load_php_route_baseline(root)
+    if baseline is not None:
+        return baseline
+
     records: list[RouteRecord] = []
     for version_dir in sorted((root / "app" / "Http" / "Routes").iterdir()):
         if not version_dir.is_dir():
@@ -71,6 +79,23 @@ def parse_php_routes(root: Path) -> list[RouteRecord]:
         for path in sorted(version_dir.glob("*.php")):
             records.extend(parse_php_route_file(root, version, path))
     return records
+
+
+def load_php_route_baseline(root: Path) -> list[RouteRecord] | None:
+    path = root / ROUTE_BASELINE_PATH
+    if not path.is_file():
+        return None
+
+    encoded = "".join(line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    payload = json.loads(gzip.decompress(base64.b64decode(encoded)).decode("utf-8"))
+    return [
+        RouteRecord(
+            method=item["method"],
+            path=item["path"],
+            source=item["source"],
+        )
+        for item in payload
+    ]
 
 
 def parse_php_route_file(root: Path, version: str, path: Path) -> list[RouteRecord]:

@@ -116,7 +116,7 @@ async fn build_login_linux_do_page_response(
 ) -> Result<Response<Body>, Response<Body>> {
     enforce_safe_mode_host(state, headers).await?;
 
-    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/login-linux-do.blade.php"))
+    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/login-linux-do.html"))
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "load login page failed"))?;
 
     Ok(Response::builder()
@@ -136,7 +136,7 @@ async fn build_public_dashboard_page_response(
     let version = read_env_fallback("APP_VERSION", "1.0.0");
     let description = read_setting_from_db(state, "app_description", "Secure access portal").await;
 
-    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/public-dashboard.blade.php"))
+    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/public-dashboard.html"))
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "load public dashboard failed"))?;
 
     let rendered = template
@@ -160,7 +160,7 @@ async fn build_admin_page_response(
     let title = read_setting_from_db(state, "app_name", "Portal").await;
     let version = read_env_fallback("APP_VERSION", "1.0.0");
     let logo = read_setting_from_db(state, "logo", "").await;
-    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/admin.blade.php"))
+    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/admin.html"))
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "load admin page failed"))?;
     let rendered = template
         .replace("{{ $title }}", &escape_html(&title))
@@ -185,7 +185,7 @@ async fn build_admin_command_center_page_response(
     let version = read_env_fallback("APP_VERSION", "1.0.0");
     let logo = read_setting_from_db(state, "logo", "").await;
     let description = read_setting_from_db(state, "app_description", "Super admin command center").await;
-    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/admin-command-center.blade.php"))
+    let template = std::fs::read_to_string(crate::runtime_paths::resources_path("views/admin-command-center.html"))
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "load command center page failed"))?;
     let rendered = template
         .replace("{{ $title }}", &escape_html(&title))

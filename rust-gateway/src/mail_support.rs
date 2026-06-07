@@ -150,7 +150,7 @@ fn render_mail_template(
     template_name: &str,
     values: &Value,
 ) -> Result<String, String> {
-    let path = crate::runtime_paths::resources_path(format!("views/mail/{variant}/{template_name}.blade.php"));
+    let path = crate::runtime_paths::resources_path(format!("views/mail/{variant}/{template_name}.html"));
     let template = std::fs::read_to_string(&path)
         .map_err(|err| format!("load mail template failed: {}: {err}", path.display()))?;
 

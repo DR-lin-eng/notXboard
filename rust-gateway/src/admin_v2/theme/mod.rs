@@ -286,8 +286,8 @@ fn extract_theme_archive(bytes: &bytes::Bytes) -> Result<ExtractedTheme, Respons
         .next()
         .ok_or_else(|| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Theme config file not found"})))?;
 
-    if !theme_dir.join("dashboard.blade.php").exists() {
-        return Err(json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Missing required theme file: dashboard.blade.php"})));
+    if !theme_dir.join("dashboard.html").exists() {
+        return Err(json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Missing required theme file: dashboard.html"})));
     }
 
     let raw = std::fs::read_to_string(theme_dir.join("config.json"))

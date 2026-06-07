@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Audit the remaining PHP artisan command surface against current Rust-owned
+Audit the frozen legacy PHP artisan command baseline against current Rust-owned
 runtime equivalents.
 
 This focuses on operational meaning, not strict 1:1 CLI UX parity:
 - "covered" means the capability has a Rust runtime/API/scheduler equivalent
 - "missing" means the capability is still PHP-only or manual-PHP oriented
+- prefers `tools/compat_baselines/cli_commands.json` when present
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ RUST_COVERAGE = {
     "xboard:install": "Rust bootstrap APIs: /bootstrap/status /bootstrap/minimal /bootstrap/full",
     "xboard:statistics": "Rust scheduler: run_daily_statistics",
 }
+CLI_BASELINE_PATH = Path("tools/compat_baselines/cli_commands.json")
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,18 @@ class CliCommandAudit:
 
 
 def parse_php_commands(root: Path) -> list[CliCommandAudit]:
+    baseline = load_cli_baseline(root)
+    if baseline is not None:
+        return [
+            CliCommandAudit(
+                signature=item["signature"],
+                source=item["source"],
+                rust_coverage=RUST_COVERAGE.get(item["signature"].split()[0]),
+                status="covered" if RUST_COVERAGE.get(item["signature"].split()[0]) else "missing",
+            )
+            for item in baseline
+        ]
+
     records: list[CliCommandAudit] = []
     for path in sorted((root / "app" / "Console" / "Commands").glob("*.php")):
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -72,6 +86,13 @@ def parse_php_commands(root: Path) -> list[CliCommandAudit]:
             )
         )
     return records
+
+
+def load_cli_baseline(root: Path) -> list[dict[str, str]] | None:
+    path = root / CLI_BASELINE_PATH
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def build_report(root: Path) -> dict[str, object]:

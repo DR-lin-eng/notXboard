@@ -5,8 +5,8 @@ pub(crate) const MAINTAINABLE_THEME_NAME: &str = "Maintainable";
 pub(crate) const PORTAL_THEME_NAME: &str = "portal";
 
 const BUILTIN_THEMES_JSON: &str = include_str!("../resources/themes/builtin_themes.json");
-const MAINTAINABLE_TEMPLATE: &str = include_str!("../resources/themes/Maintainable/dashboard.blade.php");
-const PORTAL_TEMPLATE: &str = include_str!("../resources/themes/portal/dashboard.blade.php");
+const MAINTAINABLE_TEMPLATE: &str = include_str!("../resources/themes/Maintainable/dashboard.html");
+const PORTAL_TEMPLATE: &str = include_str!("../resources/themes/portal/dashboard.html");
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct BuiltinThemeConfig {

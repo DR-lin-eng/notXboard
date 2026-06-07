@@ -19,7 +19,7 @@ python3 tools/route_coverage_audit.py
 
 结论：
 
-- 当前 PHP `app/Http/Routes/V1` 与 `app/Http/Routes/V2` 的有效 HTTP 路由面，已全部映射到 Rust 网关。
+- 当前 legacy HTTP 路由基线已固化到 `tools/compat_baselines/php_routes.json.gz.b64`，并已全部映射到 Rust 网关。
 - Rust 网关已不再依赖 PHP 路由 fallback 才能提供现有 HTTP 接口。
 - Rust router fallback 已拆到 `rust-gateway/src/fallback_support.rs`，默认只处理 Rust 动态页面补偿或返回 Rust 404，不再保留隐式 `proxy_to_php` 语义。
 
@@ -31,15 +31,19 @@ python3 tools/route_coverage_audit.py
 python3 tools/scheduler_coverage_audit.py
 ```
 
+当前 scheduler 基线来源：
+
+- `tools/compat_baselines/scheduler_commands.json`
+
 当前结果：
 
-- Laravel `Kernel.php` 核心调度命令：`16`
+- legacy 核心调度基线命令：`16`
 - Rust 已覆盖：`16`
 - 核心调度缺口：`0`
 
 说明：
 
-- 该审计仅统计 `app/Console/Kernel.php` 中显式声明的核心调度命令。
+- 该审计优先读取 `tools/compat_baselines/scheduler_commands.json` 中固化的核心调度基线。
 - `PluginManager::registerPluginSchedules($schedule)` 注册的插件调度仍属于单独兼容面，未在此统计中展开。
 - 新增的 Rust 原生数据库备份链位于 `rust-gateway/src/backup_support.rs`。
 - 手动触发入口位于 Rust admin system API：
@@ -53,7 +57,7 @@ python3 tools/scheduler_coverage_audit.py
   - 2026-05-31 隔离运行证据：
     - `RUN_ID=0531h HOST_PORT=18088 CLEANUP=1 CLEANUP_IMAGE=1 bash tools/verify_rust_default_stack_isolated.sh`
     - 默认 Rust gateway 镜像内不存在 `/app/runtime/app`、`/app/runtime/config`、`/app/runtime/plugins`、`/app/runtime/theme`
-    - 默认 Rust gateway 镜像内不存在 `/app/runtime/public/theme/Maintainable/dashboard.blade.php` 与 `/app/runtime/public/theme/Maintainable/config.json`
+    - 默认 Rust gateway 镜像内不存在任何 `/app/runtime/**/*.php` 或 `/app/runtime/**/*.blade.php` 文件
     - Rust 内置主题 metadata/template 由 `rust-gateway/resources/themes/*` 编译进网关，默认只保留运行所需 public assets
     - `/bootstrap/full` 返回 `mode=rust-full-schema`
     - Rust passport 登录成功
@@ -91,6 +95,10 @@ python3 tools/scheduler_coverage_audit.py
 python3 tools/cli_surface_audit.py
 ```
 
+当前 CLI 基线来源：
+
+- `tools/compat_baselines/cli_commands.json`
+
 当前结果：
 
 - PHP artisan 命令总数：`22`
@@ -102,6 +110,7 @@ python3 tools/cli_surface_audit.py
 结论：
 
 - 当前 PHP artisan 命令面已全部具备 Rust runtime/API/scheduler 等效能力。
+- 审计优先读取 `tools/compat_baselines/cli_commands.json` 中固化的 CLI 基线。
 - 默认在线请求链路、默认数据库初始化链路、核心定时任务链路都已不再依赖 PHP artisan 命令。
 - 已新增的 Rust maintenance 入口包括：
   - `GET /api/v2/{admin_path}/system/exportLogsCsv`
@@ -193,14 +202,14 @@ python3 tools/cli_surface_audit.py
   - `/app`
   - `/login/linux-do`
   - `/{subscribe_path}/{token_or_path}`
-- Laravel 默认 `RouteServiceProvider` 已不再装载 `app/Http/Routes/V1` / `V2`
-- `routes/web.php` 已收缩为仅保留 `/healthz`
+- Laravel 默认应用注册已不再包含 `RouteServiceProvider`
+- 默认 Rust 运行面已不再保留 `routes/web.php`
 
 因此默认部署下，legacy server 流量入口、页面入口和订阅入口都不再需要 PHP runtime 承载。
 
 当前保留下来的 PHP route 文件主要只承担两类作用：
 
-- 作为 `tools/route_coverage_audit.py` 的历史语义基线
+- 作为 `tools/compat_baselines/php_routes.json.gz.b64` 的历史语义来源
 - 作为后续彻底删除 PHP 代码前的对照来源
 
 最新运行证据：

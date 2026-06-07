@@ -153,7 +153,7 @@ class ThemeService
         if (!$themePath) {
             return null;
         }
-        return $themePath . '/dashboard.blade.php';
+        return $themePath . '/dashboard.html';
     }
 
     /**
@@ -188,7 +188,7 @@ class ThemeService
                 $name = basename($dir);
                 if (
                     !File::exists($dir . '/' . self::CONFIG_FILE) ||
-                    !File::exists($dir . '/dashboard.blade.php')
+                    !File::exists($dir . '/dashboard.html')
                 ) {
                     return [];
                 }
@@ -249,8 +249,8 @@ class ThemeService
                 throw new Exception('Cannot upload theme with same name as system theme');
             }
 
-            if (!File::exists($sourcePath . '/dashboard.blade.php')) {
-                throw new Exception('Missing required theme file: dashboard.blade.php');
+            if (!File::exists($sourcePath . '/dashboard.html')) {
+                throw new Exception('Missing required theme file: dashboard.html');
             }
 
             $userThemePath = base_path(self::USER_THEME_DIR);
