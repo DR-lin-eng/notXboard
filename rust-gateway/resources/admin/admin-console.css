@@ -898,11 +898,12 @@ body[data-admin-theme="dark"] .skip-link {
 }
 
 .overview-quick-card {
+  position: relative;
   display: grid;
   min-height: 94px;
   align-content: start;
   gap: 4px;
-  padding: 12px;
+  padding: 12px 36px 12px 12px;
   border: 1px solid var(--border);
   border-radius: var(--control-radius);
   color: var(--text);
@@ -910,9 +911,25 @@ body[data-admin-theme="dark"] .skip-link {
   text-align: left;
 }
 
+.overview-quick-card::after {
+  content: "→";
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
 .overview-quick-card:hover {
   border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
   background: var(--primary-soft);
+}
+
+.overview-quick-card:hover::after,
+.overview-quick-card:focus-visible::after {
+  color: var(--primary);
 }
 
 .overview-quick-card strong {
@@ -1454,7 +1471,6 @@ pre {
 }
 
 @media (max-width: 620px) {
-  .metric-grid,
   .overview-quick-grid,
   .overview-summary-grid,
   .ops-highlight-grid,

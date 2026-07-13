@@ -7,6 +7,7 @@ const APP_ROOT = document.getElementById('app');
 const APP_TOPBAR = document.querySelector('.topbar');
 const APP_FOOTER = document.querySelector('.footer');
 const NAV_TOGGLE = document.getElementById('navToggle');
+const NAV_CLOSE = document.getElementById('navClose');
 const NAV_SCRIM = document.getElementById('navScrim');
 
 const SHARED_AUTH_STORAGE_KEYS = Object.freeze([
@@ -4039,6 +4040,23 @@ async function renderDashboard() {
   const quotaInfo = planQuota?.data || {};
   const keyInfo = apiKey?.data || {};
   const stats = accessStats?.data || {};
+  const quotaItems = Array.isArray(quotaInfo.items) ? quotaInfo.items : [];
+  const hasUnlimitedTraffic = Boolean(quotaInfo.has_unlimited_traffic);
+  const totalAllowanceKb = Number(quotaInfo.total_allowance_kb || 0);
+  const totalUsedKb = Number(quotaInfo.total_used_kb || 0);
+  const totalRemainingKb = Number(quotaInfo.total_remaining_kb || 0);
+  const quotaUsagePercent = hasUnlimitedTraffic || totalAllowanceKb <= 0
+    ? 0
+    : Math.max(0, Math.min(100, (totalUsedKb / totalAllowanceKb) * 100));
+  const expiredAt = Number(subInfo.expired_at || 0);
+  const subscriptionActive = expiredAt > Math.floor(Date.now() / 1000);
+  const hasActivePlan = subscriptionActive || quotaItems.length > 0;
+  const subscriptionLabel = subscriptionActive
+    ? '使用中'
+    : (quotaItems.length ? '套餐生效中' : '未开通');
+  const subscriptionDetail = subscriptionActive
+    ? `有效期至 ${formatTs(expiredAt)}`
+    : (quotaItems.length ? `${quotaItems.length} 个套餐实例` : '选择套餐后即可开始使用');
   const roleDuty = me?.is_super_admin
     ? '站长：负责站点设置和全局管理'
     : (me?.is_admin ? '管理员：协助处理节点与工单' : '用户：提供节点并使用订阅');
@@ -4046,9 +4064,87 @@ async function renderDashboard() {
   const linuxLabel = me?.is_linux_do_user ? `<span class="pill ok">Linux DO Connect</span>` : '';
 
   setView(html`
-    <div class="grid cols-2">
-      <div class="card">
-        <h2>账户</h2>
+    <header class="portal-page-head">
+      <div>
+        <p class="portal-page-kicker">用户首页</p>
+        <h1>使用概览</h1>
+        <p>订阅、流量与节点状态</p>
+      </div>
+      <span class="dashboard-state ${hasActivePlan ? 'is-active' : 'needs-action'}">
+        ${hasActivePlan ? '服务可用' : '需要选择套餐'}
+      </span>
+    </header>
+
+    <section class="dashboard-summary-grid" aria-label="账户核心状态">
+      <article class="dashboard-metric ${hasActivePlan ? 'is-positive' : 'is-attention'}">
+        <span>订阅状态</span>
+        <strong>${subscriptionLabel}</strong>
+        <small>${subscriptionDetail}</small>
+      </article>
+      <article class="dashboard-metric">
+        <span>剩余流量</span>
+        <strong>${formatTrafficDisplay(totalRemainingKb, hasUnlimitedTraffic)}</strong>
+        <small>${hasUnlimitedTraffic ? '当前套餐不限总流量' : `已使用 ${quotaUsagePercent.toFixed(1)}%`}</small>
+      </article>
+      <article class="dashboard-metric">
+        <span>可用节点</span>
+        <strong>${escapeHtml(String(stats.accessible_nodes ?? '-'))}</strong>
+        <small>当前账号可以连接</small>
+      </article>
+      <article class="dashboard-metric">
+        <span>并发 IP</span>
+        <strong>${(Number(me?.concurrent_ip_limit) > 0) ? Number(me.concurrent_ip_limit) : 3}</strong>
+        <small>当前连接上限</small>
+      </article>
+    </section>
+
+    <section class="dashboard-action-strip" aria-label="常用操作">
+      <div class="dashboard-action-copy">
+        <strong>${hasActivePlan ? '订阅链接已生成' : '当前账户尚未生效套餐'}</strong>
+        <span>${hasActivePlan ? '当前订阅可以正常使用。' : '选择套餐后将显示订阅信息。'}</span>
+      </div>
+      <div class="row dashboard-actions">
+        <a class="btn primary" href="#/plans">${hasActivePlan ? '查看套餐' : '选择套餐'}</a>
+        <button class="btn" id="copySubBtnDash" type="button" ${subInfo.subscribe_url ? '' : 'disabled'}>复制订阅链接</button>
+        <a class="btn" href="#/downloads">下载客户端</a>
+      </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="dashboardQuotaTitle">
+      <div class="dashboard-section-head">
+        <div>
+          <h2 id="dashboardQuotaTitle">套餐额度</h2>
+          <p>不同套餐独立扣费，额度按套餐实例统计。</p>
+        </div>
+        <a class="btn small" href="#/plans">管理套餐</a>
+      </div>
+      <div class="dashboard-usage-summary">
+        <div class="dashboard-usage-stat">
+          <span>总额度</span>
+          <strong>${formatTrafficDisplay(totalAllowanceKb, hasUnlimitedTraffic)}</strong>
+        </div>
+        <div class="dashboard-usage-stat">
+          <span>已使用</span>
+          <strong>${formatTrafficKb(totalUsedKb)}</strong>
+        </div>
+        <div class="dashboard-usage-stat">
+          <span>剩余</span>
+          <strong>${formatTrafficDisplay(totalRemainingKb, hasUnlimitedTraffic)}</strong>
+        </div>
+      </div>
+      ${hasUnlimitedTraffic ? '' : `
+        <div class="dashboard-progress" role="progressbar" aria-label="套餐总流量使用进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${quotaUsagePercent.toFixed(1)}">
+          <span style="width:${quotaUsagePercent.toFixed(2)}%"></span>
+        </div>
+      `}
+      <div class="dashboard-table-shell">
+        ${renderPlanQuotaTable(quotaInfo)}
+      </div>
+    </section>
+
+    <div class="dashboard-details-grid">
+      <section class="card">
+        <h2>账户信息</h2>
         <div class="kvs">
           <div class="k">邮箱</div><div class="v">${escapeHtml(userInfo.email || '-')}</div>
           <div class="k">UUID</div><div class="v">${escapeHtml(userInfo.uuid || '-')}</div>
@@ -4060,10 +4156,9 @@ async function renderDashboard() {
           </div>
           <div class="k">角色说明</div><div class="v">${roleDuty}</div>
           <div class="k">到期时间</div><div class="v">${subInfo.expired_at ? formatTs(subInfo.expired_at) : '-'}</div>
-          <div class="k">订阅链接</div><div class="v"><button class="btn small" id="copySubBtnDash">复制订阅链接</button></div>
         </div>
-      </div>
-      <div class="card">
+      </section>
+      <section class="card">
         <h2>API Key</h2>
         <div class="kvs">
           <div class="k">是否已生成</div><div class="v">${keyInfo.has_api_key ? '是' : '否'}</div>
@@ -4073,46 +4168,32 @@ async function renderDashboard() {
         <div class="row end" style="margin-top: 12px;">
           <button class="btn" id="resetApiKeyBtn">${keyInfo.has_api_key ? '重置 Key' : '生成 Key'}</button>
         </div>
-      </div>
+      </section>
     </div>
 
-    <div class="card" style="margin-top:12px;">
-      <div class="row" style="justify-content: space-between; align-items: center;">
-        <h2>套餐额度使用</h2>
-        <div class="muted">不同套餐独立扣费，这里按套餐实例展示</div>
-      </div>
-      <div class="kvs" style="margin-top:10px;">
-        <div class="k">总额度</div><div class="v">${formatTrafficDisplay(quotaInfo.total_allowance_kb || 0, Boolean(quotaInfo.has_unlimited_traffic))}</div>
-        <div class="k">已使用</div><div class="v">${formatTrafficKb(quotaInfo.total_used_kb || 0)}</div>
-        <div class="k">剩余额度</div><div class="v">${formatTrafficDisplay(quotaInfo.total_remaining_kb || 0, Boolean(quotaInfo.has_unlimited_traffic))}</div>
-      </div>
-      ${renderPlanQuotaTable(quotaInfo)}
-    </div>
-
-    <div class="grid cols-3" style="margin-top: 12px;">
-      <div class="card">
+    <div class="dashboard-details-grid">
+      <section class="card">
         <h3>节点统计</h3>
         <div class="kvs">
           <div class="k">我提供的节点</div><div class="v">${stats.owned_nodes ?? '-'}</div>
           <div class="k">可用节点总数</div><div class="v">${stats.accessible_nodes ?? '-'}</div>
           <div class="k">被分享的节点</div><div class="v">${stats.shared_nodes ?? '-'}</div>
         </div>
-      </div>
-      <div class="card">
+        <div class="row" style="margin-top: 12px;">
+          <a class="btn" href="#/nodes">查看节点</a>
+        </div>
+      </section>
+      <section class="card">
         <h3>并发 IP 限制</h3>
         <div class="muted">同用户多 IP 并发限制（默认 3，0 代表使用默认）。</div>
         <div class="kvs" style="margin-top: 10px;">
           <div class="k">我的限制</div><div class="v">${(Number(me?.concurrent_ip_limit) > 0) ? Number(me?.concurrent_ip_limit) : 3}</div>
           <div class="k">默认策略</div><div class="v">3</div>
         </div>
-      </div>
-      <div class="card">
-        <h3>快速入口</h3>
-        <div class="row">
-          <a class="btn primary" href="#/nodes">管理节点</a>
-          <a class="btn" href="#/audit">审计日志</a>
+        <div class="row" style="margin-top: 12px;">
+          <a class="btn" href="#/audit">查看审计记录</a>
         </div>
-      </div>
+      </section>
     </div>
   `);
 
@@ -10340,12 +10421,24 @@ function setNavOpen(open) {
 
 if (NAV_TOGGLE) {
   NAV_TOGGLE.addEventListener('click', () => {
-    setNavOpen(!document.body.classList.contains('nav-open'));
+    const opening = !document.body.classList.contains('nav-open');
+    setNavOpen(opening);
+    if (opening) NAV_CLOSE?.focus();
+  });
+}
+
+if (NAV_CLOSE) {
+  NAV_CLOSE.addEventListener('click', () => {
+    setNavOpen(false);
+    NAV_TOGGLE?.focus();
   });
 }
 
 if (NAV_SCRIM) {
-  NAV_SCRIM.addEventListener('click', () => setNavOpen(false));
+  NAV_SCRIM.addEventListener('click', () => {
+    setNavOpen(false);
+    NAV_TOGGLE?.focus();
+  });
 }
 
 NAV_LINKS.forEach((link) => {

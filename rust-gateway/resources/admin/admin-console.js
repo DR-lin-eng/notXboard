@@ -1300,7 +1300,7 @@
                 </button>
                 <button type="button" class="overview-quick-card" data-overview-open="command-center">
                   <span>监控</span>
-                  <strong>打开实时大屏</strong>
+                  <strong>打开实时监控</strong>
                 </button>
               </div>
             </article>
