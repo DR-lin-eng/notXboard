@@ -1,109 +1,160 @@
-name: Docker Build and Publish
+name: Build and Publish
 
 on:
   push:
-    branches: ["master", "new-dev"]
+    branches: [master, new-dev]
+    tags: ["v*"]
+    paths:
+      - ".github/workflows/docker-publish.yml"
+      - "Dockerfile"
+      - "rust-gateway/**"
+      - "tools/package_rust_gateway_release.sh"
+      - "tools/run-notxboard-gateway.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/docker-publish.yml"
+      - "Dockerfile"
+      - "rust-gateway/**"
+      - "tools/package_rust_gateway_release.sh"
+      - "tools/run-notxboard-gateway.sh"
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
+  CARGO_BUILD_JOBS: "1"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  linux-binary:
+    name: Linux AMD64 bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.89
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-gateway -> target
+
+      - name: Build release binary
+        run: cargo build --release --locked -j 1 --manifest-path rust-gateway/Cargo.toml
+
+      - name: Package standalone bundle
+        env:
+          VERSION: ${{ github.ref_name }}-${{ github.sha }}
+          ARCH: amd64
+        run: bash tools/package_rust_gateway_release.sh
+
+      - name: Upload Linux bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: notxboard-linux-amd64-${{ github.run_number }}
+          path: |
+            dist/notxboard-*-linux-amd64.tar.gz
+            dist/notxboard-*-linux-amd64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  docker:
+    name: Docker AMD64 and ARM64
+    needs: linux-binary
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
       id-token: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1 
+
+      - name: Normalize image name
+        id: image
+        shell: bash
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
-          platforms: 'arm64,amd64'
+          platforms: arm64,amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
-          driver-opts: |
-            image=moby/buildkit:v0.20.0
-            network=host
 
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af
-
-      - name: Login to registry
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch
-            type=sha,format=long
-            type=raw,value=new,enable=${{ github.ref == 'refs/heads/master' }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
-            type=raw,value=${{ steps.get_version.outputs.version }}
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Get version
-        id: get_version
-        run: echo "version=$(git describe --tags --always)" >> $GITHUB_OUTPUT
-
-      - name: Update version in app.php
-        run: |
-          VERSION=$(date '+%Y%m%d')-$(git rev-parse --short HEAD)
-          sed -i "s/'version' => '.*'/'version' => '$VERSION'/g" config/app.php
-          echo "Updated version to: $VERSION"
-
-      - name: Build and push
-        id: build-and-push
-        uses: docker/build-push-action@v5
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: ${{ github.event_name != 'pull_request' }}
+          pull: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
-            BUILDKIT_MULTI_PLATFORM=1
-            CACHEBUST=${{ github.sha }}
-            REPO_URL=https://github.com/${{ github.repository }}
-            BRANCH_NAME=${{ github.ref_name }}
-          provenance: false
-          outputs: type=registry,push=true
-          allow: |
-            network.host
+          cache-from: type=gha,scope=notxboard-docker
+          cache-to: type=gha,mode=max,scope=notxboard-docker
+          provenance: mode=max
+          sbom: true
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3.4.0
-        with:
-          cosign-release: 'v2.2.2'
+        if: github.event_name != 'pull_request' && steps.build.outputs.digest != ''
+        uses: sigstore/cosign-installer@v3
 
-      - name: Sign image
-        if: steps.build-and-push.outputs.digest != ''
+      - name: Sign image digest
+        if: github.event_name != 'pull_request' && steps.build.outputs.digest != ''
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Deployment summary
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "${{ steps.meta.outputs.tags }}" | xargs -I {} cosign sign --yes "{}@${{ steps.build-and-push.outputs.digest }}"
+          echo "### Deployment image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### Deploy with Docker Compose" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "GATEWAY_IMAGE=${IMAGE}@${DIGEST} docker compose -f deploy/compose.ghcr.yml up -d mysql redis gateway" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -75,6 +75,24 @@ curl -X POST "http://127.0.0.1:${APP_PORT}/bootstrap/full" \
 
 如果你不是新装整套环境，而是要复用现有宿主机 MySQL / Redis，只改 `.env` 的 `DB_HOST` / `REDIS_HOST` 等连接参数，然后只启动你需要的容器即可。详细写法见 `docs/deployment-docker.md`。
 
+## GitHub Actions 构建
+
+仓库内的 `Build and Publish` 工作流提供两类部署产物：
+
+- Linux AMD64 独立运行包，可直接从对应 Actions 任务下载。
+- GHCR 多架构镜像，支持 `linux/amd64` 与 `linux/arm64`。
+
+推送到默认分支会发布 `latest`，推送 `v*` 标签会同时发布语义化版本标签，也可以在 Actions 页面手动触发。
+使用预构建镜像部署：
+
+```bash
+GATEWAY_IMAGE=ghcr.io/dr-lin-eng/notxboard:latest \
+docker compose -f deploy/compose.ghcr.yml up -d mysql redis gateway
+```
+
+Fork 仓库使用时，将镜像地址替换为对应的 `ghcr.io/<owner>/<repo>:latest`。
+GHCR 包保持私有时，部署主机需先登录 `ghcr.io`；公开部署可在首次发布后将包可见性改为 Public。
+
 ## 主要能力
 
 - Rust 网关已承接默认在线流量入口与核心初始化链路

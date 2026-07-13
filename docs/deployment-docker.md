@@ -192,11 +192,24 @@ location / {
 
 ## 6. 使用预构建镜像（可选）
 
-如果镜像已发布到仓库（例如 GHCR），可直接拉取：
+仓库的 `Build and Publish` Action 会在推送到默认分支、推送 `v*` 标签或手动触发时发布
+`linux/amd64` 与 `linux/arm64` 镜像到 GHCR。可直接切换到预构建镜像：
 
 ```bash
-DOCKER_IMAGE=ghcr.io/<owner>/<repo>:latest \
-docker compose up -d --pull always --no-build
+GATEWAY_IMAGE=ghcr.io/<owner>/<repo>:latest \
+docker compose -f deploy/compose.ghcr.yml up -d mysql redis gateway
+```
+
+`deploy/compose.ghcr.yml` 只使用预构建镜像，不包含本地 `build` 配置；默认镜像为
+`ghcr.io/dr-lin-eng/notxboard:latest`。Fork 仓库使用时通过 `GATEWAY_IMAGE` 替换镜像地址。
+GHCR 包首次发布后通常是私有状态：公开部署时需在 GitHub Packages 设置中将该包改为 Public；
+保持私有时，部署主机必须先使用具备 `read:packages` 权限的令牌执行 `docker login ghcr.io`。
+
+Action 还会生成 `notxboard-<version>-linux-amd64.tar.gz`。该压缩包包含网关二进制、运行资源、
+启动脚本和环境变量模板，适合不使用 Docker 的 Linux AMD64 主机。解压后配置环境变量并运行：
+
+```bash
+./run.sh
 ```
 
 ## 7. 更新

@@ -1,0 +1,90 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-xboard}
+      MYSQL_USER: ${DB_USERNAME:-xboard}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change-me}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me-root}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - notxboard
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - >
+        if [ -n "$$REDIS_PASSWORD" ] && [ "$$REDIS_PASSWORD" != "null" ]; then
+          exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD";
+        else
+          exec redis-server --appendonly yes;
+        fi
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ] && [ \"$$REDIS_PASSWORD\" != \"null\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - notxboard
+
+  gateway:
+    image: ${GATEWAY_IMAGE:-ghcr.io/dr-lin-eng/notxboard:latest}
+    pull_policy: always
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-../.env}
+    environment:
+      PORT: 8000
+      SUBSCRIBE_PATH: ${SUBSCRIBE_PATH:-s}
+      RUST_GATEWAY_OWNS_SCHEDULER: ${RUST_GATEWAY_OWNS_SCHEDULER:-true}
+      DB_HOST: mysql
+      REDIS_HOST: redis
+      RUST_LOG: info
+      RUST_RUNTIME_ROOT: /app/runtime
+      RUST_STATE_ROOT: /app/state
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - gateway_state:/app/state
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - notxboard
+
+volumes:
+  db_data:
+  redis_data:
+  gateway_state:
+
+networks:
+  notxboard:
+    driver: bridge
