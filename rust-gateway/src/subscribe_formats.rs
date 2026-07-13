@@ -14,6 +14,7 @@ pub(crate) async fn build_surge_config_payload(
     let mut proxy_names = Vec::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -32,12 +33,12 @@ pub(crate) async fn build_surge_config_payload(
                 ) {
                     String::new()
                 } else {
-                    build_surge_shadowsocks(uuid, server, &settings, &state.app_key)
+                    build_surge_shadowsocks(&node_uuid, server, &settings, &state.app_key)
                 }
             }
-            "vmess" => build_surge_vmess(uuid, server, &settings),
-            "trojan" => build_surge_trojan(uuid, server, &settings),
-            "hysteria" => build_surge_hysteria(uuid, server, &settings),
+            "vmess" => build_surge_vmess(&node_uuid, server, &settings),
+            "trojan" => build_surge_trojan(&node_uuid, server, &settings),
+            "hysteria" => build_surge_hysteria(&node_uuid, server, &settings),
             _ => String::new(),
         };
 
@@ -80,6 +81,7 @@ pub(crate) async fn build_surfboard_config_payload(
     let mut proxy_names = Vec::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -98,11 +100,11 @@ pub(crate) async fn build_surfboard_config_payload(
                 ) {
                     String::new()
                 } else {
-                    build_surfboard_shadowsocks(uuid, server, &settings, &state.app_key)
+                    build_surfboard_shadowsocks(&node_uuid, server, &settings, &state.app_key)
                 }
             }
-            "vmess" => build_surfboard_vmess(uuid, server, &settings),
-            "trojan" => build_surfboard_trojan(uuid, server, &settings),
+            "vmess" => build_surfboard_vmess(&node_uuid, server, &settings),
+            "trojan" => build_surfboard_trojan(&node_uuid, server, &settings),
             _ => String::new(),
         };
 
@@ -153,12 +155,13 @@ pub(crate) fn build_shadowsocks_sip008_payload(
             ) {
                 return None;
             }
+            let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
             Some(json!({
                 "id": server.id,
                 "remarks": server.name,
                 "server": server.host,
                 "server_port": server.port,
-                "password": subscribe_shadowsocks_password(uuid, server, &settings, &state.app_key),
+                "password": subscribe_shadowsocks_password(&node_uuid, server, &settings, &state.app_key),
                 "method": cipher,
             }))
         })
@@ -199,6 +202,7 @@ pub(crate) async fn build_stash_yaml_payload(
     let mut proxy_names = Vec::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -209,14 +213,14 @@ pub(crate) async fn build_stash_yaml_payload(
         );
 
         let proxy = match normalized_type.as_str() {
-            "shadowsocks" => Some(build_stash_shadowsocks(uuid, server, &settings, &state.app_key)),
-            "vmess" => Some(build_stash_vmess(uuid, server, &settings)),
-            "vless" => build_stash_vless(uuid, server, &settings),
-            "hysteria" => Some(build_stash_hysteria(uuid, server, &settings)),
-            "trojan" => Some(build_stash_trojan(uuid, server, &settings)),
-            "tuic" => Some(build_stash_tuic(uuid, server, &settings)),
-            "socks" => Some(build_stash_socks5(uuid, server, &settings)),
-            "http" => Some(build_stash_http(uuid, server, &settings)),
+            "shadowsocks" => Some(build_stash_shadowsocks(&node_uuid, server, &settings, &state.app_key)),
+            "vmess" => Some(build_stash_vmess(&node_uuid, server, &settings)),
+            "vless" => build_stash_vless(&node_uuid, server, &settings),
+            "hysteria" => Some(build_stash_hysteria(&node_uuid, server, &settings)),
+            "trojan" => Some(build_stash_trojan(&node_uuid, server, &settings)),
+            "tuic" => Some(build_stash_tuic(&node_uuid, server, &settings)),
+            "socks" => Some(build_stash_socks5(&node_uuid, server, &settings)),
+            "http" => Some(build_stash_http(&node_uuid, server, &settings)),
             _ => None,
         };
 
@@ -316,6 +320,7 @@ pub(crate) fn build_loon_payload(
     let mut buffer = String::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -326,10 +331,10 @@ pub(crate) fn build_loon_payload(
         );
 
         let line = match normalized_type.as_str() {
-            "shadowsocks" => build_loon_shadowsocks(uuid, server, &settings, &state.app_key),
-            "vmess" => build_loon_vmess(uuid, server, &settings),
-            "trojan" => build_loon_trojan(uuid, server, &settings),
-            "hysteria" => build_loon_hysteria(uuid, server, &settings, user),
+            "shadowsocks" => build_loon_shadowsocks(&node_uuid, server, &settings, &state.app_key),
+            "vmess" => build_loon_vmess(&node_uuid, server, &settings),
+            "trojan" => build_loon_trojan(&node_uuid, server, &settings),
+            "hysteria" => build_loon_hysteria(&node_uuid, server, &settings, user),
             _ => String::new(),
         };
         if !line.is_empty() {

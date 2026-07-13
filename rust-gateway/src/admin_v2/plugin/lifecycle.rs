@@ -1,10 +1,12 @@
 use crate::*;
 use crate::archive_limit_support::{
-    copy_zip_entry_limited, validate_zip_metadata, PLUGIN_ARCHIVE_LIMITS,
-    PLUGIN_ARCHIVE_MAX_BYTES,
+    copy_zip_entry_limited, validate_zip_metadata, PrivateTempDirectory,
+    PLUGIN_ARCHIVE_LIMITS, PLUGIN_ARCHIVE_MAX_BYTES,
 };
 
 use super::{catalog, config, store, PROTECTED_PLUGINS};
+
+static PLUGIN_UPLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn build_install_response(
     state: &AppState,
@@ -130,44 +132,40 @@ pub async fn build_upload_response(
     }
 
     let extracted = extract_plugin_archive(&file_bytes)?;
-    let config = extracted.config;
-    let target_dir = crate::runtime_paths::state_plugins_path(studly_plugin_dir_name(&config.code));
+    let config = extracted.config.clone();
+    if PROTECTED_PLUGINS.contains(&config.code.as_str()) {
+        return Ok(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"message":"系统内置插件不允许通过上传覆盖"}),
+        ));
+    }
+    let plugin_root = crate::runtime_paths::state_plugins_path("");
+    std::fs::create_dir_all(&plugin_root)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    let _upload_guard = PLUGIN_UPLOAD_LOCK.lock().await;
+    let target_dir = plugin_target_dir(&config.code)?;
+    reject_plugin_directory_collisions(&plugin_root, &target_dir, &config.code)?;
 
-    if target_dir.exists() {
-        let existing_config_path = target_dir.join("config.json");
-        if !existing_config_path.exists() {
-            return Ok(json_status_response(
-                StatusCode::BAD_REQUEST,
-                json!({"message":"已安装插件缺少配置文件，无法判断是否可升级"}),
-            ));
-        }
-        let existing_raw = std::fs::read_to_string(&existing_config_path)
-            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
-        let existing_config = serde_json::from_str::<Value>(&existing_raw)
-            .map_err(|_| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"已安装插件配置文件格式错误"})))?;
-        let old_version = existing_config.get("version").and_then(Value::as_str).unwrap_or("");
+    if let Some(existing_config) =
+        load_existing_plugin_config(&plugin_root, &target_dir, &config.code)?
+    {
+        let old_version = existing_config
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if old_version.is_empty() || compare_semver(&config.version, old_version) <= 0 {
             return Ok(json_status_response(
                 StatusCode::BAD_REQUEST,
                 json!({"message":"上传插件版本不高于已安装版本，无法升级"}),
             ));
         }
-        std::fs::remove_dir_all(&target_dir)
-            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
     }
-
-    std::fs::create_dir_all(
-        target_dir
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| crate::runtime_paths::state_plugins_path("")),
-    )
-        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
-    std::fs::rename(&extracted.plugin_dir, &target_dir).or_else(|_| {
-        copy_dir_all(&extracted.plugin_dir, &target_dir)?;
-        std::fs::remove_dir_all(&extracted.plugin_dir)
-    })
-    .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    install_plugin_directory_atomically(
+        &plugin_root,
+        &target_dir,
+        &extracted.plugin_dir,
+        load_existing_plugin_config(&plugin_root, &target_dir, &config.code)?.is_some(),
+    )?;
 
     if store::load_installed_plugin_by_code(state, &config.code)
         .await
@@ -295,8 +293,188 @@ async fn parse_plugin_code(body: Body) -> Result<String, Response<Body>> {
         .get("code")
         .and_then(Value::as_str)
         .map(|value| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty())
+        .filter(|value| is_valid_plugin_code(value))
         .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))
+}
+
+fn is_valid_plugin_code(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code.split('_').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn plugin_target_dir(code: &str) -> Result<std::path::PathBuf, Response<Body>> {
+    if !is_valid_plugin_code(code) {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"插件代码格式错误"}),
+        ));
+    }
+
+    let directory_name = studly_plugin_dir_name(code);
+    let relative = std::path::Path::new(&directory_name);
+    let mut components = relative.components();
+    if directory_name.is_empty()
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"插件目录名称无效"}),
+        ));
+    }
+
+    let plugin_root = crate::runtime_paths::state_plugins_path("");
+    let target_dir = plugin_root.join(relative);
+    if !is_direct_child(&plugin_root, &target_dir) {
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "插件上传失败",
+        ));
+    }
+    Ok(target_dir)
+}
+
+fn is_direct_child(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    candidate != root
+        && candidate.parent() == Some(root)
+        && matches!(
+            candidate.file_name(),
+            Some(name) if !name.is_empty() && name != std::ffi::OsStr::new(".") && name != std::ffi::OsStr::new("..")
+        )
+}
+
+fn reject_plugin_directory_collisions(
+    plugin_root: &std::path::Path,
+    target_dir: &std::path::Path,
+    expected_code: &str,
+) -> Result<(), Response<Body>> {
+    if !is_direct_child(plugin_root, target_dir) {
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "插件上传失败",
+        ));
+    }
+    let target_name = target_dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    let entries = std::fs::read_dir(plugin_root)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+        let entry_name = entry.file_name();
+        let entry_name_text = entry_name.to_string_lossy();
+        if entry_name_text.eq_ignore_ascii_case(target_name) && entry_name_text != target_name {
+            return Err(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"插件目录与现有插件发生大小写重名冲突"}),
+            ));
+        }
+
+        let path = entry.path();
+        if path == target_dir {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let config_path = path.join("config.json");
+        let Ok(config_metadata) = std::fs::symlink_metadata(&config_path) else {
+            continue;
+        };
+        if config_metadata.file_type().is_symlink() || !config_metadata.is_file() {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&config_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let sibling_code = value
+            .get("code")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_lowercase());
+        if sibling_code.as_deref() == Some(expected_code) {
+            return Err(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"插件代码已存在于其他目录"}),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_existing_plugin_config(
+    plugin_root: &std::path::Path,
+    target_dir: &std::path::Path,
+    expected_code: &str,
+) -> Result<Option<Value>, Response<Body>> {
+    if !is_direct_child(plugin_root, target_dir) {
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "插件上传失败",
+        ));
+    }
+    let metadata = match std::fs::symlink_metadata(target_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "插件上传失败",
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"插件目标路径不是安全目录"}),
+        ));
+    }
+
+    let existing_config_path = target_dir.join("config.json");
+    let config_metadata = std::fs::symlink_metadata(&existing_config_path).map_err(|_| {
+        json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"已安装插件缺少配置文件，无法判断是否可升级"}),
+        )
+    })?;
+    if config_metadata.file_type().is_symlink() || !config_metadata.is_file() {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"已安装插件配置文件路径不安全"}),
+        ));
+    }
+    let existing_raw = std::fs::read_to_string(&existing_config_path)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    let existing_config = serde_json::from_str::<Value>(&existing_raw).map_err(|_| {
+        json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"已安装插件配置文件格式错误"}),
+        )
+    })?;
+    let existing_code = existing_config
+        .get("code")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_lowercase());
+    if existing_code.as_deref() != Some(expected_code) {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"插件目录别名冲突，拒绝覆盖其他插件"}),
+        ));
+    }
+    Ok(Some(existing_config))
 }
 
 #[derive(Clone)]
@@ -310,6 +488,13 @@ struct UploadedPluginConfig {
 struct ExtractedPluginArchive {
     config: UploadedPluginConfig,
     plugin_dir: std::path::PathBuf,
+    temp_root: std::path::PathBuf,
+}
+
+impl Drop for ExtractedPluginArchive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.temp_root);
+    }
 }
 
 fn extract_plugin_archive(bytes: &bytes::Bytes) -> Result<ExtractedPluginArchive, Response<Body>> {
@@ -319,8 +504,9 @@ fn extract_plugin_archive(bytes: &bytes::Bytes) -> Result<ExtractedPluginArchive
     validate_zip_metadata(&mut archive, PLUGIN_ARCHIVE_LIMITS, "插件包解压后体积过大")?;
 
     let temp_root = std::env::temp_dir().join(format!("notxboard-plugin-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_root)
+    let temp_directory = PrivateTempDirectory::create(temp_root)
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    let temp_root = temp_directory.path();
 
     let mut total_written = 0_u64;
     for index in 0..archive.len() {
@@ -355,7 +541,7 @@ fn extract_plugin_archive(bytes: &bytes::Bytes) -> Result<ExtractedPluginArchive
     let mut candidate_dirs = Vec::new();
     let direct_config = temp_root.join("config.json");
     if direct_config.exists() {
-        candidate_dirs.push(temp_root.clone());
+        candidate_dirs.push(temp_root.to_path_buf());
     }
     if let Ok(entries) = std::fs::read_dir(&temp_root) {
         for entry in entries.flatten() {
@@ -373,7 +559,64 @@ fn extract_plugin_archive(bytes: &bytes::Bytes) -> Result<ExtractedPluginArchive
     let raw = std::fs::read_to_string(plugin_dir.join("config.json"))
         .map_err(|_| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"插件配置文件格式错误"})))?;
     let config = parse_uploaded_plugin_config(&raw)?;
-    Ok(ExtractedPluginArchive { config, plugin_dir })
+    Ok(ExtractedPluginArchive {
+        config,
+        plugin_dir,
+        temp_root: temp_directory.into_path(),
+    })
+}
+
+fn install_plugin_directory_atomically(
+    plugin_root: &std::path::Path,
+    target_dir: &std::path::Path,
+    source_dir: &std::path::Path,
+    replacing_existing: bool,
+) -> Result<(), Response<Body>> {
+    if !is_direct_child(plugin_root, target_dir) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"));
+    }
+    let staging_root = crate::runtime_paths::state_root();
+    let staging_path = staging_root.join(format!(".plugin-staging-{}", uuid::Uuid::new_v4().simple()));
+    if !is_direct_child(&staging_root, &staging_path) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"));
+    }
+    let staging_directory = PrivateTempDirectory::create(staging_path)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    let staging = staging_directory.path();
+    if let Err(error) = copy_dir_all(source_dir, staging) {
+        error!("plugin staging copy failed: {error}");
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"));
+    }
+
+    if !replacing_existing {
+        return std::fs::rename(staging, target_dir).map_err(|_| {
+            json_status_response(
+                StatusCode::CONFLICT,
+                json!({"message":"插件目标已变化，请重新上传"}),
+            )
+        });
+    }
+
+    let metadata = std::fs::symlink_metadata(target_dir)
+        .map_err(|_| json_status_response(StatusCode::CONFLICT, json!({"message":"插件目标已变化，请重新上传"})))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"插件目标路径不是安全目录"}),
+        ));
+    }
+    let backup = staging_root.join(format!(".plugin-backup-{}", uuid::Uuid::new_v4().simple()));
+    if !is_direct_child(&staging_root, &backup) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"));
+    }
+    std::fs::rename(target_dir, &backup)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"))?;
+    if std::fs::rename(staging, target_dir).is_err() {
+        let _ = std::fs::rename(&backup, target_dir);
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "插件上传失败"));
+    }
+    let _ = std::fs::remove_dir_all(backup);
+    Ok(())
 }
 
 fn parse_uploaded_plugin_config(raw: &str) -> Result<UploadedPluginConfig, Response<Body>> {
@@ -393,8 +636,13 @@ fn parse_uploaded_plugin_config(raw: &str) -> Result<UploadedPluginConfig, Respo
         .get("code")
         .and_then(Value::as_str)
         .map(|value| value.trim().to_lowercase())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"插件配置文件格式错误"})))?;
+        .filter(|value| is_valid_plugin_code(value))
+        .ok_or_else(|| {
+            json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"插件配置文件格式错误"}),
+            )
+        })?;
     let version = object
         .get("version")
         .and_then(Value::as_str)
@@ -412,12 +660,6 @@ fn parse_uploaded_plugin_config(raw: &str) -> Result<UploadedPluginConfig, Respo
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
     if !description_ok || !author_ok {
-        return Err(json_status_response(
-            StatusCode::BAD_REQUEST,
-            json!({"message":"插件配置文件格式错误"}),
-        ));
-    }
-    if !regex::Regex::new(r"^[a-z0-9_]+$").unwrap().is_match(&code) {
         return Err(json_status_response(
             StatusCode::BAD_REQUEST,
             json!({"message":"插件配置文件格式错误"}),
@@ -497,4 +739,68 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_code_rejects_empty_segments_and_noncanonical_underscores() {
+        for code in ["_", "__", "_foo", "foo_", "foo__bar"] {
+            assert!(!is_valid_plugin_code(code), "{code} should be rejected");
+            assert!(plugin_target_dir(code).is_err());
+        }
+    }
+
+    #[test]
+    fn plugin_code_accepts_canonical_segments() {
+        for code in ["foo", "foo_bar", "foo1"] {
+            assert!(is_valid_plugin_code(code), "{code} should be accepted");
+            assert!(plugin_target_dir(code).is_ok());
+        }
+    }
+
+    #[test]
+    fn plugin_target_is_always_a_direct_child_and_never_the_root() {
+        let root = crate::runtime_paths::state_plugins_path("");
+        for code in ["foo", "foo_bar", "foo_1"] {
+            let target = plugin_target_dir(code).expect("valid plugin target");
+            assert_ne!(target, root);
+            assert!(is_direct_child(&root, &target));
+        }
+    }
+
+    #[test]
+    fn noncanonical_double_underscore_cannot_alias_canonical_code() {
+        assert_eq!(
+            studly_plugin_dir_name("foo_bar"),
+            studly_plugin_dir_name("foo__bar")
+        );
+        assert!(is_valid_plugin_code("foo_bar"));
+        assert!(!is_valid_plugin_code("foo__bar"));
+    }
+
+    #[test]
+    fn distinct_canonical_codes_that_share_studly_name_are_detected() {
+        assert_eq!(
+            studly_plugin_dir_name("foo1"),
+            studly_plugin_dir_name("foo_1")
+        );
+        let root = std::env::temp_dir().join(format!(
+            "notxboard-plugin-collision-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join(studly_plugin_dir_name("foo_1"));
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(
+            target.join("config.json"),
+            r#"{"code":"foo1","version":"1.0.0"}"#,
+        )
+        .expect("write config");
+
+        let result = load_existing_plugin_config(&root, &target, "foo_1");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(result.is_err());
+    }
 }

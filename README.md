@@ -62,10 +62,14 @@ docker compose ps
 
 ```bash
 APP_PORT="${APP_PORT:-8000}"
+: "${BOOTSTRAP_TOKEN:?set BOOTSTRAP_TOKEN in .env first}"
 curl -X POST "http://127.0.0.1:${APP_PORT}/bootstrap/full" \
   -H 'Content-Type: application/json' \
+  -H "X-Bootstrap-Token: ${BOOTSTRAP_TOKEN}" \
   --data "{\"app_name\":\"notXboard\",\"app_url\":\"http://127.0.0.1:${APP_PORT}\",\"admin_email\":\"admin@example.com\",\"admin_password\":\"ChangeMe123!\"}"
 ```
+
+`BOOTSTRAP_TOKEN` 至少 24 字符，建议用 `openssl rand -hex 32` 生成。初始化完成后可从运行环境移除。
 
 5. 反代到宿主机 `127.0.0.1:${APP_PORT:-8000}`。
 

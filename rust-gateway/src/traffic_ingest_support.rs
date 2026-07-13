@@ -171,10 +171,13 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
                              ups.id ASC
                      ) AS row_num
                  FROM user_plan_subscriptions ups
-                 JOIN user_node_plan_access upa
-                   ON upa.user_id = ups.user_id
-                  AND upa.plan_id = ups.plan_id
-                 WHERE upa.node_id = ?
+                 JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
+                 JOIN server_nodes node ON node.id = ? AND node.user_id = plan.owner_user_id
+                 WHERE JSON_CONTAINS(
+                           COALESCE(plan.node_ids, JSON_ARRAY()),
+                           CAST(node.id AS JSON),
+                           '$'
+                       )
                    AND ups.status = 1
                    AND (ups.expired_at IS NULL OR ups.expired_at > ?)
                    AND ups.user_id IN ({})

@@ -1,6 +1,5 @@
 use crate::*;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rsa::pkcs1v15::SigningKey;
@@ -10,6 +9,8 @@ use signature::{SignatureEncoding, Signer};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -132,6 +133,10 @@ async fn execute_database_backup(
     fs::create_dir_all(&backup_dir)
         .await
         .map_err(|err| format!("create backup directory failed: {err}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|err| format!("secure backup directory failed: {err}"))?;
     let sql_path = backup_dir.join(format!("{stamp}_{db_name}_database_backup.sql"));
     let compressed_path = backup_dir.join(format!("{stamp}_{db_name}_database_backup.sql.gz"));
 
@@ -223,7 +228,11 @@ async fn dump_mysql_database_to_file(
         String::from_utf8_lossy(&buffer).trim().to_string()
     });
 
-    let mut output = fs::File::create(output_path)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut output = options.open(output_path)
         .await
         .map_err(|err| format!("create dump file failed: {err}"))?;
     tokio::io::copy(&mut stdout, &mut output)
@@ -266,7 +275,11 @@ async fn compress_backup_file(source: &Path, target: &Path) -> Result<u64, Strin
 fn compress_backup_file_blocking(source: &Path, target: &Path) -> Result<u64, String> {
     let input = std::fs::File::open(source)
         .map_err(|err| format!("open dump file failed: {err}"))?;
-    let output = std::fs::File::create(target)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let output = options.open(target)
         .map_err(|err| format!("create gzip file failed: {err}"))?;
     let mut reader = BufReader::new(input);
     let writer = BufWriter::new(output);

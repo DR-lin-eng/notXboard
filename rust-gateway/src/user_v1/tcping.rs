@@ -138,7 +138,7 @@ async fn build_create_agent_response(
         return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "The location_province field must not be greater than 64 characters."));
     }
 
-    let token = random_alnum(48);
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let now = Utc::now().timestamp();
     let agent_id = sqlx::query(
         "INSERT INTO tcping_agents (
@@ -186,7 +186,7 @@ async fn build_rotate_agent_token_response(
         ));
     };
 
-    let token = random_alnum(48);
+    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let now = Utc::now().timestamp();
     sqlx::query("UPDATE tcping_agents SET token = ?, updated_at = ? WHERE id = ? AND user_id = ?")
         .bind(&token)
@@ -249,11 +249,31 @@ async fn build_agent_install_command_response(
         ));
     };
 
-    let panel_url = resolve_panel_base_url(state).await;
-    let script_url = format!("{}/tcping-agent-install.sh?v=rust", panel_url.trim_end_matches('/'));
+    let panel_url = resolve_installer_panel_base_url(state).await?;
+    let bootstrap = crate::machine_bootstrap_support::issue_machine_bootstrap_ticket(
+        state,
+        "tcping",
+        user.id,
+        agent.id,
+        &agent.token,
+    )
+    .await
+    .map_err(|err| {
+        error!("tcping bootstrap ticket creation failed: {err}");
+        json_error(StatusCode::SERVICE_UNAVAILABLE, "Installer bootstrap unavailable")
+    })?;
+    let script_url = format!(
+        "{}/tcping-agent-install.sh?{}",
+        panel_url.trim_end_matches('/'),
+        bootstrap.query,
+    );
     let command = format!(
-        "curl -fsSL '{}' | bash -s -- --panel '{}' --token '{}'",
-        script_url, panel_url, agent.token
+        "{} {} | bash -s -- --panel {} --bootstrap-token {} --bootstrap-query {}",
+        installer_curl_command_prefix(&panel_url),
+        super::server_nodes::posix_shell_arg(&script_url),
+        super::server_nodes::posix_shell_arg(&panel_url),
+        super::server_nodes::posix_shell_arg(&bootstrap.ticket),
+        super::server_nodes::posix_shell_arg(&bootstrap.query),
     );
 
     Ok(json_value_response(json!({
@@ -261,7 +281,7 @@ async fn build_agent_install_command_response(
         "data": {
             "panel_url": panel_url,
             "script_url": script_url,
-            "token": agent.token,
+            "bootstrap_expires_in": bootstrap.expires_in,
             "command": command,
         },
     })))

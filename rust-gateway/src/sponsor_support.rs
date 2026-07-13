@@ -235,16 +235,13 @@ pub(crate) fn build_sponsor_epay_checkout_payload(
         .collect::<Vec<_>>()
         .join("&");
     let sign = format!("{:x}", md5::compute(format!("{}{}", payload, config.key)));
-    crate::epay_render_support::ensure_http_checkout_url(&config.url)?;
-    let submit_url = format!(
-        "{}{}",
-        config.url.trim_end_matches('/'),
-        if config.submit_path.starts_with('/') {
-            config.submit_path.clone()
-        } else {
-            format!("/{}", config.submit_path)
-        }
-    );
+    let submit_url = crate::url_security_support::join_http_url_path(
+        &config.url,
+        Some(&config.submit_path),
+        "/pay/submit.php",
+        false,
+    )
+    .map_err(|_| fail_json_response(StatusCode::BAD_REQUEST, "Invalid payment gateway URL"))?;
 
     let mut final_params = serde_json::Map::new();
     for (k, v) in params {

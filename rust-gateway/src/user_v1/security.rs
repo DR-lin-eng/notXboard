@@ -69,9 +69,13 @@ async fn build_get_active_session_response(
         return Ok(response);
     }
     let rows = sqlx::query(
-        "SELECT id, tokenable_type, tokenable_id, name, abilities, last_used_at, expires_at, created_at, updated_at
+        "SELECT id, tokenable_type, tokenable_id, name, abilities,
+                UNIX_TIMESTAMP(last_used_at) AS last_used_at_ts,
+                UNIX_TIMESTAMP(expires_at) AS expires_at_ts,
+                UNIX_TIMESTAMP(created_at) AS created_at_ts,
+                UNIX_TIMESTAMP(updated_at) AS updated_at_ts
          FROM personal_access_tokens
-         WHERE tokenable_id = ?
+         WHERE tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'
          ORDER BY id DESC"
     )
     .bind(user.id as u64)
@@ -93,15 +97,23 @@ async fn build_get_active_session_response(
                 "tokenable_id": row.try_get::<u64, _>("tokenable_id").unwrap_or_default(),
                 "name": row.try_get::<String, _>("name").unwrap_or_default(),
                 "abilities": abilities,
-                "last_used_at": row.try_get::<Option<chrono::NaiveDateTime>, _>("last_used_at").ok().flatten().map(|v| v.format("%Y-%m-%dT%H:%M:%S.000000Z").to_string()),
-                "expires_at": row.try_get::<Option<chrono::NaiveDateTime>, _>("expires_at").ok().flatten().map(|v| v.format("%Y-%m-%dT%H:%M:%S.000000Z").to_string()),
-                "created_at": row.try_get::<Option<chrono::NaiveDateTime>, _>("created_at").ok().flatten().map(|v| v.format("%Y-%m-%dT%H:%M:%S.000000Z").to_string()),
-                "updated_at": row.try_get::<Option<chrono::NaiveDateTime>, _>("updated_at").ok().flatten().map(|v| v.format("%Y-%m-%dT%H:%M:%S.000000Z").to_string()),
+                "last_used_at": format_pat_timestamp(&row, "last_used_at_ts"),
+                "expires_at": format_pat_timestamp(&row, "expires_at_ts"),
+                "created_at": format_pat_timestamp(&row, "created_at_ts"),
+                "updated_at": format_pat_timestamp(&row, "updated_at_ts"),
             })
         })
         .collect::<Vec<_>>();
 
     Ok(success_cached_response(state, cache_key, Value::Array(sessions), Duration::from_secs(5)))
+}
+
+fn format_pat_timestamp(row: &sqlx::mysql::MySqlRow, column: &str) -> Option<String> {
+    row.try_get::<Option<i64>, _>(column)
+        .ok()
+        .flatten()
+        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .map(|value| value.format("%Y-%m-%dT%H:%M:%S.000000Z").to_string())
 }
 
 async fn build_get_quick_login_url_response(
@@ -140,7 +152,10 @@ async fn build_remove_active_session_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let payload = parse_json_body(body).await?;
     let session_id = payload.get("session_id").and_then(|v| v.as_i64()).unwrap_or_default();
-    sqlx::query("DELETE FROM personal_access_tokens WHERE id = ? AND tokenable_id = ?")
+    sqlx::query(
+        "DELETE FROM personal_access_tokens
+         WHERE id = ? AND tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'"
+    )
         .bind(session_id as u64)
         .bind(user.id as u64)
         .execute(&state.db)

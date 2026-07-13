@@ -16,7 +16,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     io::Read,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,12 +33,14 @@ mod public_dashboard_support;
 mod access_control_support;
 mod api_key_support;
 mod archive_limit_support;
+mod authorization_support;
 mod db_retry_support;
 mod epay_render_support;
 mod legacy_traffic_support;
 mod command_center_support;
 mod backup_support;
 mod horizon_metrics_support;
+mod html_safety_support;
 mod fallback_support;
 mod http_support;
 mod laravel_crypto_support;
@@ -55,6 +57,7 @@ mod user_comm_config_support;
 mod mail_support;
 mod mass_mail_support;
 mod mail_reminder_support;
+mod machine_bootstrap_support;
 mod notice_notify_support;
 mod ops_alert_support;
 mod telegram_notify_support;
@@ -68,6 +71,7 @@ mod builtin_plugin_support;
 mod builtin_theme_support;
 mod subscription_security_support;
 mod secure_compare_support;
+mod exposure_control;
 mod traffic_reset_support;
 mod traffic_query_support;
 mod admin_v2_stat_rank_support;
@@ -125,6 +129,7 @@ pub(crate) use node_plans_support::{
     load_admin_node_options, load_all_node_plans, load_latest_owned_node_plan,
     load_node_plan_by_id_any, load_owned_node_plan_by_id, normalize_visibility_scope,
     parse_node_plan_mutation_input, resolve_node_plan_share_token,
+    valid_node_plan_share_token,
 };
 pub(crate) use api_key_support::{
     api_key_has_valid_format, api_key_prefix, ensure_user_api_key,
@@ -133,22 +138,28 @@ pub(crate) use api_key_support::{
 };
 pub(crate) use access_control_support::{
     access_node_last_report_at, clear_accessible_user_ids_cache,
-    distinct_positive_user_ids, revoke_individual_node_access,
+    clear_all_authorization_caches,
+    distinct_positive_user_ids,
     get_accessible_user_ids_for_node, get_accessible_user_ids_for_owner_node,
     load_access_stats_node, load_accessible_nodes_for_user_payload,
     load_accessible_nodes_for_user_rows, load_authorized_user_ids_for_node,
-    load_node_blacklisted_user_ids, replace_individual_node_access_with_tx,
-    upsert_individual_node_access, user_can_access_tcping_node,
+    load_node_blacklisted_user_ids, user_can_access_tcping_node,
+};
+pub(crate) use authorization_support::{
+    RequiredAccountRole, account_has_role, is_valid_secure_admin_path,
+    secure_admin_path_matches, token_has_full_access_ability,
 };
 pub(crate) use refunds_support::{
     approve_refund_request_as_admin, calculate_refund_cents, calculate_refund_usage_kb,
     deny_refund_request_as_admin, finalize_single_expired_refund_voting,
     load_all_refund_requests, load_assigned_admin_refund_request_detail,
     load_assigned_admin_refund_request_detail_for_update, load_assigned_admin_refund_requests,
-    load_expired_voting_refund_requests, load_refund_create_order_by_trade_no,
-    load_refund_create_plan_by_id, load_refund_evidences, load_refund_request_detail_any,
+    load_expired_voting_refund_requests, load_open_voting_refund_request_detail,
+    load_refund_create_order_by_trade_no, load_refund_create_plan_by_id,
+    load_refund_evidences, load_refund_request_detail_any,
     load_refund_votes, load_user_refund_request_detail, load_user_refund_requests,
-    load_voting_refund_requests, serialize_refund_request_detail,
+    load_voting_refund_requests, serialize_public_refund_vote_detail,
+    serialize_public_refund_vote_summary, serialize_refund_request_detail,
     serialize_refund_request_summary,
 };
 pub(crate) use order_scheduler_support::{
@@ -236,6 +247,7 @@ pub(crate) use app_state::{
     AppState, AsyncQueueMetrics, CachedIdList, CachedLegacyAvailability, CachedResponse,
     CachedSetting, CountryHit, TrafficSnapshot,
 };
+pub(crate) use exposure_control::{ExposureConfig, PublicSiteMode};
 pub(crate) use notice_notify_support::notify_notice_published;
 pub(crate) use telegram_notify_support::{
     send_telegram_text_to_admins, send_telegram_text_to_chat_ids, send_telegram_text_to_super_admins,
@@ -245,9 +257,10 @@ pub(crate) use ticket_notify_support::{
 };
 pub(crate) use settings_support::{
     clear_settings_cache, get_setting_bool, get_setting_f64, get_setting_int, get_setting_string,
-    get_setting_value, resolve_oauth_linux_do_available, resolve_pow_effective_difficulty,
-    resolve_register_mode, setting_json_or_csv_array, upsert_setting_string,
-    upsert_setting_string_with_metadata,
+    get_setting_value, invalidate_setting_cache, load_cached_setting_value,
+    resolve_oauth_linux_do_available, resolve_pow_effective_difficulty, resolve_register_mode,
+    setting_json_or_csv_array, upsert_setting_string, upsert_setting_string_with_metadata,
+    warm_all_settings_cache, warm_setting_cache,
 };
 pub(crate) use stats_support::{
     load_admin_dashboard_summary, percentage_growth,
@@ -493,6 +506,16 @@ struct BearerUserRow {
     device_limit: Option<i64>,
     speed_limit: Option<i64>,
     next_reset_at: Option<i64>,
+}
+
+#[derive(Clone, sqlx::FromRow)]
+struct RouteAccountRow {
+    id: i64,
+    banned: i8,
+    ban_reason: Option<String>,
+    is_admin: i8,
+    is_super_admin: i8,
+    abilities: Option<String>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -1151,11 +1174,6 @@ async fn build_subscribe_entry_response(
         return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
     }
 
-    let cache_key = format!("subscribe:{}?{}", token_or_path, uri.query().unwrap_or_default());
-    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
-        return Ok(response);
-    }
-
     let params = parse_query(&uri);
     let is_token_path = token_or_path.len() == 32 && token_or_path.chars().all(|c| c.is_ascii_hexdigit());
     let user = if is_token_path {
@@ -1177,6 +1195,16 @@ async fn build_subscribe_entry_response(
     }
 
     let mode = rust_subscribe_mode(&params, &headers).unwrap_or(RustSubscribeMode::General);
+    let cache_key = format!(
+        "subscribe:node-credential-v1:{}:{}:{}:{}",
+        user.id,
+        user.subscription_credential_version.unwrap_or(0),
+        rust_subscribe_mode_cache_key(mode),
+        sha256_hex(uri.query().unwrap_or_default()),
+    );
+    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
+        return Ok(response);
+    }
     let payload = build_rust_subscribe_payload(state, &user, &params, mode).await?;
     let response = cached_plain_response(state, cache_key, payload, Duration::from_secs(15), "text/plain; charset=utf-8");
     Ok(response)
@@ -1210,40 +1238,37 @@ async fn load_available_server_nodes_for_user(
     state: &AppState,
     user_id: i64,
     trust_level: i64,
-    is_super_admin: bool,
+    _is_super_admin: bool,
 ) -> Result<Vec<ServerNodeRow>, sqlx::Error> {
-    if is_super_admin {
-        return sqlx::query_as::<_, ServerNodeRow>(
-            "SELECT DISTINCT sn.id, sn.user_id, sn.name, sn.host, sn.port, sn.service_port, sn.protocol, sn.settings, sn.access_control, sn.device_limit, sn.connection_limit, sn.speed_limit_down, sn.created_at
-             FROM server_nodes sn
-             WHERE sn.status = 'active'
-             ORDER BY sn.id"
-        )
-        .fetch_all(&state.db)
-        .await;
-    }
-
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
 
     let rows = sqlx::query_as::<_, ServerNodeRow>(
         "SELECT DISTINCT sn.id, sn.user_id, sn.name, sn.host, sn.port, sn.service_port, sn.protocol, sn.settings, sn.access_control, sn.device_limit, sn.connection_limit, sn.speed_limit_down, sn.created_at
          FROM server_nodes sn
+         JOIN v2_user owner ON owner.id = sn.user_id
          WHERE sn.status = 'active'
+           AND owner.banned = 0
            AND (
              sn.user_id = ?
              OR EXISTS (
                SELECT 1 FROM user_node_access ua
-               WHERE ua.node_id = sn.id AND ua.user_id = ?
+               WHERE ua.node_id = sn.id
+                 AND ua.user_id = ?
+                 AND owner.is_super_admin = 1
+                 AND owner.banned = 0
              )
              OR EXISTS (
                SELECT 1
-               FROM user_node_plan_access upa
-               JOIN user_plan_subscriptions ups
-                 ON ups.user_id = upa.user_id
-                AND ups.plan_id = upa.plan_id
-               WHERE upa.user_id = ?
-                 AND upa.node_id = sn.id
+               FROM user_plan_subscriptions ups
+               JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
+               WHERE ups.user_id = ?
+                 AND plan.owner_user_id = sn.user_id
+                 AND JSON_CONTAINS(
+                     COALESCE(plan.node_ids, JSON_ARRAY()),
+                     CAST(sn.id AS JSON),
+                     '$'
+                 )
                  AND ups.status = 1
                  AND (ups.expired_at IS NULL OR ups.expired_at > ?)
                  AND (
@@ -1252,7 +1277,9 @@ async fn load_available_server_nodes_for_user(
                  )
              )
              OR (
-               JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
+               owner.is_super_admin = 1
+               AND owner.banned = 0
+               AND JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(sn.access_control, '$.min_trust_level')) AS SIGNED) <= ?
              )
            )
@@ -1288,6 +1315,22 @@ enum RustSubscribeMode {
     Clash,
     ClashMeta,
     SingBox,
+}
+
+fn rust_subscribe_mode_cache_key(mode: RustSubscribeMode) -> &'static str {
+    match mode {
+        RustSubscribeMode::General => "general",
+        RustSubscribeMode::Shadowsocks => "shadowsocks",
+        RustSubscribeMode::Shadowrocket => "shadowrocket",
+        RustSubscribeMode::QuantumultX => "quantumultx",
+        RustSubscribeMode::Loon => "loon",
+        RustSubscribeMode::Surge => "surge",
+        RustSubscribeMode::Surfboard => "surfboard",
+        RustSubscribeMode::Stash => "stash",
+        RustSubscribeMode::Clash => "clash",
+        RustSubscribeMode::ClashMeta => "clashmeta",
+        RustSubscribeMode::SingBox => "singbox",
+    }
 }
 
 fn rust_subscribe_mode(query: &HashMap<String, String>, headers: &HeaderMap) -> Option<RustSubscribeMode> {
@@ -1386,6 +1429,7 @@ async fn build_rust_subscribe_payload(
     }
     for server in &servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, &uuid, server);
         let name = server.name.clone();
         let settings = normalized_protocol_settings(
             &normalized_type,
@@ -1398,28 +1442,28 @@ async fn build_rust_subscribe_payload(
 
         let line = match mode {
             RustSubscribeMode::General => match normalized_type.as_str() {
-                "vmess" => build_general_vmess(&uuid, &server, &name, &settings),
-                "vless" => build_general_vless(&uuid, &server, &name, &settings),
-                "shadowsocks" => build_general_shadowsocks(&uuid, &server, &name, &settings, &state.app_key),
-                "trojan" => build_general_trojan(&uuid, &server, &name, &settings),
-                "hysteria" => build_general_hysteria(&uuid, &server, &name, &settings),
-                "socks" => build_general_socks(&uuid, &server, &name),
+                "vmess" => build_general_vmess(&node_uuid, &server, &name, &settings),
+                "vless" => build_general_vless(&node_uuid, &server, &name, &settings),
+                "shadowsocks" => build_general_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
+                "trojan" => build_general_trojan(&node_uuid, &server, &name, &settings),
+                "hysteria" => build_general_hysteria(&node_uuid, &server, &name, &settings),
+                "socks" => build_general_socks(&node_uuid, &server, &name),
                 _ => String::new(),
             },
             RustSubscribeMode::Shadowsocks => String::new(),
             RustSubscribeMode::Shadowrocket => match normalized_type.as_str() {
-                "vmess" => build_shadowrocket_vmess(&uuid, &server, &name, &settings),
-                "vless" => build_shadowrocket_vless(&uuid, &server, &name, &settings),
-                "shadowsocks" => build_shadowrocket_shadowsocks(&uuid, &server, &name, &settings, &state.app_key),
-                "trojan" => build_shadowrocket_trojan(&uuid, &server, &name, &settings),
-                "hysteria" => build_general_hysteria(&uuid, &server, &name, &settings),
-                "socks" => build_general_socks(&uuid, &server, &name),
+                "vmess" => build_shadowrocket_vmess(&node_uuid, &server, &name, &settings),
+                "vless" => build_shadowrocket_vless(&node_uuid, &server, &name, &settings),
+                "shadowsocks" => build_shadowrocket_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
+                "trojan" => build_shadowrocket_trojan(&node_uuid, &server, &name, &settings),
+                "hysteria" => build_general_hysteria(&node_uuid, &server, &name, &settings),
+                "socks" => build_general_socks(&node_uuid, &server, &name),
                 _ => String::new(),
             },
             RustSubscribeMode::QuantumultX => match normalized_type.as_str() {
-                "vmess" => build_quantumultx_vmess(&uuid, &server, &name, &settings),
-                "shadowsocks" => build_quantumultx_shadowsocks(&uuid, &server, &name, &settings, &state.app_key),
-                "trojan" => build_quantumultx_trojan(&uuid, &server, &name, &settings),
+                "vmess" => build_quantumultx_vmess(&node_uuid, &server, &name, &settings),
+                "shadowsocks" => build_quantumultx_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
+                "trojan" => build_quantumultx_trojan(&node_uuid, &server, &name, &settings),
                 _ => String::new(),
             },
             RustSubscribeMode::Loon => String::new(),
@@ -1907,7 +1951,11 @@ async fn find_user_order_by_trade_no(state: &AppState, user_id: i64, trade_no: &
     .await
 }
 
-async fn load_orders_by_ids(state: &AppState, ids: &[i64]) -> Result<Vec<UserOrderRow>, sqlx::Error> {
+async fn load_orders_by_ids(
+    state: &AppState,
+    user_id: i64,
+    ids: &[i64],
+) -> Result<Vec<UserOrderRow>, sqlx::Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -1920,10 +1968,10 @@ async fn load_orders_by_ids(state: &AppState, ids: &[i64]) -> Result<Vec<UserOrd
                 p.name AS plan_name, p.scope AS plan_scope
          FROM v2_order o
          LEFT JOIN v2_plan p ON p.id = o.plan_id
-         WHERE o.id IN ({})",
+         WHERE o.user_id = ? AND o.id IN ({})",
         placeholders
     );
-    let mut query = sqlx::query_as::<_, UserOrderRow>(&sql);
+    let mut query = sqlx::query_as::<_, UserOrderRow>(&sql).bind(user_id);
     for id in ids {
         query = query.bind(*id);
     }
@@ -1945,22 +1993,6 @@ async fn load_owned_node_admin_node(
     .bind(owner_user_id)
     .fetch_optional(&state.db)
     .await
-}
-
-async fn apply_server_node_access_control_with_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
-    node_id: u64,
-    access: &Map<String, Value>,
-) -> Result<(), sqlx::Error> {
-    if let Some(authorized_users) = access.get("authorized_users").and_then(Value::as_array) {
-        let user_ids = distinct_positive_user_ids(
-            authorized_users
-                .iter()
-                .filter_map(parse_i64_value),
-        );
-        replace_individual_node_access_with_tx(tx, node_id, &user_ids).await?;
-    }
-    Ok(())
 }
 
 fn payload_string_field(payload: &Map<String, Value>, key: &str) -> Option<String> {
@@ -1989,6 +2021,7 @@ fn parse_server_node_mutation_input(
     payload: &Value,
     existing: Option<&ServerNodeOwnerRow>,
     allow_concurrent_ip_limit: bool,
+    allow_broad_access: bool,
 ) -> Result<ServerNodeMutationInput, Response<Body>> {
     let payload = payload.as_object().ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))?;
     let mut input = ServerNodeMutationInput::default();
@@ -2000,6 +2033,23 @@ fn parse_server_node_mutation_input(
     input.location_name = payload_string_field(payload, "location_name");
     input.settings = payload_object_field(payload, "settings");
     input.access_control = payload_object_field(payload, "access_control");
+    if !allow_broad_access
+        && input
+            .access_control
+            .as_ref()
+            .is_some_and(|access| {
+                access.contains_key("min_trust_level")
+                    || access
+                        .get("authorized_users")
+                        .and_then(Value::as_array)
+                        .is_some_and(|users| !users.is_empty())
+            })
+    {
+        return Err(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"message":"Publishing a node to other users requires super-admin permission"}),
+        ));
+    }
     input.traffic_limit = payload.get("traffic_limit").and_then(parse_i64_value);
     input.traffic_multiplier = payload.get("traffic_multiplier").and_then(Value::as_f64);
     input.device_limit = payload.get("device_limit").and_then(parse_i64_value);
@@ -2198,7 +2248,8 @@ fn serialize_tcping_agent(agent: &TcpingAgentRow) -> Value {
         "id": agent.id,
         "name": agent.name,
         "is_enabled": true,
-        "token": agent.token,
+        "token": if agent.token.trim().is_empty() { Value::Null } else { Value::String("configured".to_string()) },
+        "token_configured": !agent.token.trim().is_empty(),
         "location_code": agent.location_code,
         "location_name": agent.location_name,
         "location_province": agent.location_province,
@@ -2392,6 +2443,10 @@ fn serialize_server_node_index_item(
         "tcping_last_sampled_at": if tcping_monitorable { node.tcping_last_sampled_at } else { None },
         "is_active": node.status == "active",
         "is_traffic_exceeded": server_node_is_traffic_exceeded(node),
+        "v2bx_token_configured": node
+            .v2bx_token
+            .as_deref()
+            .is_some_and(crate::machine_bootstrap_support::is_strong_machine_token),
         "created_at": format_optional_naive_datetime(node.created_at),
         "updated_at": format_optional_naive_datetime(node.updated_at),
     })
@@ -2611,7 +2666,8 @@ fn serialize_server_node_owner_model(node: &ServerNodeOwnerRow) -> Value {
         "status": node.status,
         "v2bx_node_id": node.v2bx_node_id,
         "v2bx_config": node.v2bx_config,
-        "v2bx_token": node.v2bx_token,
+        "v2bx_token": node.v2bx_token.as_ref().filter(|value| !value.trim().is_empty()).map(|_| "configured"),
+        "v2bx_token_configured": node.v2bx_token.as_ref().is_some_and(|value| !value.trim().is_empty()),
         "device_limit": node.device_limit,
         "connection_limit": node.connection_limit,
         "speed_limit_up": node.speed_limit_up,
@@ -2639,6 +2695,18 @@ fn tcping_is_udp_protocol(protocol: &str) -> bool {
 }
 
 fn tcping_is_monitorable(node: &TcpingNodeOverviewRow) -> bool {
+    if node.status != "active" || !node.tcping_enabled {
+        return false;
+    }
+    let target_host = node
+        .tcping_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(node.host.as_str());
+    if crate::url_security_support::is_private_or_reserved_host(target_host) {
+        return false;
+    }
     if !tcping_is_udp_protocol(&node.protocol) {
         return true;
     }
@@ -2701,6 +2769,47 @@ async fn resolve_panel_base_url(state: &AppState) -> String {
         return base.trim_end_matches('/').to_string();
     }
     configured_url.trim_end_matches('/').to_string()
+}
+
+async fn resolve_installer_panel_base_url(
+    state: &AppState,
+) -> Result<String, Response<Body>> {
+    let raw = resolve_panel_base_url(state).await;
+    let parsed = url::Url::parse(&raw)
+        .map_err(|_| fail_json_response(StatusCode::SERVICE_UNAVAILABLE, "Installer APP_URL is invalid"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| fail_json_response(StatusCode::SERVICE_UNAVAILABLE, "Installer APP_URL is invalid"))?;
+    let loopback_http = parsed.scheme() == "http"
+        && (host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback()));
+    if parsed.scheme() != "https" && !loopback_http {
+        return Err(fail_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Installer APP_URL must use HTTPS except for loopback development",
+        ));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(fail_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Installer APP_URL contains unsupported URL components",
+        ));
+    }
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn installer_curl_command_prefix(panel_url: &str) -> &'static str {
+    if panel_url.starts_with("https://") {
+        "curl -fsSL --proto '=https' --proto-redir '=https'"
+    } else {
+        "curl -fsSL --proto '=http' --proto-redir '=http'"
+    }
 }
 
 async fn load_user_audit_logs(
@@ -3091,7 +3200,7 @@ async fn generate_unique_gift_card_code(
 }
 
 async fn load_gift_card_code_lookup_for_update(
-    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     code: &str,
 ) -> Result<Option<GiftCardCodeLookupRow>, sqlx::Error> {
     sqlx::query_as::<_, GiftCardCodeLookupRow>(
@@ -3110,7 +3219,7 @@ async fn load_gift_card_code_lookup_for_update(
          FOR UPDATE"
     )
     .bind(code)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut **tx)
     .await
 }
 
@@ -3367,6 +3476,7 @@ async fn update_login_timestamp(state: &AppState, user_id: i64) -> Result<(), sq
 async fn update_user_password(state: &AppState, user_id: i64, password: &str) -> Result<(), sqlx::Error> {
     let hashed = bcrypt::hash(password, 12).map_err(|_| sqlx::Error::Protocol("bcrypt hash failed".into()))?;
     let now = Utc::now().timestamp();
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE v2_user
          SET password = ?, password_algo = NULL, password_salt = NULL, updated_at = ?
@@ -3375,9 +3485,16 @@ async fn update_user_password(state: &AppState, user_id: i64, password: &str) ->
     .bind(hashed)
     .bind(now)
     .bind(user_id)
-    .execute(&state.db)
-    .await
-    .map(|_| ())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM personal_access_tokens
+         WHERE tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'"
+    )
+    .bind(user_id as u64)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 async fn can_use_email_login(state: &AppState, is_super_admin: bool) -> bool {
@@ -3710,7 +3827,6 @@ async fn apply_gift_card_rewards_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     state: &AppState,
     user_id: i64,
-    code: &GiftCardCodeLookupRow,
     actual_rewards: &Value,
     now: i64,
 ) -> Result<BearerUserRow, Response<Body>> {
@@ -4204,7 +4320,7 @@ async fn issue_personal_access_token(state: &AppState, user: &LoginUserRow) -> R
     let hashed = sha256_hex(&plain);
     let abilities = "[\"*\"]";
 
-    let result = sqlx::query(
+    sqlx::query(
         "INSERT INTO personal_access_tokens (tokenable_type, tokenable_id, name, token, abilities, expires_at, created_at, updated_at)
          VALUES ('App\\\\Models\\\\User', ?, ?, ?, ?, ?, NOW(), NOW())"
     )
@@ -4226,7 +4342,7 @@ async fn find_user_id_by_bearer_token(state: &AppState, authorization: &str) -> 
     }
     let hashed = sha256_hex(token);
     let row = sqlx::query(
-        "SELECT tokenable_id, expires_at
+        "SELECT tokenable_id, UNIX_TIMESTAMP(expires_at) AS expires_at_ts, abilities
          FROM personal_access_tokens
          WHERE token = ? AND tokenable_type = 'App\\\\Models\\\\User'
          LIMIT 1"
@@ -4238,16 +4354,88 @@ async fn find_user_id_by_bearer_token(state: &AppState, authorization: &str) -> 
         return Ok(None);
     };
 
-    let expires_at = row.try_get::<Option<chrono::NaiveDateTime>, _>("expires_at")?;
+    let expires_at = row.try_get::<Option<i64>, _>("expires_at_ts")?;
     if expires_at
-        .map(|value| value <= Utc::now().naive_utc())
+        .map(|value| value <= Utc::now().timestamp())
         .unwrap_or(false)
     {
+        return Ok(None);
+    }
+    let abilities = row.try_get::<Option<String>, _>("abilities")?;
+    if !token_has_full_access_ability(abilities.as_deref()) {
         return Ok(None);
     }
 
     let user_id = row.try_get::<u64, _>("tokenable_id")?;
     Ok(Some(user_id as i64))
+}
+
+async fn authenticate_route_account(
+    state: &AppState,
+    headers: &HeaderMap,
+    required: RequiredAccountRole,
+) -> Result<RouteAccountRow, Response<Body>> {
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| json_error(StatusCode::FORBIDDEN, "未登录或登陆已过期"))?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .unwrap_or(authorization)
+        .trim();
+    if token.is_empty() {
+        return Err(json_error(StatusCode::FORBIDDEN, "未登录或登陆已过期"));
+    }
+
+    let account = sqlx::query_as::<_, RouteAccountRow>(
+        "SELECT u.id, u.banned, u.ban_reason, u.is_admin, u.is_super_admin, pat.abilities
+         FROM personal_access_tokens pat
+         JOIN v2_user u ON u.id = pat.tokenable_id
+         WHERE pat.token = ?
+           AND pat.tokenable_type = 'App\\\\Models\\\\User'
+           AND (pat.expires_at IS NULL OR pat.expires_at > NOW())
+         LIMIT 1"
+    )
+    .bind(sha256_hex(token))
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?
+    .ok_or_else(|| json_error(StatusCode::FORBIDDEN, "未登录或登陆已过期"))?;
+
+    if !token_has_full_access_ability(account.abilities.as_deref()) {
+        return Err(json_error(StatusCode::FORBIDDEN, "Token does not grant full access"));
+    }
+    if account.banned != 0 {
+        let user = LoginUserRow {
+            id: account.id,
+            email: String::new(),
+            password: String::new(),
+            password_algo: None,
+            password_salt: None,
+            banned: account.banned,
+            ban_reason: account.ban_reason.clone(),
+            token: String::new(),
+            is_admin: account.is_admin,
+            is_super_admin: account.is_super_admin,
+            last_login_at: None,
+        };
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &user_suspension_message(&user),
+        ));
+    }
+    if !account_has_role(account.is_admin, account.is_super_admin, required) {
+        let message = match required {
+            RequiredAccountRole::User => "Authentication required",
+            RequiredAccountRole::Admin => "Administrator privileges required",
+            RequiredAccountRole::SuperAdmin => "Super administrator privileges required",
+        };
+        return Err(json_error(StatusCode::FORBIDDEN, message));
+    }
+
+    Ok(account)
 }
 
 fn user_is_available(user: &BearerUserRow) -> bool {
@@ -4298,7 +4486,7 @@ async fn authenticate_bearer_user(state: &AppState, headers: &HeaderMap) -> Resu
 
 async fn authenticate_super_admin_user(state: &AppState, headers: &HeaderMap) -> Result<BearerUserRow, Response<Body>> {
     let user = authenticate_bearer_user(state, headers).await?;
-    if user.is_super_admin == 0 {
+    if !account_has_role(user.is_admin, user.is_super_admin, RequiredAccountRole::SuperAdmin) {
         return Err(json_error(StatusCode::FORBIDDEN, "Super administrator privileges required"));
     }
     Ok(user)
@@ -4306,7 +4494,7 @@ async fn authenticate_super_admin_user(state: &AppState, headers: &HeaderMap) ->
 
 async fn authenticate_admin_user(state: &AppState, headers: &HeaderMap) -> Result<BearerUserRow, Response<Body>> {
     let user = authenticate_bearer_user(state, headers).await?;
-    if user.is_admin == 0 && user.is_super_admin == 0 {
+    if !account_has_role(user.is_admin, user.is_super_admin, RequiredAccountRole::Admin) {
         return Err(json_error(StatusCode::FORBIDDEN, "Administrator privileges required"));
     }
     Ok(user)
@@ -4871,6 +5059,27 @@ pub(crate) async fn redis_get_string(state: &AppState, key: &str) -> Result<Opti
 }
 
 async fn redis_get_string_raw(state: &AppState, key: &str) -> Result<Option<String>, String> {
+    redis_string_command_raw(state, b"GET", key).await
+}
+
+pub(crate) async fn redis_getdel_string(
+    state: &AppState,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let key = format!("{}{}{}", state.redis_prefix, state.cache_prefix, key);
+    redis_string_command_raw(state, b"GETDEL", &key).await
+}
+
+pub(crate) async fn redis_del_string(state: &AppState, key: &str) -> Result<(), String> {
+    let key = format!("{}{}{}", state.redis_prefix, state.cache_prefix, key);
+    redis_del_key(state, &key).await
+}
+
+async fn redis_string_command_raw(
+    state: &AppState,
+    command: &[u8],
+    key: &str,
+) -> Result<Option<String>, String> {
     let addr = format!("{}:{}", state.redis_host, state.redis_port);
     let mut stream = TcpStream::connect(&addr)
         .await
@@ -4892,14 +5101,15 @@ async fn redis_get_string_raw(state: &AppState, key: &str) -> Result<Option<Stri
         return Err(format!("redis SELECT failed: {}", reply.trim()));
     }
 
-    let get = redis_resp_array(&[b"GET".as_slice(), key.as_bytes()]);
-    stream.write_all(get.as_bytes()).await.map_err(|err| format!("redis GET write failed: {}", err))?;
+    let request = redis_resp_array(&[command, key.as_bytes()]);
+    let command_name = String::from_utf8_lossy(command);
+    stream.write_all(request.as_bytes()).await.map_err(|err| format!("redis {} write failed: {}", command_name, err))?;
     let reply = redis_read_reply(&mut stream).await?;
     if reply.starts_with("$-1") {
         return Ok(None);
     }
     if !reply.starts_with('$') {
-        return Err(format!("redis GET failed: {}", reply.trim()));
+        return Err(format!("redis {} failed: {}", command_name, reply.trim()));
     }
     let mut lines = reply.splitn(3, "\r\n");
     let _bulk = lines.next();
@@ -5085,31 +5295,27 @@ pub(crate) async fn rotate_subscription_credentials_daily(
         return Ok(0);
     }
 
-    let already_rotated_today: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)
-         FROM v2_user
-         WHERE last_subscription_credential_rotation_at IS NOT NULL
-           AND last_subscription_credential_rotation_at >= ?"
-    )
-    .bind(scheduled.timestamp())
-    .fetch_one(&state.db)
-    .await?;
-    if already_rotated_today > 0 {
-        return Ok(0);
-    }
-
     let result = sqlx::query(
         "UPDATE v2_user
          SET subscription_credential_version = GREATEST(COALESCE(subscription_credential_version, 0), 0) + 1,
              last_subscription_credential_rotation_at = ?,
              updated_at = ?
-         WHERE id > 0"
+         WHERE id > 0
+           AND (
+               last_subscription_credential_rotation_at IS NULL
+               OR last_subscription_credential_rotation_at < ?
+           )"
     )
     .bind(now_ts)
     .bind(now_ts)
+    .bind(scheduled.timestamp())
     .execute(&state.db)
     .await?;
-    Ok(result.rows_affected())
+    let updated = result.rows_affected();
+    if updated > 0 {
+        clear_all_authorization_caches(state);
+    }
+    Ok(updated)
 }
 
 async fn load_active_server_node_monitor_rows(
@@ -5557,6 +5763,7 @@ async fn build_singbox_json_payload(
     let mut tags = Vec::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -5567,15 +5774,15 @@ async fn build_singbox_json_payload(
         );
 
         let outbound = match normalized_type.as_str() {
-            "shadowsocks" => Some(build_singbox_shadowsocks(uuid, server, &settings, &state.app_key)),
-            "trojan" => Some(build_singbox_trojan(uuid, server, &settings)),
-            "vmess" => Some(build_singbox_vmess(uuid, server, &settings)),
-            "vless" => Some(build_singbox_vless(uuid, server, &settings)),
-            "hysteria" => Some(build_singbox_hysteria(uuid, server, &settings)),
-            "tuic" => Some(build_singbox_tuic(uuid, server, &settings)),
-            "anytls" => Some(build_singbox_anytls(uuid, server, &settings)),
-            "socks" => Some(build_singbox_socks(uuid, server, &settings)),
-            "http" => Some(build_singbox_http(uuid, server, &settings)),
+            "shadowsocks" => Some(build_singbox_shadowsocks(&node_uuid, server, &settings, &state.app_key)),
+            "trojan" => Some(build_singbox_trojan(&node_uuid, server, &settings)),
+            "vmess" => Some(build_singbox_vmess(&node_uuid, server, &settings)),
+            "vless" => Some(build_singbox_vless(&node_uuid, server, &settings)),
+            "hysteria" => Some(build_singbox_hysteria(&node_uuid, server, &settings)),
+            "tuic" => Some(build_singbox_tuic(&node_uuid, server, &settings)),
+            "anytls" => Some(build_singbox_anytls(&node_uuid, server, &settings)),
+            "socks" => Some(build_singbox_socks(&node_uuid, server, &settings)),
+            "http" => Some(build_singbox_http(&node_uuid, server, &settings)),
             _ => None,
         };
 
@@ -5609,6 +5816,7 @@ async fn build_clash_proxies(
     let mut result = Vec::new();
     for server in servers {
         let normalized_type = normalize_type(&server.protocol).unwrap_or_default();
+        let node_uuid = node_scoped_uuid(&state.app_key, uuid, server);
         let settings = normalized_protocol_settings(
             &normalized_type,
             server
@@ -5618,11 +5826,11 @@ async fn build_clash_proxies(
                 .unwrap_or_default(),
         );
         let proxy = match normalized_type.as_str() {
-            "shadowsocks" => Some(build_clash_shadowsocks(uuid, server, &settings, &state.app_key)),
-            "vmess" => Some(build_clash_vmess(uuid, server, &settings)),
-            "trojan" => Some(build_clash_trojan(uuid, server, &settings)),
-            "socks" => Some(build_clash_socks5(uuid, server)),
-            "http" => Some(build_clash_http(uuid, server)),
+            "shadowsocks" => Some(build_clash_shadowsocks(&node_uuid, server, &settings, &state.app_key)),
+            "vmess" => Some(build_clash_vmess(&node_uuid, server, &settings)),
+            "trojan" => Some(build_clash_trojan(&node_uuid, server, &settings)),
+            "socks" => Some(build_clash_socks5(&node_uuid, server)),
+            "http" => Some(build_clash_http(&node_uuid, server)),
             _ => None,
         };
         if let Some(proxy) = proxy {
@@ -7188,6 +7396,38 @@ fn effective_uuid(base_uuid: &str, version: i64, rotate_enabled: bool) -> String
     sha.update(format!("{}|{}", base_uuid, version).as_bytes());
     let hash = sha.finalize();
     let mut bytes = hash[..16].to_vec();
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+pub(crate) fn node_scoped_uuid(
+    app_key: &str,
+    base_uuid: &str,
+    server: &ServerNodeRow,
+) -> String {
+    if base_uuid.is_empty() {
+        return String::new();
+    }
+    if server.user_id <= 0 {
+        return base_uuid.to_string();
+    }
+
+    let message = format!(
+        "notxboard-node-credential-v1\n{}\n{}\n{}",
+        base_uuid,
+        server.user_id,
+        server.id,
+    );
+    let digest = hmac_sha256::HMAC::mac(message.as_bytes(), &app_key_bytes(app_key));
+    let mut bytes = digest[..16].to_vec();
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format!(

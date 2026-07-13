@@ -18,6 +18,7 @@ DB_USERNAME="${DB_USERNAME:-notxboard}"
 DB_PASSWORD="${DB_PASSWORD:-notxboard-pass}"
 DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-notxboard-root-pass}"
 APP_KEY="${APP_KEY:-base64:h8KOzHFYUR2mToeLkkAAqw2/Oaibg+YEzOVW0gfAzNo=}"
+BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN:-notxboard-test-bootstrap-token-2026}"
 APP_NAME="${APP_NAME:-notXboard}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-fulladmin@example.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Passw0rd!2026}"
@@ -133,6 +134,7 @@ docker run -d --rm \
   -e REDIS_PREFIX="${REDIS_PREFIX}" \
   -e CACHE_PREFIX="${CACHE_PREFIX}" \
   -e APP_KEY="${APP_KEY}" \
+  -e BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN}" \
   -e APP_URL="http://127.0.0.1:${HOST_PORT}" \
   -e APP_NAME="${APP_NAME}" \
   -e RUST_GATEWAY_OWNS_SCHEDULER=true \
@@ -147,6 +149,7 @@ docker exec "${GATEWAY_CONTAINER}" sh -c 'test ! -e /app/runtime/app && test ! -
 echo "[6/12] bootstrap full schema through Rust"
 curl -fsS -X POST "http://127.0.0.1:${HOST_PORT}/bootstrap/full" \
   -H 'Content-Type: application/json' \
+  -H "X-Bootstrap-Token: ${BOOTSTRAP_TOKEN}" \
   --data "{\"app_name\":\"${APP_NAME}\",\"app_url\":\"http://127.0.0.1:${HOST_PORT}\",\"admin_email\":\"${ADMIN_EMAIL}\",\"admin_password\":\"${ADMIN_PASSWORD}\"}"
 echo
 
@@ -167,6 +170,27 @@ if [ -z "${SECURE_PATH}" ]; then
 fi
 echo "Resolved secure_path: ${SECURE_PATH}"
 
+echo "Verify private admin console assets stay on the configured secure path"
+for asset in admin-console.css admin-console.js; do
+  asset_url="http://127.0.0.1:${HOST_PORT}/${SECURE_PATH}/assets/${asset}"
+  asset_status="$(curl -sS -o /dev/null -w '%{http_code}' "${asset_url}")"
+  if [ "${asset_status}" != "200" ]; then
+    echo "private admin asset failed: ${asset} returned ${asset_status}" >&2
+    exit 1
+  fi
+done
+
+for private_url in \
+  "http://127.0.0.1:${HOST_PORT}/${SECURE_PATH}-wrong/assets/admin-console.css" \
+  "http://127.0.0.1:${HOST_PORT}/assets/admin-console.css" \
+  "http://127.0.0.1:${HOST_PORT}/assets/admin/index.html"; do
+  private_status="$(curl -sS -o /dev/null -w '%{http_code}' "${private_url}")"
+  if [ "${private_status}" != "404" ]; then
+    echo "private admin asset boundary failed: ${private_url} returned ${private_status}" >&2
+    exit 1
+  fi
+done
+
 echo "[8/12] login through Rust passport API"
 LOGIN_RESPONSE="$(curl -fsS -X POST "http://127.0.0.1:${HOST_PORT}/api/v1/passport/auth/login" \
   -H 'Content-Type: application/json' \
@@ -186,9 +210,43 @@ echo "${HOOKS_RESPONSE}"
 printf '%s' "${HOOKS_RESPONSE}" | json_array_contains "data" "order.create.before"
 printf '%s' "${HOOKS_RESPONSE}" | json_array_contains "data" "user.telegram.bind.after"
 
-echo "[10/12] verify Rust built-in theme app without theme source runtime"
+echo "[10/12] verify default minimal private entry and Rust built-in theme app"
 PUBLIC_PAGE="$(curl -fsS "http://127.0.0.1:${HOST_PORT}/")"
-printf '%s' "${PUBLIC_PAGE}" | grep -q '公共概览'
+for expected in \
+  '<meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">' \
+  '<p class="eyebrow">授权访问</p>' \
+  '<p class="summary">此站点仅供获授权的成员使用。</p>' \
+  'href="/app/#/login"' \
+  'Private workspace'
+do
+  if ! grep -Fq "${expected}" <<<"${PUBLIC_PAGE}"; then
+    echo "minimal private entry marker missing: ${expected}" >&2
+    exit 1
+  fi
+done
+for forbidden in \
+  '公共运行数据' \
+  '运行概览' \
+  '机场' \
+  '流量' \
+  '带宽' \
+  '节点' \
+  '订阅' \
+  'bandwidth' \
+  'proxy' \
+  'subscription' \
+  'traffic' \
+  'vpn'
+do
+  if grep -Fqi "${forbidden}" <<<"${PUBLIC_PAGE}"; then
+    echo "operational product term exposed by default minimal entry: ${forbidden}" >&2
+    exit 1
+  fi
+done
+if grep -Fq '{{ $title }}' <<<"${PUBLIC_PAGE}"; then
+  echo "unrendered title placeholder found in default minimal entry" >&2
+  exit 1
+fi
 APP_PAGE="$(curl -fsS "http://127.0.0.1:${HOST_PORT}/app")"
 printf '%s' "${APP_PAGE}" | grep -q 'Maintainable'
 printf '%s' "${APP_PAGE}" | grep -q '/theme/Maintainable/app.js'

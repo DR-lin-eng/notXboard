@@ -196,6 +196,12 @@ async fn build_configure_node_response(
 
     let payload = parse_json_body(body).await?;
     let min_trust_level = payload.get("min_trust_level").and_then(parse_i64_value);
+    if min_trust_level.is_some() && user.is_super_admin != 1 {
+        return Ok(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"message": "Trust-wide node publishing requires super-admin permission"}),
+        ));
+    }
     if min_trust_level.map(|value| !(0..=4).contains(&value)).unwrap_or(false) {
         return Ok(json_status_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -207,6 +213,16 @@ async fn build_configure_node_response(
         .get("authorized_users")
         .and_then(Value::as_array)
         .map(|values| distinct_positive_user_ids(values.iter().filter_map(parse_i64_value)));
+    if user.is_super_admin != 1
+        && authorized_users
+            .as_ref()
+            .is_some_and(|user_ids| !user_ids.is_empty())
+    {
+        return Ok(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"message": "Publishing a node to other users requires super-admin permission"}),
+        ));
+    }
 
     let mut access_control = payload.as_object().cloned().unwrap_or_default();
     if let Some(level) = min_trust_level {
@@ -221,17 +237,63 @@ async fn build_configure_node_response(
     let access_control_json = Value::Object(access_control.clone());
 
     let mut tx = state.db.begin().await.map_err(internal_error)?;
-    sqlx::query("UPDATE server_nodes SET access_control = ?, updated_at = NOW() WHERE id = ? AND user_id = ?")
-        .bind(access_control_json.to_string())
-        .bind(node.id)
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({"message": "Server node not found"}),
+        ));
+    }
+
+    let updated = sqlx::query(
+        "UPDATE server_nodes
+         SET access_control = ?, updated_at = NOW()
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(access_control_json.to_string())
+    .bind(node.id)
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::owner_scoped_server_node_write_matched(
+        &mut tx,
+        node.id,
+        user.id,
+        updated.rows_affected(),
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({"message": "Server node not found"}),
+        ));
+    }
     if let Some(user_ids) = authorized_users {
-        replace_individual_node_access_with_tx(&mut tx, node.id, &user_ids)
-            .await
-            .map_err(internal_error)?;
+        if !crate::user_v1::server_nodes::replace_owned_individual_node_access_with_tx(
+            &mut tx,
+            node.id,
+            user.id,
+            &user_ids,
+        )
+        .await
+        .map_err(internal_error)?
+        {
+            tx.rollback().await.ok();
+            return Ok(json_status_response(
+                StatusCode::NOT_FOUND,
+                json!({"message": "Server node not found"}),
+            ));
+        }
     }
     tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node.id);
@@ -275,6 +337,12 @@ async fn build_share_with_user_response(
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
     let user = authenticate_bearer_user(state, &headers).await?;
+    if user.is_super_admin != 1 {
+        return Ok(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"success": false, "error": "Publishing a node to other users requires super-admin permission"}),
+        ));
+    }
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
         return Ok(json_status_response(
@@ -299,9 +367,23 @@ async fn build_share_with_user_response(
     if exists <= 0 {
         return Ok(json_value_response(json!({"success": false, "error": "User not found"})));
     }
-    upsert_individual_node_access(state, node.id, target_user_id)
-        .await
-        .map_err(internal_error)?;
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    let granted = upsert_owned_individual_node_access_with_tx(
+        &mut tx,
+        node.id,
+        user.id,
+        target_user_id,
+    )
+    .await
+    .map_err(internal_error)?;
+    if !granted {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({"success": false, "error": "Server node not found"}),
+        ));
+    }
+    tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node.id);
     Ok(json_value_response(json!({ "success": true })))
 }
@@ -314,6 +396,12 @@ async fn build_share_with_group_response(
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
     let user = authenticate_bearer_user(state, &headers).await?;
+    if user.is_super_admin != 1 {
+        return Ok(json_status_response(
+            StatusCode::FORBIDDEN,
+            json!({"success": false, "error": "Trust-wide node publishing requires super-admin permission"}),
+        ));
+    }
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
         return Ok(json_status_response(
@@ -338,12 +426,23 @@ async fn build_share_with_group_response(
         access_control = json!({});
     }
     access_control["min_trust_level"] = Value::from(min_trust_level);
-    sqlx::query("UPDATE server_nodes SET access_control = ?, updated_at = NOW() WHERE id = ?")
+    let updated = sqlx::query(
+        "UPDATE server_nodes
+         SET access_control = ?, updated_at = NOW()
+         WHERE id = ? AND user_id = ?",
+    )
     .bind(access_control.to_string())
     .bind(node.id)
+    .bind(user.id)
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({"success": false, "error": "Server node not found"}),
+        ));
+    }
     clear_accessible_user_ids_cache(state, node.id);
     Ok(json_value_response(json!({ "success": true })))
 }
@@ -372,9 +471,112 @@ async fn build_share_revoke_response(
         .and_then(parse_i64_value)
         .filter(|value| *value > 0)
         .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "The user_id field is required."))?;
-    revoke_individual_node_access(state, node.id, target_user_id)
-        .await
-        .map_err(internal_error)?;
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    let revoked = revoke_owned_individual_node_access_with_tx(
+        &mut tx,
+        node.id,
+        user.id,
+        target_user_id,
+    )
+    .await
+    .map_err(internal_error)?;
+    let Some(revoked) = revoked else {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({"success": false, "error": "Server node not found"}),
+        ));
+    };
+    if revoked > 1 {
+        tx.rollback().await.ok();
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unexpected node access revoke result",
+        ));
+    }
+    tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node.id);
     Ok(json_value_response(json!({ "success": true })))
+}
+
+async fn upsert_owned_individual_node_access_with_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+    target_user_id: i64,
+) -> Result<bool, sqlx::Error> {
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        tx,
+        node_id,
+        owner_user_id,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+
+    let upserted = sqlx::query(
+        "INSERT INTO user_node_access (user_id, node_id, access_type, granted_at)
+         SELECT ?, node_row.id, 'individual', CURRENT_TIMESTAMP
+         FROM server_nodes node_row
+         WHERE node_row.id = ? AND node_row.user_id = ?
+         ON DUPLICATE KEY UPDATE
+           access_type = VALUES(access_type),
+           granted_at = CURRENT_TIMESTAMP",
+    )
+    .bind(target_user_id)
+    .bind(node_id)
+    .bind(owner_user_id)
+    .execute(&mut **tx)
+    .await?;
+    if upserted.rows_affected() > 0 {
+        return Ok(true);
+    }
+
+    let persisted = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM user_node_access grant_row
+         JOIN server_nodes node_row ON node_row.id = grant_row.node_id
+         WHERE grant_row.node_id = ?
+           AND grant_row.user_id = ?
+           AND node_row.user_id = ?",
+    )
+    .bind(node_id)
+    .bind(target_user_id)
+    .bind(owner_user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(persisted == 1)
+}
+
+async fn revoke_owned_individual_node_access_with_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+    target_user_id: i64,
+) -> Result<Option<u64>, sqlx::Error> {
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        tx,
+        node_id,
+        owner_user_id,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+
+    let deleted = sqlx::query(
+        "DELETE grant_row
+         FROM user_node_access grant_row
+         JOIN server_nodes node_row ON node_row.id = grant_row.node_id
+         WHERE grant_row.node_id = ?
+           AND grant_row.user_id = ?
+           AND node_row.user_id = ?",
+    )
+    .bind(node_id)
+    .bind(target_user_id)
+    .bind(owner_user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(Some(deleted.rows_affected()))
 }

@@ -139,6 +139,7 @@ pub(crate) async fn load_voting_refund_requests(
          LEFT JOIN v2_plan p ON p.id = rr.plan_id
          LEFT JOIN v2_user u ON u.id = rr.user_id
          WHERE rr.status = 'voting'
+           AND (rr.voting_ends_at IS NULL OR rr.voting_ends_at > NOW())
          ORDER BY rr.id DESC
          LIMIT 200"
     )
@@ -162,6 +163,31 @@ pub(crate) async fn load_refund_request_detail_any(
          LEFT JOIN v2_plan p ON p.id = rr.plan_id
          LEFT JOIN v2_user u ON u.id = rr.user_id
          WHERE rr.id = ?
+         LIMIT 1"
+    )
+    .bind(refund_id)
+    .fetch_optional(&state.db)
+    .await
+}
+
+pub(crate) async fn load_open_voting_refund_request_detail(
+    state: &AppState,
+    refund_id: u64,
+) -> Result<Option<RefundRequestRow>, sqlx::Error> {
+    sqlx::query_as::<_, RefundRequestRow>(
+        "SELECT rr.id, rr.order_id, rr.trade_no, rr.user_id, rr.plan_id, rr.assigned_admin_user_id,
+                rr.status, rr.reason, rr.gateway_amount, rr.gateway_trade_no, rr.epay_pid, rr.epay_url,
+                rr.epay_key_encrypted, rr.used_kb, rr.allowance_kb, rr.refund_amount, rr.charged_amount,
+                rr.balance_refunded_amount, rr.gateway_refunded_amount, rr.site_balance_fallback_amount,
+                rr.gateway_refund_pending_amount, rr.gateway_refund_started_at, rr.voting_ends_at,
+                rr.refunded_at, rr.resolved_at, rr.resolved_by_user_id, rr.decision, rr.created_at, rr.updated_at,
+                p.name AS plan_name, p.scope AS plan_scope, u.email AS user_email
+         FROM order_refund_requests rr
+         LEFT JOIN v2_plan p ON p.id = rr.plan_id
+         LEFT JOIN v2_user u ON u.id = rr.user_id
+         WHERE rr.id = ?
+           AND rr.status = 'voting'
+           AND (rr.voting_ends_at IS NULL OR rr.voting_ends_at > NOW())
          LIMIT 1"
     )
     .bind(refund_id)
@@ -267,6 +293,59 @@ pub(crate) fn serialize_refund_request_summary(req: &RefundRequestRow) -> Value 
             "email": req.user_email,
         }
     })
+}
+
+pub(crate) fn serialize_public_refund_vote_summary(req: &RefundRequestRow) -> Value {
+    json!({
+        "id": req.id,
+        "status": req.status,
+        "reason": req.reason,
+        "used_kb": req.used_kb,
+        "allowance_kb": req.allowance_kb,
+        "refund_amount": req.refund_amount,
+        "charged_amount": req.charged_amount,
+        "voting_ends_at": format_optional_naive_datetime(req.voting_ends_at),
+        "created_at": format_optional_naive_datetime(req.created_at),
+        "updated_at": format_optional_naive_datetime(req.updated_at),
+        "plan": {
+            "id": req.plan_id,
+            "name": req.plan_name,
+            "scope": req.plan_scope,
+        },
+    })
+}
+
+pub(crate) fn serialize_public_refund_vote_detail(
+    req: &RefundRequestRow,
+    evidences: &[RefundEvidenceRow],
+    votes: &[RefundVoteRow],
+    viewer_user_id: u64,
+) -> Value {
+    let approve = votes.iter().filter(|vote| vote.vote == "approve").count() as i64;
+    let deny = votes.iter().filter(|vote| vote.vote == "deny").count() as i64;
+    let my_vote = votes
+        .iter()
+        .find(|vote| vote.user_id == viewer_user_id)
+        .map(|vote| vote.vote.clone());
+    let mut value = serialize_public_refund_vote_summary(req);
+    value["evidences"] = Value::Array(
+        evidences
+            .iter()
+            .map(|evidence| {
+                json!({
+                    "id": evidence.id,
+                    "role": evidence.role,
+                    "content": evidence.content,
+                    "is_mine": evidence.user_id == viewer_user_id,
+                    "created_at": format_optional_naive_datetime(evidence.created_at),
+                    "updated_at": format_optional_naive_datetime(evidence.updated_at),
+                })
+            })
+            .collect(),
+    );
+    value["vote_counts"] = json!({ "approve": approve, "deny": deny });
+    value["my_vote"] = my_vote.map(Value::String).unwrap_or(Value::Null);
+    value
 }
 
 pub(crate) fn serialize_refund_request_detail(
@@ -401,11 +480,22 @@ pub(crate) async fn deny_refund_request_as_admin(
     refund_id: u64,
     admin_user_id: u64,
     reason: Option<String>,
+    required_assignee_user_id: Option<u64>,
 ) -> Result<(), Response<Body>> {
     let mut tx = state.db.begin().await.map_err(internal_error)?;
-    let locked = load_refund_request_detail_any_for_update(&mut tx, refund_id)
+    let locked = if let Some(assignee_user_id) = required_assignee_user_id {
+        load_assigned_admin_refund_request_detail_for_update(
+            &mut tx,
+            refund_id,
+            assignee_user_id,
+        )
         .await
-        .map_err(internal_error)?;
+        .map_err(internal_error)?
+    } else {
+        load_refund_request_detail_any_for_update(&mut tx, refund_id)
+            .await
+            .map_err(internal_error)?
+    };
     let Some(locked) = locked else {
         tx.rollback().await.ok();
         return Err(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
@@ -415,7 +505,7 @@ pub(crate) async fn deny_refund_request_as_admin(
         return Err(fail_json_response(StatusCode::BAD_REQUEST, "Refund request is not actionable"));
     }
 
-    sqlx::query(
+    let mut update_sql = String::from(
         "UPDATE order_refund_requests
          SET status = 'denied',
              decision = 'deny',
@@ -423,14 +513,25 @@ pub(crate) async fn deny_refund_request_as_admin(
              resolved_by_user_id = ?,
              reason = COALESCE(?, reason),
              updated_at = NOW()
-         WHERE id = ?"
-    )
+         WHERE id = ? AND status IN ('pending', 'voting')"
+    );
+    if required_assignee_user_id.is_some() {
+        update_sql.push_str(" AND assigned_admin_user_id = ?");
+    }
+    let mut update = sqlx::query(&update_sql)
     .bind(admin_user_id)
-    .bind(reason)
-    .bind(refund_id)
-    .execute(&mut *tx)
+    .bind(reason.as_deref())
+    .bind(refund_id);
+    if let Some(assignee_user_id) = required_assignee_user_id {
+        update = update.bind(assignee_user_id);
+    }
+    let updated = update.execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Err(fail_json_response(StatusCode::CONFLICT, "Refund assignment changed"));
+    }
 
     tx.commit().await.map_err(internal_error)?;
     Ok(())
@@ -440,11 +541,22 @@ pub(crate) async fn approve_refund_request_as_admin(
     state: &AppState,
     refund_id: u64,
     admin_user_id: u64,
+    required_assignee_user_id: Option<u64>,
 ) -> Result<(), Response<Body>> {
     let mut tx = state.db.begin().await.map_err(internal_error)?;
-    let locked = load_refund_request_detail_any_for_update(&mut tx, refund_id)
+    let locked = if let Some(assignee_user_id) = required_assignee_user_id {
+        load_assigned_admin_refund_request_detail_for_update(
+            &mut tx,
+            refund_id,
+            assignee_user_id,
+        )
         .await
-        .map_err(internal_error)?;
+        .map_err(internal_error)?
+    } else {
+        load_refund_request_detail_any_for_update(&mut tx, refund_id)
+            .await
+            .map_err(internal_error)?
+    };
     let Some(locked) = locked else {
         tx.rollback().await.ok();
         return Err(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
@@ -533,7 +645,7 @@ pub(crate) async fn approve_refund_request_as_admin(
     .await
     .map_err(internal_error)?;
 
-    sqlx::query(
+    let mut update_sql = String::from(
         "UPDATE order_refund_requests
          SET status = ?,
              decision = 'approve',
@@ -554,8 +666,13 @@ pub(crate) async fn approve_refund_request_as_admin(
                  ELSE reason
              END,
              updated_at = NOW()
-         WHERE id = ?"
-    )
+         WHERE id = ?
+           AND status IN ('pending', 'voting', 'approved', 'failed', 'processing')"
+    );
+    if required_assignee_user_id.is_some() {
+        update_sql.push_str(" AND assigned_admin_user_id = ?");
+    }
+    let mut update = sqlx::query(&update_sql)
     .bind(final_status)
     .bind(used_kb)
     .bind(allowance_kb)
@@ -567,12 +684,20 @@ pub(crate) async fn approve_refund_request_as_admin(
     .bind(final_status)
     .bind(admin_user_id)
     .bind(site_balance_fallback_amount)
-    .bind(refund_id)
-    .execute(&mut *tx)
+    .bind(refund_id);
+    if let Some(assignee_user_id) = required_assignee_user_id {
+        update = update.bind(assignee_user_id);
+    }
+    let updated = update.execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Err(fail_json_response(StatusCode::CONFLICT, "Refund assignment changed"));
+    }
 
     tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
     Ok(())
 }
 
@@ -883,6 +1008,7 @@ pub(crate) async fn auto_refund_approved_request(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    clear_all_authorization_caches(state);
     Ok(())
 }
 
@@ -908,4 +1034,138 @@ pub(crate) async fn load_refund_request_detail_any_for_update(
     .bind(refund_id)
     .fetch_optional(&mut **tx)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_revoking_refunds_invalidate_authorization_caches_after_commit() {
+        let source = include_str!("refunds_support.rs");
+        for (start, end) in [
+            (
+                "pub(crate) async fn approve_refund_request_as_admin",
+                "pub(crate) async fn load_refund_create_order_by_trade_no",
+            ),
+            (
+                "pub(crate) async fn auto_refund_approved_request",
+                "pub(crate) async fn load_refund_request_detail_any_for_update",
+            ),
+        ] {
+            let section = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+                .expect("refund execution handler must remain present");
+            assert!(
+                section.contains("UPDATE user_plan_subscriptions"),
+                "{start} must revoke the refunded subscription"
+            );
+            let commit = section.rfind("tx.commit().await").expect("writes must commit");
+            let invalidate = section
+                .find("clear_all_authorization_caches(state);")
+                .expect("subscription revocation must invalidate authorization caches");
+            assert!(commit < invalidate, "{start} must invalidate only after commit");
+        }
+    }
+
+    fn refund_request_fixture() -> RefundRequestRow {
+        RefundRequestRow {
+            id: 41,
+            order_id: 501,
+            trade_no: "private-trade-no".to_string(),
+            user_id: 7,
+            plan_id: 9,
+            assigned_admin_user_id: Some(13),
+            status: "voting".to_string(),
+            reason: Some("service unavailable".to_string()),
+            gateway_amount: 2_000,
+            gateway_trade_no: Some("private-gateway-trade-no".to_string()),
+            epay_pid: Some("private-pid".to_string()),
+            epay_url: Some("https://payments.example.test".to_string()),
+            epay_key_encrypted: Some("private-encrypted-key".to_string()),
+            used_kb: Some(100),
+            allowance_kb: Some(1_000),
+            refund_amount: Some(1_800),
+            charged_amount: Some(200),
+            balance_refunded_amount: 0,
+            gateway_refunded_amount: 0,
+            site_balance_fallback_amount: 0,
+            gateway_refund_pending_amount: 0,
+            gateway_refund_started_at: None,
+            voting_ends_at: None,
+            refunded_at: None,
+            resolved_at: None,
+            resolved_by_user_id: Some(17),
+            decision: None,
+            created_at: None,
+            updated_at: None,
+            plan_name: Some("Node plan".to_string()),
+            plan_scope: Some("node".to_string()),
+            user_email: Some("private@example.test".to_string()),
+        }
+    }
+
+    fn assert_key_absent_recursively(value: &Value, forbidden: &str) {
+        match value {
+            Value::Object(object) => {
+                assert!(
+                    !object.contains_key(forbidden),
+                    "unexpected key: {forbidden}"
+                );
+                for child in object.values() {
+                    assert_key_absent_recursively(child, forbidden);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    assert_key_absent_recursively(child, forbidden);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn public_refund_vote_detail_redacts_identity_and_payment_fields() {
+        let request = refund_request_fixture();
+        let evidences = vec![RefundEvidenceRow {
+            id: 3,
+            refund_request_id: request.id,
+            user_id: 7,
+            role: "user".to_string(),
+            content: "supporting evidence".to_string(),
+            created_at: None,
+            updated_at: None,
+            user_email: Some("evidence-private@example.test".to_string()),
+        }];
+        let votes = vec![RefundVoteRow {
+            id: 5,
+            refund_request_id: request.id,
+            user_id: 23,
+            vote: "approve".to_string(),
+            created_at: None,
+            updated_at: None,
+        }];
+
+        let payload = serialize_public_refund_vote_detail(&request, &evidences, &votes, 23);
+        for forbidden in [
+            "order_id",
+            "trade_no",
+            "user_id",
+            "assigned_admin_user_id",
+            "gateway_amount",
+            "gateway_trade_no",
+            "epay_pid",
+            "epay_url",
+            "epay_key_encrypted",
+            "resolved_by_user_id",
+            "user",
+            "votes",
+        ] {
+            assert_key_absent_recursively(&payload, forbidden);
+        }
+        assert_eq!(payload["my_vote"], Value::String("approve".to_string()));
+        assert_eq!(payload["evidences"][0]["is_mine"], Value::Bool(false));
+    }
 }

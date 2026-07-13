@@ -218,7 +218,7 @@ async fn build_payment_profile_upsert_epay_response(
         sqlx::query(
             "UPDATE user_payment_profiles
              SET pid = ?, url = ?, submit_path = ?, use_post = ?, sitename = ?, device = ?, updated_at = NOW()
-             WHERE id = ?"
+             WHERE id = ? AND user_id = ? AND provider = 'epay'"
         )
         .bind(pid)
         .bind(&url)
@@ -227,6 +227,7 @@ async fn build_payment_profile_upsert_epay_response(
         .bind(sitename.as_deref())
         .bind(device.as_deref())
         .bind(id)
+        .bind(user.id)
         .execute(&state.db)
         .await
         .map_err(internal_error)?;

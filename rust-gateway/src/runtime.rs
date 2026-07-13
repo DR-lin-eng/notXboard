@@ -1,5 +1,5 @@
 use crate::{
-    AsyncQueueMetrics, AppState, legacy_traffic_support::QueuedLegacySubmitJob, slug_for_prefix,
+    AsyncQueueMetrics, AppState, ExposureConfig, legacy_traffic_support::QueuedLegacySubmitJob, slug_for_prefix,
     uniproxy_support::{QueuedAliveSessionJob, QueuedPushTrafficJob},
 };
 use hyper_util::{
@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc;
+use tracing::warn;
 
 pub(crate) struct RuntimeConfig {
     pub(crate) alive_session_rx: mpsc::Receiver<QueuedAliveSessionJob>,
@@ -85,6 +86,17 @@ pub(crate) async fn build_runtime_config() -> RuntimeConfig {
         let app_name = env::var("APP_NAME").unwrap_or_else(|_| "laravel".to_string());
         format!("{}_cache", slug_for_prefix(&app_name))
     });
+    let exposure = ExposureConfig::from_env()
+        .unwrap_or_else(|error| panic!("invalid public exposure configuration: {error}"));
+    if env::var("APP_ENV")
+        .map(|value| value.eq_ignore_ascii_case("production"))
+        .unwrap_or(false)
+        && !exposure.web_access_enabled()
+    {
+        warn!(
+            "WEB_ACCESS_USERNAME/WEB_ACCESS_PASSWORD are not configured; browser pages remain publicly reachable"
+        );
+    }
     let push_traffic_queue_capacity = env::var("PUSH_TRAFFIC_QUEUE_CAPACITY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -131,6 +143,7 @@ pub(crate) async fn build_runtime_config() -> RuntimeConfig {
         redis_cache_db,
         redis_prefix,
         cache_prefix,
+        exposure,
     };
 
     RuntimeConfig {

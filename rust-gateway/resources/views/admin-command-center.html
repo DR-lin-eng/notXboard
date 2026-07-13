@@ -3,11 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <title>{{ $title }} · 超级管理员指挥舱</title>
     <meta name="description" content="{{ $description }}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Orbitron:wght@500;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
             --bg: #030712;
@@ -1217,6 +1215,308 @@
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
         }
+
+        /* Quiet operations theme */
+        :root {
+            --bg: #0c1214;
+            --bg-2: #11191c;
+            --panel: #151e21;
+            --panel-strong: #192427;
+            --stroke: #2d3a3e;
+            --stroke-strong: #415257;
+            --text: #edf4f2;
+            --muted: #9caeaa;
+            --cyan: #2dd4bf;
+            --teal: #14b8a6;
+            --blue: #60a5fa;
+            --amber: #fbbf24;
+            --rose: #fb7185;
+            --green: #4ade80;
+            --violet: #c4b5fd;
+            --shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+            --radius-xl: 8px;
+            --radius-lg: 8px;
+            --radius-md: 7px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        *,
+        *::before,
+        *::after {
+            letter-spacing: 0;
+        }
+
+        html,
+        body {
+            background: var(--bg);
+            font-family: inherit;
+        }
+
+        body::before,
+        .shell::before,
+        .hero-panel::before,
+        .panel::before,
+        .ops-map-shell::before {
+            display: none;
+        }
+
+        :focus-visible {
+            outline: 3px solid rgba(45, 212, 191, 0.34);
+            outline-offset: 3px;
+        }
+
+        button,
+        a.button {
+            border-radius: 7px;
+            transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
+        }
+
+        button:hover,
+        a.button:hover {
+            transform: none;
+        }
+
+        .page {
+            min-height: 100vh;
+            padding: 0;
+        }
+
+        .shell {
+            min-height: 100vh;
+            border: 0;
+            border-radius: 0;
+            background: var(--bg);
+            box-shadow: none;
+        }
+
+        .topbar {
+            padding: 15px 22px;
+            flex-wrap: wrap;
+            border-bottom-color: var(--stroke);
+            background: rgba(12, 18, 20, 0.95);
+            backdrop-filter: blur(12px);
+        }
+
+        .brand {
+            min-width: 0;
+            flex: 1 1 400px;
+            gap: 12px;
+        }
+
+        .topbar-actions {
+            min-width: 0;
+            max-width: 100%;
+            flex: 1 1 680px;
+        }
+
+        .brand-mark {
+            width: 40px;
+            height: 40px;
+            border-radius: 7px;
+            border-color: #3a4b4e;
+            background: #172326;
+            box-shadow: none;
+            font-family: inherit;
+            font-size: 12px;
+        }
+
+        .brand-kicker,
+        .panel-kicker {
+            margin-bottom: 3px;
+            color: var(--teal);
+            font-size: 11px;
+            letter-spacing: 0;
+            text-transform: none;
+        }
+
+        .brand-title {
+            font-family: inherit;
+            font-size: 24px;
+            letter-spacing: 0;
+        }
+
+        .brand-subtitle {
+            margin-top: 3px;
+            font-size: 12px;
+        }
+
+        .chip {
+            min-height: 36px;
+            padding: 7px 10px;
+            border-radius: 7px;
+            border-color: var(--stroke);
+            background: #131c1f;
+            font-size: 12px;
+        }
+
+        .chip strong,
+        .focus-card strong,
+        .metric-card strong,
+        .inline-stat strong,
+        .node-stat strong,
+        .ops-brief-card strong {
+            font-family: "SFMono-Regular", Consolas, monospace;
+        }
+
+        .btn-primary {
+            border: 1px solid #0f8d82;
+            color: #f0fdfa;
+            background: #0f766e;
+            box-shadow: none;
+        }
+
+        .btn-ghost {
+            border-color: var(--stroke);
+            background: #131c1f;
+        }
+
+        .dashboard {
+            padding: 20px 22px 30px;
+            gap: 16px;
+        }
+
+        .hero {
+            gap: 14px;
+        }
+
+        .hero-panel,
+        .panel,
+        .focus-card,
+        .signal-tile,
+        .metric-card,
+        .inline-stat,
+        .node-card,
+        .node-stat,
+        .feed-item,
+        .ops-side-section,
+        .ops-brief-card,
+        .ops-region-card,
+        .ops-map-shell,
+        .ops-map-legend,
+        .ops-legend-strip,
+        .ops-map-summary,
+        .ops-alert-card,
+        .ops-watch-card,
+        .ops-ticker-card,
+        .locked-card,
+        .status-badge {
+            border-radius: 8px;
+            background-image: none;
+            box-shadow: none;
+            backdrop-filter: none;
+        }
+
+        .hero-panel,
+        .panel {
+            border-color: var(--stroke);
+            background: var(--panel);
+        }
+
+        .hero-main {
+            min-height: 230px;
+            padding: 22px;
+            gap: 14px;
+        }
+
+        .hero-main h2 {
+            max-width: 24ch;
+            font-family: inherit;
+            font-size: 30px;
+            line-height: 1.2;
+            letter-spacing: 0;
+        }
+
+        .hero-radar,
+        .signal-grid,
+        .metrics-grid,
+        .main-grid,
+        .node-grid,
+        .split-grid,
+        .ops-theater-grid,
+        .ops-brief-grid,
+        .ops-map-ticker {
+            gap: 10px;
+        }
+
+        .focus-card,
+        .signal-tile,
+        .metric-card,
+        .inline-stat,
+        .node-card,
+        .node-stat,
+        .feed-item,
+        .ops-side-section,
+        .ops-brief-card,
+        .ops-region-card,
+        .ops-alert-card,
+        .ops-watch-card,
+        .ops-ticker-card {
+            border-color: var(--stroke);
+            background: #11191c;
+        }
+
+        .focus-card span,
+        .metric-card span,
+        .panel-kicker,
+        .ops-side-title,
+        .ops-brief-card span {
+            letter-spacing: 0;
+            text-transform: none;
+        }
+
+        .metric-card::after {
+            display: none;
+        }
+
+        .panel-head {
+            padding-bottom: 13px;
+            border-bottom: 1px solid var(--stroke);
+        }
+
+        .ops-map-shell {
+            border-color: var(--stroke-strong);
+            background: #0d171d;
+        }
+
+        .locked-card h2 {
+            font-family: inherit;
+            font-size: 26px;
+            letter-spacing: 0;
+        }
+
+        @media (max-width: 760px) {
+            .topbar {
+                align-items: flex-start;
+                padding: 13px 14px;
+            }
+
+            .brand-title {
+                font-size: 20px;
+            }
+
+            .brand-subtitle,
+            .brand-kicker {
+                display: none;
+            }
+
+            .dashboard {
+                padding: 14px;
+            }
+
+            .hero-main h2 {
+                font-size: 25px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 1ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 1ms !important;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1232,9 +1532,9 @@
                     @endif
                 </div>
                 <div class="brand-copy">
-                    <div class="brand-kicker">Super Admin Internal Command Deck</div>
-                    <h1 class="brand-title">NotXboard Ops Atlas</h1>
-                    <p class="brand-subtitle">完全独立于公开大屏的超级管理员指挥舱，只读取内部快照与实时系统状态。</p>
+                    <div class="brand-kicker">超级管理员</div>
+                    <h1 class="brand-title">{{ $title }} 运营指挥台</h1>
+                    <p class="brand-subtitle">内部运行快照与实时系统状态</p>
                 </div>
             </div>
             <div class="topbar-actions">
@@ -1251,10 +1551,6 @@
     </div>
 </div>
 
-<script src="/assets/world-map/echarts.min.js?v={{ $version }}"></script>
-<script src="/assets/world-map/world.js?v={{ $version }}"></script>
-<script src="/assets/world-map/notxboard-geo-map.js?v={{ $version }}"></script>
-
 <script>
     (function () {
         const APP_ROOT = document.getElementById('appRoot');
@@ -1263,6 +1559,12 @@
         const lastUpdatedEl = document.getElementById('lastUpdated');
         const sessionChipEl = document.getElementById('sessionChip');
         const securePath = String(@json($secure_path ?? '') || '').replace(/^\/+|\/+$/g, '');
+        const assetVersion = encodeURIComponent('{{ $version }}');
+        const mapAssets = [
+            `/assets/world-map/echarts.min.js?v=${assetVersion}`,
+            `/assets/world-map/world.js?v=${assetVersion}`,
+            `/assets/world-map/notxboard-geo-map.js?v=${assetVersion}`
+        ];
         const sharedAuthKeys = ['auth_data', 'PORTAL_ACCESS_TOKEN', 'Portal_access_token', 'access_token', 'token'];
         const endpoints = {
             me: '/api/v1/user/me',
@@ -1274,8 +1576,13 @@
             me: null,
             refreshTimer: null,
             countdownTimer: null,
-            nextRefreshIn: 0
+            nextRefreshIn: 0,
+            refreshInterval: 20,
+            latestPayload: null,
+            mapObserver: null,
+            mapReady: false
         };
+        let mapAssetsPromise = null;
 
         function escapeHtml(value) {
             return String(value ?? '')
@@ -1284,6 +1591,73 @@
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;');
+        }
+
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const existing = document.querySelector(`script[data-map-src="${src}"]`);
+                if (existing) {
+                    if (existing.dataset.loaded === 'true') resolve();
+                    else existing.addEventListener('load', resolve, { once: true });
+                    return;
+                }
+                const script = document.createElement('script');
+                script.src = src;
+                script.async = true;
+                script.dataset.mapSrc = src;
+                script.addEventListener('load', () => {
+                    script.dataset.loaded = 'true';
+                    resolve();
+                }, { once: true });
+                script.addEventListener('error', () => reject(new Error(`Unable to load ${src}`)), { once: true });
+                document.head.appendChild(script);
+            });
+        }
+
+        function ensureMapAssets() {
+            if (!mapAssetsPromise) {
+                mapAssetsPromise = mapAssets.reduce(
+                    (promise, src) => promise.then(() => loadScript(src)),
+                    Promise.resolve()
+                ).then(() => {
+                    state.mapReady = Boolean(window.NotXboardGeoMap);
+                });
+            }
+            return mapAssetsPromise;
+        }
+
+        function armDeferredMap(payload) {
+            const target = document.getElementById('opsMapDeferred');
+            if (!target || state.mapReady) return;
+            if (state.mapObserver) {
+                state.mapObserver.disconnect();
+                state.mapObserver = null;
+            }
+
+            const load = () => {
+                if (state.mapObserver) {
+                    state.mapObserver.disconnect();
+                    state.mapObserver = null;
+                }
+                const status = target.querySelector('[data-map-status]');
+                if (status) status.textContent = '正在加载地图组件';
+                ensureMapAssets()
+                    .then(() => {
+                        if (state.latestPayload === payload) renderDashboard(payload);
+                    })
+                    .catch(() => {
+                        if (status) status.textContent = '地图组件暂时不可用';
+                    });
+            };
+
+            if (!('IntersectionObserver' in window)) {
+                load();
+                return;
+            }
+            state.mapObserver = new IntersectionObserver((entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) load();
+            }, { rootMargin: '280px 0px' });
+            state.mapObserver.observe(target);
         }
 
         function asArray(value) {
@@ -1317,6 +1691,10 @@
             if (state.countdownTimer) {
                 window.clearInterval(state.countdownTimer);
                 state.countdownTimer = null;
+            }
+            if (state.mapObserver) {
+                state.mapObserver.disconnect();
+                state.mapObserver = null;
             }
         }
 
@@ -1587,6 +1965,22 @@
         }
 
         function renderOpsTheater(regionDistribution, watchlist, tcpingAlerts, auditStream, overview) {
+            if (!window.NotXboardGeoMap) {
+                return `
+                    <section class="panel ops-theater" id="opsMapDeferred">
+                        <div class="panel-body">
+                            <div class="panel-head">
+                                <div>
+                                    <div class="panel-kicker">区域态势</div>
+                                    <h3>节点与告警分布</h3>
+                                    <p>地图将在本区域进入视口后加载。</p>
+                                </div>
+                            </div>
+                            <div class="empty" data-map-status>等待加载地图组件</div>
+                        </div>
+                    </section>
+                `;
+            }
             const points = buildMapPoints(regionDistribution, watchlist, tcpingAlerts).slice(0, 18);
             if (!points.length) return empty('暂无可绘制的节点地区分布数据');
 
@@ -2273,6 +2667,9 @@
             if (token) {
                 headers.Authorization = token;
             }
+            if (securePath) {
+                headers['X-Admin-Path'] = securePath;
+            }
 
             const response = await fetch(url, {
                 credentials: 'same-origin',
@@ -2327,10 +2724,12 @@
         function scheduleRefresh(seconds) {
             clearTimers();
             const interval = Math.max(5, Math.min(300, Number(seconds || 20)));
+            state.refreshInterval = interval;
             state.nextRefreshIn = interval;
             refreshCountdownEl.textContent = `${interval}s`;
 
             state.countdownTimer = window.setInterval(() => {
+                if (document.hidden) return;
                 state.nextRefreshIn = Math.max(0, state.nextRefreshIn - 1);
                 refreshCountdownEl.textContent = `${state.nextRefreshIn}s`;
             }, 1000);
@@ -2354,9 +2753,11 @@
             try {
                 const response = await fetchJson(endpoints.snapshot);
                 const payload = response?.data || {};
+                state.latestPayload = payload;
                 renderDashboard(payload);
                 lastUpdatedEl.textContent = formatAnyTimestamp(payload?.generated_at || Math.floor(Date.now() / 1000));
                 scheduleRefresh(payload?.refresh_interval_seconds || 20);
+                armDeferredMap(payload);
             } catch (error) {
                 setSessionChip('异常', 'bad');
                 renderLocked(error.message || '加载监控快照失败');
@@ -2373,6 +2774,15 @@
         window.addEventListener('storage', (event) => {
             if (![...sharedAuthKeys, 'me'].includes(event.key || '')) return;
             refreshSnapshot(true).catch(() => {});
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                clearTimers();
+                refreshCountdownEl.textContent = '已暂停';
+                return;
+            }
+            if (state.me) refreshSnapshot(false).catch(() => {});
         });
 
         loadSession().then((ready) => {

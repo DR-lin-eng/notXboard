@@ -3,53 +3,100 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <meta name="app-name" content="{{ $title ?? 'Xboard' }}">
   <meta name="app-version" content="{{ $version ?? '' }}">
   <meta name="app-url" content="{{ config('app.url') }}">
   <title>{{ $title ?? 'Xboard' }}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@300;400;500;600;700&family=Space+Mono:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/theme/Maintainable/app.css?v={{ $asset_version ?? $version ?? 'dev' }}">
 </head>
 <body>
   <div id="app">
-    <header class="topbar">
-      <div class="brand">
-        <span class="logo">{{ $title ?? 'Xboard' }}</span>
-        <span class="badge">Maintainable</span>
+    <a class="skip-link" href="#view">跳到主要内容</a>
+
+    <header class="mobile-topbar">
+      <button class="icon-button" id="navToggle" type="button" aria-controls="appSidebar" aria-expanded="false" aria-label="打开导航">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M4 6h16"></path>
+          <path d="M4 12h16"></path>
+          <path d="M4 18h16"></path>
+        </svg>
+      </button>
+      <div class="mobile-brand">
+        <span class="brand-mark" aria-hidden="true">NX</span>
+        <span>{{ $title ?? 'Xboard' }}</span>
       </div>
-      <nav class="nav">
-        <a href="#/dashboard" data-auth-only="1">概览</a>
-        <a href="#/plans" data-auth-only="1">套餐</a>
-        <a href="#/orders" data-auth-only="1">订单</a>
-        <a href="#/refunds" data-auth-only="1">退款</a>
-        <a href="#/refund-votes" data-auth-only="1">争议投票</a>
-        <a href="#/tickets" data-auth-only="1">工单</a>
-        <a href="#/nodes" data-auth-only="1">节点</a>
-        <a href="#/node-plans" data-auth-only="1">节点套餐</a>
-        <a href="#/node-admin" data-auth-only="1">节点管理</a>
-        <a href="#/profile" data-auth-only="1">账户</a>
-        <a href="#/payment" data-auth-only="1">收款配置</a>
-        <a href="#/sponsor" data-auth-only="1">赞助</a>
-        <a href="#/invite" data-auth-only="1">邀请</a>
-        <a href="#/notices" data-auth-only="1">公告</a>
-        <a href="#/knowledge" data-auth-only="1">知识库</a>
-        <a href="#/downloads" data-auth-only="1">软件下载</a>
-        <a href="#/tools" data-auth-only="1">工具</a>
-        <a href="#/audit" data-auth-only="1">审计</a>
-        <a href="#/admin" data-role="super-admin" data-auth-only="1" class="hidden" hidden>超管</a>
-        <a href="#/login" id="logoutBtn">登录</a>
-      </nav>
+      <span class="mobile-spacer" aria-hidden="true"></span>
     </header>
 
-    <main class="container">
-      <div id="view"></div>
-    </main>
+    <aside class="topbar" id="appSidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">NX</span>
+        <span class="brand-copy">
+          <span class="logo">{{ $title ?? 'Xboard' }}</span>
+          <span class="badge">用户门户</span>
+        </span>
+      </div>
 
-    <footer class="footer">
-      <span>{{ $title ?? 'Xboard' }} · {{ $version ?? '' }}</span>
-    </footer>
+      <nav class="nav" aria-label="主导航">
+        <div class="nav-group">
+          <div class="nav-group-title">订阅与账单</div>
+          <a href="#/dashboard" data-auth-only="1">概览</a>
+          <a href="#/plans" data-auth-only="1">套餐</a>
+          <a href="#/orders" data-auth-only="1">订单</a>
+          <a href="#/refunds" data-auth-only="1">退款</a>
+          <a href="#/refund-votes" data-auth-only="1">争议投票</a>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-title">节点运营</div>
+          <a href="#/nodes" data-auth-only="1">节点</a>
+          <a href="#/node-plans" data-auth-only="1">节点套餐</a>
+          <a href="#/node-admin" data-auth-only="1">节点管理</a>
+          <a href="#/audit" data-auth-only="1">审计</a>
+          <a href="#/tools" data-auth-only="1">工具</a>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-title">支持与资源</div>
+          <a href="#/tickets" data-auth-only="1">工单</a>
+          <a href="#/notices" data-auth-only="1">公告</a>
+          <a href="#/knowledge" data-auth-only="1">知识库</a>
+          <a href="#/downloads" data-auth-only="1">软件下载</a>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-title">账户</div>
+          <a href="#/profile" data-auth-only="1">账户资料</a>
+          <a href="#/payment" data-auth-only="1">收款配置</a>
+          <a href="#/sponsor" data-auth-only="1">赞助</a>
+          <a href="#/invite" data-auth-only="1">邀请</a>
+          <a href="#/admin" data-role="super-admin" data-auth-only="1" class="hidden" hidden>超级管理员</a>
+        </div>
+
+        <div class="nav-group nav-session">
+          <a href="#/login" id="logoutBtn"><span data-nav-label>登录</span></a>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <span>{{ $version ?? '' }}</span>
+        <span>Maintainable</span>
+      </div>
+    </aside>
+
+    <button class="nav-scrim" id="navScrim" type="button" aria-label="关闭导航" tabindex="-1"></button>
+
+    <div class="workspace">
+      <main class="container" id="mainContent">
+        <div id="view" tabindex="-1"></div>
+      </main>
+
+      <footer class="footer">
+        <span>{{ $title ?? 'Xboard' }}</span>
+        <span>{{ $version ?? '' }}</span>
+      </footer>
+    </div>
   </div>
 
   <script>

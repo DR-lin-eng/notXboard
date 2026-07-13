@@ -6,6 +6,8 @@ const APP_CONTAINER = document.querySelector('.container');
 const APP_ROOT = document.getElementById('app');
 const APP_TOPBAR = document.querySelector('.topbar');
 const APP_FOOTER = document.querySelector('.footer');
+const NAV_TOGGLE = document.getElementById('navToggle');
+const NAV_SCRIM = document.getElementById('navScrim');
 
 const SHARED_AUTH_STORAGE_KEYS = Object.freeze([
   'auth_data',
@@ -1719,12 +1721,18 @@ function syncAuthNav() {
     link.classList.remove('hidden');
     link.hidden = false;
   });
-  logoutBtn.textContent = authed ? '退出' : '登录';
+  const logoutLabel = logoutBtn.querySelector('[data-nav-label]');
+  if (logoutLabel) logoutLabel.textContent = authed ? '退出' : '登录';
+  else logoutBtn.textContent = authed ? '退出' : '登录';
 }
 
 function apiHeaders(extra = {}) {
   const headers = { 'Content-Type': 'application/json', ...extra };
   if (store.auth) headers['Authorization'] = store.auth;
+  const adminPath = String(store.me?.secure_path || '').trim();
+  if (/^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(adminPath)) {
+    headers['X-Admin-Path'] = adminPath;
+  }
   return headers;
 }
 
@@ -3176,6 +3184,42 @@ function normalizeHttpUrl(raw) {
   }
 }
 
+function buildSafeEpayPostForm(raw) {
+  const parsed = new DOMParser().parseFromString(String(raw || ''), 'text/html');
+  const sourceForm = parsed.querySelector('form');
+  if (!sourceForm) return null;
+
+  const action = normalizeHttpUrl(sourceForm.getAttribute('action') || '');
+  const method = String(sourceForm.getAttribute('method') || '').trim().toLowerCase();
+  if (!action || method !== 'post') return null;
+
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = action;
+  form.hidden = true;
+  sourceForm.querySelectorAll('input[type="hidden"]').forEach((sourceInput) => {
+    const name = String(sourceInput.getAttribute('name') || '').trim();
+    if (!name || name.length > 256) return;
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = sourceInput.getAttribute('value') || '';
+    form.append(input);
+  });
+  return form;
+}
+
+function submitSafeEpayPostForm(container, raw, message) {
+  const form = buildSafeEpayPostForm(raw);
+  if (!container || !form) throw new Error('支付网关返回了无效表单');
+
+  const notice = document.createElement('div');
+  notice.className = 'notice';
+  notice.textContent = message;
+  container.replaceChildren(notice, form);
+  HTMLFormElement.prototype.submit.call(form);
+}
+
 function normalizePlanVisibilityScope(scope) {
   const raw = String(scope || '').trim().toLowerCase();
   if (raw === 'link_only') return 'link_only';
@@ -3203,7 +3247,7 @@ function hasPositiveTrialQuota(raw) {
   return Object.values(raw).some((value) => Number(value || 0) > 0);
 }
 
-function showDeployInfoModal({ nodeId, nodeName, panelUrl, apiKey, command }) {
+function showDeployInfoModal({ nodeId, nodeName, panelUrl, command }) {
   const existed = document.getElementById('deployInfoModal');
   if (existed) existed.remove();
 
@@ -3216,7 +3260,6 @@ function showDeployInfoModal({ nodeId, nodeName, panelUrl, apiKey, command }) {
         <h3 id="deployInfoTitle">节点部署信息（#${escapeHtml(nodeId)} ${escapeHtml(nodeName || '')}）</h3>
         <button class="btn small" id="deployModalCloseTop">关闭</button>
       </div>
-      <div class="notice" style="margin-top:8px;">请把下面信息填入你的节点程序。本站链接和 API Key 是必填。</div>
       <div class="grid" style="margin-top:10px;">
         <div class="field">
           <label>本站链接</label>
@@ -3226,14 +3269,7 @@ function showDeployInfoModal({ nodeId, nodeName, panelUrl, apiKey, command }) {
           </div>
         </div>
         <div class="field">
-          <label>API Key</label>
-          <div class="row">
-            <input id="deployApiKey" readonly value="${escapeHtml(apiKey || '')}" placeholder="未生成 API Key，请先在首页生成">
-            <button class="btn small" id="copyDeployApiKey">复制</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>一键部署命令（可选）</label>
+          <label>一次性部署命令</label>
           <textarea id="deployCommand" rows="4" readonly>${escapeHtml(command || '')}</textarea>
           <div class="row end"><button class="btn small" id="copyDeployCommand">复制命令</button></div>
         </div>
@@ -3270,7 +3306,6 @@ function showDeployInfoModal({ nodeId, nodeName, panelUrl, apiKey, command }) {
   };
 
   copyBind('copyDeployPanelUrl', 'deployPanelUrl', '本站链接已复制');
-  copyBind('copyDeployApiKey', 'deployApiKey', 'API Key 已复制');
   copyBind('copyDeployCommand', 'deployCommand', '部署命令已复制');
 }
 
@@ -3744,10 +3779,10 @@ async function renderLogin(errorText = '', activePanel = 'login', extraOptions =
     : '';
 
   setView(html`
-    <div class="card" style="max-width: 760px; margin: 0 auto;">
-      <div class="row" style="justify-content: space-between; align-items: center;">
+    <div class="card auth-card">
+      <div class="auth-header">
         <h2>${isRegister ? '注册' : '登录'}</h2>
-        <div class="row" style="gap:8px;">
+        <div class="auth-switcher">
           <button class="btn ${isRegister ? '' : 'primary'}" id="switchToLogin" type="button">登录</button>
           ${allowEmailRegister
             ? `<button class="btn ${isRegister ? 'primary' : ''}" id="switchToRegister" type="button">注册</button>`
@@ -4015,10 +4050,10 @@ async function renderDashboard() {
       <div class="card">
         <h2>账户</h2>
         <div class="kvs">
-          <div class="k">邮箱</div><div class="v">${userInfo.email || '-'}</div>
-          <div class="k">UUID</div><div class="v">${userInfo.uuid || '-'}</div>
+          <div class="k">邮箱</div><div class="v">${escapeHtml(userInfo.email || '-')}</div>
+          <div class="k">UUID</div><div class="v">${escapeHtml(userInfo.uuid || '-')}</div>
           <div class="k">用户等级</div><div class="v">${me?.trust_level ?? '-'}</div>
-          <div class="k">第三方用户名</div><div class="v">${me?.linux_do_username || '-'}</div>
+          <div class="k">第三方用户名</div><div class="v">${escapeHtml(me?.linux_do_username || '-')}</div>
           <div class="k">身份</div><div class="v">
             ${linuxLabel}
             ${me?.is_super_admin ? `<span class="pill warn">站长</span>` : (me?.is_admin ? `<span class="pill">管理员</span>` : `<span class="pill">用户</span>`)}
@@ -4032,8 +4067,8 @@ async function renderDashboard() {
         <h2>API Key</h2>
         <div class="kvs">
           <div class="k">是否已生成</div><div class="v">${keyInfo.has_api_key ? '是' : '否'}</div>
-          <div class="k">当前 Key</div><div class="v">${keyInfo.api_key || '-'}</div>
-          <div class="k">创建时间</div><div class="v">${keyInfo.created_at || '-'}</div>
+          <div class="k">当前 Key</div><div class="v">${escapeHtml(keyInfo.api_key || '-')}</div>
+          <div class="k">创建时间</div><div class="v">${escapeHtml(keyInfo.created_at || '-')}</div>
         </div>
         <div class="row end" style="margin-top: 12px;">
           <button class="btn" id="resetApiKeyBtn">${keyInfo.has_api_key ? '重置 Key' : '生成 Key'}</button>
@@ -4208,6 +4243,9 @@ async function renderNodes() {
                     ? `<button class="btn small" data-action="deploy" data-id="${node.id}">部署</button>`
                     : `<button class="btn small" data-action="deploy-unsupported" data-id="${node.id}">部署不可用</button>`
                   }
+                  ${isV2bxDeployableProtocol(node.protocol) && node.v2bx_token_configured
+                    ? `<button class="btn small" data-action="rotate-v2bx" data-id="${node.id}">轮换凭据</button>`
+                    : ''}
                   <button class="btn small" data-action="access" data-id="${node.id}">分享/权限</button>
                   <button class="btn small" data-action="audit" data-id="${node.id}">审计规则</button>
                   <button class="btn small danger" data-action="delete" data-id="${node.id}">删除</button>
@@ -4325,30 +4363,31 @@ async function renderNodes() {
           const deployRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy`, { method: 'POST' });
 
           let commandData = {};
-          let keyData = {};
           try {
-            const commandRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy-command`);
+            const commandRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy-command`, { method: 'POST', body: {} });
             commandData = commandRes?.data || {};
           } catch (_) {}
-          try {
-            const apiKeyRes = await apiFetch('/api/v1/user/api-key');
-            keyData = apiKeyRes?.data || {};
-          } catch (_) {}
-
           await renderNodes();
           showDeployInfoModal({
             nodeId: id,
             nodeName: node?.name || '',
             panelUrl: commandData?.panel_url || location.origin,
-            apiKey: keyData?.api_key || '',
             command: commandData?.command || ''
           });
 
-          if (!keyData?.api_key) {
-            alert('你还没有 API Key，请先到首页生成，再填入节点配置。');
-          } else if (deployRes?.message) {
+          if (deployRes?.message) {
             alert(deployRes.message);
           }
+          return;
+        }
+        if (action === 'rotate-v2bx') {
+          if (!confirm('确认轮换这个节点的 V2bX 凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
+          const commandRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy-command/rotate-token`, { method: 'POST', body: {} });
+          const command = String(commandRes?.data?.command || '').trim();
+          if (!command) throw new Error('未生成新的部署命令');
+          await copyText(command);
+          alert('新部署命令已复制，旧 V2bX 凭据已失效。');
+          await renderNodes();
           return;
         }
         if (action === 'delete') {
@@ -4774,7 +4813,7 @@ async function renderEditNode(nodeId, errorText = '') {
     const res = await apiFetch(`/api/v1/user/server-nodes/${nodeId}`);
     node = res?.data || null;
   } catch (e) {
-    setView(`<div class="notice error">${e.message || '节点不存在'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '节点不存在')}</div>`);
     return;
   }
 
@@ -4783,12 +4822,12 @@ async function renderEditNode(nodeId, errorText = '') {
   setView(html`
     <div class="card">
       <div class="row" style="justify-content: space-between; align-items: center;">
-        <h2>编辑节点：${node?.name || nodeId}</h2>
+        <h2>编辑节点：${escapeHtml(node?.name || nodeId)}</h2>
         <a class="btn" href="#/nodes">返回</a>
       </div>
       <div id="en_form_error">${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}</div>
       <div class="grid cols-2" style="margin-top: 10px;">
-        <div class="field"><label>节点名称</label><input id="en_name" value="${node?.name || ''}"></div>
+        <div class="field"><label>节点名称</label><input id="en_name" value="${escapeHtml(node?.name || '')}"></div>
         <div class="field"><label>在线状态（V2bX 回传）</label><div>${pillStatus(node)}</div></div>
         <div class="field">
           <label>落地国家 / 地区</label>
@@ -4800,7 +4839,7 @@ async function renderEditNode(nodeId, errorText = '') {
             ${buildTrustLevelOptionHtml(node?.access_control?.min_trust_level ?? 0, false)}
           </select>
         </div>
-        <div class="field"><label>节点域名 / IP</label><input id="en_host" value="${node?.host || ''}"></div>
+        <div class="field"><label>节点域名 / IP</label><input id="en_host" value="${escapeHtml(node?.host || '')}"></div>
         <div class="field"><label>用户访问端口</label><input id="en_port" type="number" value="${node?.port || 443}"></div>
         <div class="field"><label>服务端口</label><input id="en_service_port" type="number" value="${node?.service_port ?? ''}" placeholder="例如 8443"></div>
         <div class="field">
@@ -4810,7 +4849,7 @@ async function renderEditNode(nodeId, errorText = '') {
             <span class="muted">开启时：服务端口跟随访问端口</span>
           </label>
         </div>
-        <div class="field"><label>协议</label><input value="${protocolDisplayName(node?.protocol, protocolMap)} (${node?.protocol || ''})" disabled></div>
+        <div class="field"><label>协议</label><input value="${escapeHtml(protocolDisplayName(node?.protocol, protocolMap))} (${escapeHtml(node?.protocol || '')})" disabled></div>
         <div class="field" style="grid-column: 1 / -1;">
           <div class="row" style="justify-content: space-between; align-items: center;">
             <label style="margin:0;">协议参数（可视化）</label>
@@ -5015,10 +5054,10 @@ async function renderNodeAccess(nodeId, errorText = '') {
   setView(html`
     <div class="card">
       <div class="row" style="justify-content: space-between; align-items: center;">
-        <h2>分享/权限：${node?.name || nodeId}</h2>
+        <h2>分享/权限：${escapeHtml(node?.name || nodeId)}</h2>
         <a class="btn" href="#/nodes">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="grid cols-2" style="margin-top: 10px;">
         <div class="field">
           <label>最低用户等级（0-4）</label>
@@ -5095,7 +5134,7 @@ async function renderNodeAuditRules(nodeId, errorText = '') {
         <h2>审计规则：节点 ${nodeId}</h2>
         <a class="btn" href="#/nodes">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="row" style="margin-top: 10px;">
         <div class="field" style="min-width: 140px;">
           <label>类型</label>
@@ -5138,7 +5177,7 @@ async function renderNodeAuditRules(nodeId, errorText = '') {
             <tr>
               <td>${r.id}</td>
               <td><span class="pill">${r.rule_type === 'domain' ? '域名' : (r.rule_type === 'protocol' ? '协议特征' : (r.rule_type === 'ip' ? 'IP / 网段' : r.rule_type))}</span></td>
-              <td class="muted">${r.rule_pattern}</td>
+              <td class="muted">${escapeHtml(r.rule_pattern)}</td>
               <td><span class="pill">${r.action === 'block' ? '拦截' : (r.action === 'allow' ? '放行' : (r.action === 'log' ? '仅记录' : r.action))}</span></td>
               <td>${r.is_active ? `<span class="pill ok">启用</span>` : `<span class="pill">停用</span>`}</td>
               <td class="row end">
@@ -5218,10 +5257,10 @@ async function renderPlans(purchaseToken = '') {
             return html`
               <tr>
                 <td>${p.id}</td>
-                <td>${p.name}</td>
+                <td>${escapeHtml(String(p.name || ''))}</td>
                 <td class="muted">${escapeHtml(ownerName)}</td>
-                <td><span class="pill">${p.scope || 'legacy'}</span></td>
-                <td class="muted">${(p.content || '').slice(0, 120)}</td>
+                <td><span class="pill">${escapeHtml(String(p.scope || 'legacy'))}</span></td>
+                <td class="muted">${escapeHtml(String(p.content || '').slice(0, 120))}</td>
                 <td>
                   <select data-period-for="${p.id}" ${options.length ? '' : 'disabled'}>
                     ${options.length ? options.map(opt => `<option value="${opt.key}">${opt.label} (${formatCny(opt.price)})</option>`).join('') : '<option value="">暂无可购买周期</option>'}
@@ -5277,7 +5316,7 @@ async function renderOrders() {
           ${orders.map(o => html`
             <tr>
               <td class="muted">${o.trade_no}</td>
-              <td>${o.plan?.name || o.plan_id}</td>
+              <td>${escapeHtml(o.plan?.name || o.plan_id)}</td>
               <td class="muted">${o.period}</td>
               <td class="muted">${o.total_amount ?? '-'}</td>
               <td><span class="pill">${o.status}</span></td>
@@ -5300,7 +5339,7 @@ async function renderOrderDetail(tradeNo, errorText = '') {
     const res = await apiFetch('/api/v1/user/order/detail?trade_no=' + encodeURIComponent(tradeNo));
     detail = res?.data || null;
   } catch (e) {
-    setView(`<div class="notice error">${e.message || '订单不存在'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '订单不存在')}</div>`);
     return;
   }
 
@@ -5313,9 +5352,9 @@ async function renderOrderDetail(tradeNo, errorText = '') {
         <h2>订单：${tradeNo}</h2>
         <a class="btn" href="#/orders">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
-        <div class="k">套餐</div><div class="v">${detail?.plan?.name || '-'}</div>
+        <div class="k">套餐</div><div class="v">${escapeHtml(detail?.plan?.name || '-')}</div>
         <div class="k">金额(分)</div><div class="v">${detail?.total_amount}</div>
         <div class="k">状态</div><div class="v">${detail?.status}</div>
       </div>
@@ -5325,7 +5364,7 @@ async function renderOrderDetail(tradeNo, errorText = '') {
         <div class="muted">选择支付方式后将打开支付页面（或返回表单/二维码等）。</div>
         <div class="row" style="margin-top: 10px;">
           <select id="payMethod" style="min-width: 260px;">
-            ${methods.map(m => `<option value="${m.id}">${m.name}</option>`).join('')}
+            ${methods.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}
           </select>
           <button class="btn primary" id="payBtn">发起支付</button>
           <button class="btn danger" id="cancelBtn">取消订单</button>
@@ -5367,21 +5406,41 @@ async function renderOrderDetail(tradeNo, errorText = '') {
         return;
       }
 
-      if (typeof data === 'string' && (data.startsWith('http://') || data.startsWith('https://'))) {
-        payOut.innerHTML = `<div class="notice">支付链接：<a href="${data}" target="_blank">${data}</a> <button class="btn small" id="payGo">跳转</button></div>`;
-        const go = document.getElementById('payGo');
-        if (go) {
-          go.addEventListener('click', () => { window.location.href = data; });
-        }
+      const paymentUrl = typeof data === 'string' ? normalizeHttpUrl(data) : '';
+      if (paymentUrl) {
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.append(document.createTextNode('支付链接：'));
+        const link = document.createElement('a');
+        link.href = paymentUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = paymentUrl;
+        notice.append(link, document.createTextNode(' '));
+        const go = document.createElement('button');
+        go.className = 'btn small';
+        go.type = 'button';
+        go.textContent = '跳转';
+        go.addEventListener('click', () => { window.location.href = paymentUrl; });
+        notice.append(go);
+        payOut.replaceChildren(notice);
         return;
       }
 
       if (typeof data === 'string' && data.includes('<form')) {
-        payOut.innerHTML = `<div class="notice">收到支付表单，已渲染（请确认并提交）。</div>` + data;
+        submitSafeEpayPostForm(payOut, data, '收到支付表单，正在跳转...');
         return;
       }
 
-      payOut.innerHTML = `<div class="notice">支付返回：<pre style="white-space:pre-wrap;color:var(--muted)">${JSON.stringify(out, null, 2)}</pre></div>`;
+      const notice = document.createElement('div');
+      notice.className = 'notice';
+      notice.append(document.createTextNode('支付返回：'));
+      const pre = document.createElement('pre');
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.color = 'var(--muted)';
+      pre.textContent = JSON.stringify(out, null, 2);
+      notice.append(pre);
+      payOut.replaceChildren(notice);
     } catch (e) {
       renderOrderDetail(tradeNo, e.message || '支付失败');
     }
@@ -5410,7 +5469,7 @@ async function renderTickets() {
             <tr>
               <td>${t.id}</td>
               <td class="muted">${t.node_id || '-'}</td>
-              <td>${t.subject}</td>
+              <td>${escapeHtml(String(t.subject || ''))}</td>
               <td><span class="pill">${t.status}</span></td>
               <td class="row end"><a class="btn small" href="#/ticket/${t.id}">查看</a></td>
             </tr>
@@ -5438,12 +5497,12 @@ async function renderNewTicket(errorText = '') {
         <h2>新建工单</h2>
         <a class="btn" href="#/tickets">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="grid cols-2" style="margin-top: 10px;">
         <div class="field"><label>节点（可选）</label>
           <select id="t_node">
             <option value="">（不指定）</option>
-            ${nodes.map(n => `<option value="${n.id}">${n.name} (#${n.id})</option>`).join('')}
+            ${nodes.map(n => `<option value="${escapeHtml(String(n.id))}">${escapeHtml(String(n.name || ''))} (#${escapeHtml(String(n.id))})</option>`).join('')}
           </select>
         </div>
         <div class="field"><label>等级</label>
@@ -5494,10 +5553,10 @@ async function renderTicketDetail(id, errorText = '') {
         <h2>工单 #${ticket?.id}</h2>
         <a class="btn" href="#/tickets">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
         <div class="k">节点</div><div class="v">${ticket?.node_id || '-'}</div>
-        <div class="k">主题</div><div class="v">${ticket?.subject}</div>
+        <div class="k">主题</div><div class="v">${escapeHtml(String(ticket?.subject || ''))}</div>
         <div class="k">状态</div><div class="v"><span class="pill">${ticket?.status}</span></div>
       </div>
       <div class="card" style="margin-top: 12px;">
@@ -5506,7 +5565,7 @@ async function renderTicketDetail(id, errorText = '') {
           ${asArray(ticket?.message).map(m => html`
             <div class="notice ${m.is_me ? 'ok' : ''}">
               <div class="muted">user_id=${m.user_id} · ${m.created_at}</div>
-              <div>${(m.message || '').replaceAll('\n','<br>')}</div>
+              <div>${escapeHtml(String(m.message || '')).replaceAll('\n','<br>')}</div>
             </div>
           `).join('')}
         </div>
@@ -5551,7 +5610,7 @@ async function renderNodePlans(errorText = '') {
         <h2>我发布的节点套餐</h2>
         <button class="btn primary" id="newNodePlanBtn">新建</button>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <table class="table" style="margin-top: 10px;">
         <thead>
           <tr><th>ID</th><th>名称</th><th>节点</th><th>可见方式</th><th>试用</th><th>付费额度(GB)</th><th>专属购买链接</th><th></th></tr>
@@ -5560,7 +5619,7 @@ async function renderNodePlans(errorText = '') {
           ${plans.map(p => html`
             <tr>
               <td>${p.id}</td>
-              <td>${p.name}</td>
+              <td>${escapeHtml(String(p.name || ''))}</td>
               <td class="muted">${asArray(p.node_ids).join(',')}</td>
               <td class="muted">
                 ${normalizePlanVisibilityScope(p.visibility_scope) === 'link_only'
@@ -5652,9 +5711,9 @@ async function renderNodePlanForm(mode, id = null, errorText = '') {
         <h2>${mode === 'new' ? '新建节点套餐' : '编辑节点套餐 #' + id}</h2>
         <a class="btn" href="#/node-plans">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="grid cols-2" style="margin-top: 10px;">
-        <div class="field" style="grid-column: 1 / -1;"><label>名称</label><input id="np_name" value="${plan?.name || ''}"></div>
+        <div class="field" style="grid-column: 1 / -1;"><label>名称</label><input id="np_name" value="${escapeHtml(String(plan?.name || ''))}"></div>
         <div class="field">
           <label>可见方式</label>
           <select id="np_visibility_scope">
@@ -5684,7 +5743,7 @@ async function renderNodePlanForm(mode, id = null, errorText = '') {
           <div class="grid" style="grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px;">
             ${nodes.map(n => {
               const checked = asArray(plan?.node_ids).includes(n.id);
-              return `<label class="notice" style="display:flex;gap:10px;align-items:center;"><input type="checkbox" class="np_node" value="${n.id}" ${checked ? 'checked' : ''}> <span>${n.name} (#${n.id})</span></label>`;
+              return `<label class="notice" style="display:flex;gap:10px;align-items:center;"><input type="checkbox" class="np_node" value="${escapeHtml(String(n.id))}" ${checked ? 'checked' : ''}> <span>${escapeHtml(String(n.name || ''))} (#${escapeHtml(String(n.id))})</span></label>`;
             }).join('')}
           </div>
         </div>
@@ -5709,7 +5768,7 @@ async function renderNodePlanForm(mode, id = null, errorText = '') {
             ${renderFreeQuotaInputFields('np_free_quota_', initialFreeQuota)}
           </div>
         </div>
-        <div class="field" style="grid-column: 1 / -1;"><label>描述</label><textarea id="np_content" rows="5">${plan?.content || ''}</textarea></div>
+        <div class="field" style="grid-column: 1 / -1;"><label>描述</label><textarea id="np_content" rows="5">${escapeHtml(String(plan?.content || ''))}</textarea></div>
         <div class="field" style="grid-column: 1 / -1;">
           <label>价格（元）</label>
           <div class="grid cols-2">
@@ -5881,7 +5940,7 @@ async function renderRefunds(errorText = '') {
         <h2>我的退款</h2>
         <button class="btn primary" id="newRefundBtn">申请退款</button>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <table class="table" style="margin-top: 10px;">
         <thead><tr><th>ID</th><th>订单</th><th>套餐</th><th>状态</th><th>退回(分)</th><th>收费(分)</th><th></th></tr></thead>
         <tbody>
@@ -5889,7 +5948,7 @@ async function renderRefunds(errorText = '') {
             <tr>
               <td>${r.id}</td>
               <td class="muted">${r.trade_no}</td>
-              <td>${r.plan?.name || r.plan_id}</td>
+              <td>${escapeHtml(r.plan?.name || r.plan_id)}</td>
               <td><span class="pill">${r.status}</span></td>
               <td class="muted">${r.refund_amount ?? '-'}</td>
               <td class="muted">${r.charged_amount ?? '-'}</td>
@@ -5932,7 +5991,7 @@ async function renderRefundDetail(id, errorText = '') {
     const res = await apiFetch('/api/v1/user/refunds/' + encodeURIComponent(id));
     r = res?.data || null;
   } catch (e) {
-    setView(`<div class="notice error">${e.message || '加载失败'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '加载失败')}</div>`);
     return;
   }
 
@@ -5945,10 +6004,10 @@ async function renderRefundDetail(id, errorText = '') {
         <h2>退款 #${r.id}</h2>
         <a class="btn" href="#/refunds">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
         <div class="k">订单</div><div class="v">${r.trade_no}</div>
-        <div class="k">套餐</div><div class="v">${r.plan?.name || r.plan_id}</div>
+        <div class="k">套餐</div><div class="v">${escapeHtml(r.plan?.name || r.plan_id)}</div>
         <div class="k">状态</div><div class="v"><span class="pill">${r.status}</span></div>
         <div class="k">退回(分)</div><div class="v">${r.refund_amount ?? '-'}</div>
         <div class="k">收费(分)</div><div class="v">${r.charged_amount ?? '-'}</div>
@@ -5964,7 +6023,7 @@ async function renderRefundDetail(id, errorText = '') {
           ${ev.map(e => html`
             <div class="notice">
               <div class="muted">${e.role} · user_id=${e.user_id} · ${e.created_at}</div>
-              <div>${(e.content || '').replaceAll('\\n','<br>')}</div>
+              <div>${escapeHtml(String(e.content || '')).replaceAll('\\n','<br>')}</div>
             </div>
           `).join('')}
         </div>
@@ -6007,15 +6066,14 @@ async function renderRefundVoteList(errorText = '') {
   setView(html`
     <div class="card">
       <h2>争议投票</h2>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <table class="table" style="margin-top: 10px;">
-        <thead><tr><th>ID</th><th>订单</th><th>套餐</th><th>结束</th><th>状态</th><th></th></tr></thead>
+        <thead><tr><th>案件</th><th>套餐</th><th>结束</th><th>状态</th><th></th></tr></thead>
         <tbody>
           ${items.map(r => html`
             <tr>
-              <td>${r.id}</td>
-              <td class="muted">${r.trade_no}</td>
-              <td>${r.plan?.name || r.plan_id}</td>
+              <td>#${r.id}</td>
+              <td>${escapeHtml(r.plan?.name || r.plan_id)}</td>
               <td class="muted">${r.voting_ends_at || '-'}</td>
               <td><span class="pill">${r.status}</span></td>
               <td class="row end"><a class="btn small" href="#/refund-vote/${r.id}">进入</a></td>
@@ -6041,7 +6099,7 @@ async function renderRefundVoteDetail(id, errorText = '') {
     const res = await apiFetch('/api/v1/user/refund-votes/' + encodeURIComponent(id));
     r = res?.data || null;
   } catch (e) {
-    setView(`<div class="notice error">${e.message || '加载失败'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '加载失败')}</div>`);
     return;
   }
 
@@ -6054,10 +6112,10 @@ async function renderRefundVoteDetail(id, errorText = '') {
         <h2>投票：退款 #${r.id}</h2>
         <a class="btn" href="#/refund-votes">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
-        <div class="k">订单</div><div class="v">${r.trade_no}</div>
-        <div class="k">套餐</div><div class="v">${r.plan?.name || r.plan_id}</div>
+        <div class="k">案件</div><div class="v">#${r.id}</div>
+        <div class="k">套餐</div><div class="v">${escapeHtml(r.plan?.name || r.plan_id)}</div>
         <div class="k">结束</div><div class="v">${r.voting_ends_at || '-'}</div>
         <div class="k">票数</div><div class="v">approve=${vc.approve} deny=${vc.deny}</div>
         <div class="k">我的投票</div><div class="v">${r.my_vote || '-'}</div>
@@ -6075,8 +6133,8 @@ async function renderRefundVoteDetail(id, errorText = '') {
         <div class="grid" style="gap: 8px; margin-top: 10px;">
           ${ev.map(e => html`
             <div class="notice">
-              <div class="muted">${e.role} · user_id=${e.user_id} · ${e.created_at}</div>
-              <div>${(e.content || '').replaceAll('\\n','<br>')}</div>
+              <div class="muted">${e.role}${e.is_mine ? ' · 我' : ''} · ${e.created_at}</div>
+              <div>${escapeHtml(String(e.content || '')).replaceAll('\\n','<br>')}</div>
             </div>
           `).join('')}
         </div>
@@ -6131,7 +6189,7 @@ async function renderNodeAdminRefunds(errorText = '') {
         <h2>节点退款收件箱</h2>
         <a class="btn" href="#/node-admin">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <table class="table" style="margin-top: 10px;">
         <thead><tr><th>ID</th><th>订单</th><th>用户</th><th>状态</th><th>退回/收费(分)</th><th></th></tr></thead>
         <tbody>
@@ -6161,7 +6219,7 @@ async function renderNodeAdminRefundDetail(id, errorText = '') {
     const res = await apiFetch('/api/v1/user/node-admin/refunds/' + encodeURIComponent(id));
     r = res?.data || null;
   } catch (e) {
-    setView(`<div class="notice error">${e.message || '加载失败'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '加载失败')}</div>`);
     return;
   }
 
@@ -6174,7 +6232,7 @@ async function renderNodeAdminRefundDetail(id, errorText = '') {
         <h2>处理退款 #${r.id}</h2>
         <a class="btn" href="#/node-admin/refunds">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
         <div class="k">订单</div><div class="v">${r.trade_no}</div>
         <div class="k">用户</div><div class="v">${r.user_id}</div>
@@ -6197,7 +6255,7 @@ async function renderNodeAdminRefundDetail(id, errorText = '') {
           ${ev.map(e => html`
             <div class="notice">
               <div class="muted">${e.role} · user_id=${e.user_id} · ${e.created_at}</div>
-              <div>${(e.content || '').replaceAll('\\n','<br>')}</div>
+              <div>${escapeHtml(String(e.content || '')).replaceAll('\\n','<br>')}</div>
             </div>
           `).join('')}
         </div>
@@ -6277,7 +6335,7 @@ async function renderNodeAdmin() {
             ${nodes.map(n => html`
               <tr>
                 <td>${n.id}</td>
-                <td>${n.name}</td>
+                <td>${escapeHtml(String(n.name || ''))}</td>
                 <td>${pillStatus(n)}</td>
                 <td class="row end">
                   <a class="btn small" href="#/node-admin/node/${n.id}">用户流量</a>
@@ -6297,7 +6355,7 @@ async function renderNodeAdmin() {
               <tr>
                 <td>${t.id}</td>
                 <td class="muted">${t.node_id || '-'}</td>
-                <td>${t.subject}</td>
+                <td>${escapeHtml(String(t.subject || ''))}</td>
                 <td class="row end"><a class="btn small" href="#/node-admin/ticket/${t.id}">处理</a></td>
               </tr>
             `).join('')}
@@ -6343,10 +6401,10 @@ async function renderNodeAdminNodeUsers(nodeId, errorText = '') {
   setView(html`
     <div class="card">
       <div class="row" style="justify-content: space-between; align-items: center;">
-        <h2>节点用户流量：${data.node?.name || nodeId}</h2>
+        <h2>节点用户流量：${escapeHtml(String(data.node?.name || nodeId))}</h2>
         <a class="btn" href="#/node-admin">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <table class="table" style="margin-top: 10px;">
         <thead>
           <tr><th>User</th><th>总量(KB)</th><th>上行</th><th>下行</th><th>拉黑</th><th></th></tr>
@@ -6354,7 +6412,7 @@ async function renderNodeAdminNodeUsers(nodeId, errorText = '') {
         <tbody>
           ${users.map(u => html`
             <tr>
-              <td class="muted">${u.user_id} · ${u.email || ''}</td>
+              <td class="muted">${u.user_id} · ${escapeHtml(u.email || '')}</td>
               <td>${u.total}</td>
               <td class="muted">${u.upload}</td>
               <td class="muted">${u.download}</td>
@@ -6407,10 +6465,10 @@ async function renderNodeAdminTicket(id, errorText = '') {
         <h2>处理工单 #${ticket?.id}</h2>
         <a class="btn" href="#/node-admin">返回</a>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="kvs" style="margin-top: 10px;">
         <div class="k">节点</div><div class="v">${ticket?.node_id || '-'}</div>
-        <div class="k">主题</div><div class="v">${ticket?.subject}</div>
+        <div class="k">主题</div><div class="v">${escapeHtml(String(ticket?.subject || ''))}</div>
         <div class="k">状态</div><div class="v"><span class="pill">${ticket?.status}</span></div>
       </div>
       <div class="card" style="margin-top: 12px;">
@@ -6419,7 +6477,7 @@ async function renderNodeAdminTicket(id, errorText = '') {
           ${asArray(ticket?.message).map(m => html`
             <div class="notice ${m.is_me ? 'ok' : ''}">
               <div class="muted">user_id=${m.user_id} · ${m.created_at}</div>
-              <div>${(m.message || '').replaceAll('\n','<br>')}</div>
+              <div>${escapeHtml(String(m.message || '')).replaceAll('\n','<br>')}</div>
             </div>
           `).join('')}
         </div>
@@ -6472,11 +6530,11 @@ async function renderAudit() {
           ${items.map(l => html`
             <tr>
               <td>${l.id}</td>
-              <td class="muted">${l.node?.name || l.node_id}</td>
-              <td><span class="pill">${l.action_taken}</span></td>
-              <td class="muted">${l.target_domain || l.target_protocol || '-'}</td>
-              <td class="muted">${l.ip_address}</td>
-              <td class="muted">${l.created_at}</td>
+              <td class="muted">${escapeHtml(l.node?.name || l.node_id)}</td>
+              <td><span class="pill">${escapeHtml(l.action_taken)}</span></td>
+              <td class="muted">${escapeHtml(l.target_domain || l.target_protocol || '-')}</td>
+              <td class="muted">${escapeHtml(l.ip_address)}</td>
+              <td class="muted">${escapeHtml(l.created_at)}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -7421,9 +7479,9 @@ async function renderAdmin(errorText = '', activeCardId = '') {
       <div class="card">
         <div class="row" style="justify-content: space-between; align-items: center;">
           <h2>同用户异 IP 限制</h2>
-          ${me?.secure_path ? `<a class="btn small" target="_blank" href="/${me.secure_path}">打开完整后台</a>` : ''}
+          ${me?.secure_path ? `<a class="btn small" target="_blank" rel="noopener" href="/${encodeURIComponent(String(me.secure_path).replace(/^\/+|\/+$/g, ''))}">打开完整后台</a>` : ''}
         </div>
-        ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+        ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
         <div class="grid">
           <div class="field"><label>用户 ID</label><input id="adm_uid" type="number" placeholder="例如 123"></div>
           <div class="field"><label>同用户异 IP 上限（单节点，0=按用户组）</label><input id="adm_user_device_limit" type="number" min="0" value="0"></div>
@@ -7443,7 +7501,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           <h2>API Key 系统统计</h2>
           <button class="btn small" id="admApiRefreshStats">刷新</button>
         </div>
-        ${apiKeyErr ? `<div class="notice error">${apiKeyErr}</div>` : ''}
+        ${apiKeyErr ? `<div class="notice error">${escapeHtml(apiKeyErr)}</div>` : ''}
         <div class="kvs" id="admApiStatsBox">
           ${apiKeyStats && typeof apiKeyStats === 'object'
             ? Object.keys(apiKeyStats).map((k) => html`<div class="k">${k}</div><div class="v">${apiKeyStats[k] ?? '-'}</div>`).join('')
@@ -7462,7 +7520,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           <h2>登录与安全设置</h2>
           <button class="btn small" id="admReloadConfigBtn">重新读取</button>
         </div>
-        ${configErr ? `<div class="notice error">${configErr}</div>` : ''}
+        ${configErr ? `<div class="notice error">${escapeHtml(configErr)}</div>` : ''}
         <div class="grid">
           <div class="field"><label>后台域名保护</label>
             <select id="sec_safe_mode_enable">
@@ -7504,7 +7562,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
               <option value="0" ${safeCfg.email_whitelist_enable ? '' : 'selected'}>关闭</option>
             </select>
           </div>
-          <div class="field"><label>允许注册的邮箱后缀（逗号分隔）</label><textarea id="sec_email_whitelist_suffix" rows="2" placeholder="例如 qq.com,gmail.com">${Array.isArray(safeCfg.email_whitelist_suffix) ? safeCfg.email_whitelist_suffix.join(',') : (safeCfg.email_whitelist_suffix || '')}</textarea></div>
+          <div class="field"><label>允许注册的邮箱后缀（逗号分隔）</label><textarea id="sec_email_whitelist_suffix" rows="2" placeholder="例如 qq.com,gmail.com">${escapeHtml(Array.isArray(safeCfg.email_whitelist_suffix) ? safeCfg.email_whitelist_suffix.join(',') : (safeCfg.email_whitelist_suffix || ''))}</textarea></div>
           <div class="field"><label>Gmail 特殊规则限制</label>
             <select id="sec_email_gmail_limit_enable">
               <option value="1" ${safeCfg.email_gmail_limit_enable ? 'selected' : ''}>开启</option>
@@ -7591,7 +7649,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
 
       <div class="card">
         <h2>OAuth2 登录设置</h2>
-        ${configErr ? `<div class="notice error">${configErr}</div>` : ''}
+        ${configErr ? `<div class="notice error">${escapeHtml(configErr)}</div>` : ''}
         <div class="grid">
           <div class="field"><label>启用 Linux DO 登录</label>
             <select id="oauth_linux_do_enable">
@@ -7611,7 +7669,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           登录入口固定为 <code>/api/v1/passport/oauth2/linux-do/redirect</code>。
         </div>
         <div class="muted">
-          当前站点地址：<code>${siteCfg.app_url || window.__APP__?.baseUrl || location.origin}</code>
+          当前站点地址：<code>${escapeHtml(siteCfg.app_url || window.__APP__?.baseUrl || location.origin)}</code>
         </div>
 
         <h3 style="margin-top:12px;">注册与订阅入口</h3>
@@ -7703,7 +7761,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
     <div class="grid cols-2" style="margin-top:12px;">
       <div class="card">
         <h2>固定前端主题与订阅套餐</h2>
-        ${migratedV2PlanErr ? `<div class="notice error">${migratedV2PlanErr}</div>` : ''}
+        ${migratedV2PlanErr ? `<div class="notice error">${escapeHtml(migratedV2PlanErr)}</div>` : ''}
         <div class="grid">
           <div class="field">
             <label>前端主题（固定）</label>
@@ -7751,7 +7809,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2Plans.slice(0, 20).map((p) => html`
               <tr>
                 <td>${p.id}</td>
-                <td>${p.name || '-'}</td>
+                <td>${escapeHtml(p.name || '-')}</td>
                 <td class="muted">${p.transfer_enable || 0} GB</td>
                 <td class="muted">${p.show ? '开' : '关'} / ${p.sell ? '开' : '关'} / ${p.renew ? '开' : '关'}</td>
                 <td class="row end">
@@ -7768,7 +7826,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
 
       <div class="card">
         <h2>支付与公告</h2>
-        ${(migratedV2PaymentErr || migratedV2NoticeErr) ? `<div class="notice error">${migratedV2PaymentErr || migratedV2NoticeErr}</div>` : ''}
+        ${(migratedV2PaymentErr || migratedV2NoticeErr) ? `<div class="notice error">${escapeHtml(migratedV2PaymentErr || migratedV2NoticeErr)}</div>` : ''}
         <h3>新增支付方式</h3>
         <div class="grid cols-2">
           <div class="field"><label>显示名称</label><input id="v2_payment_name" placeholder="例如 支付宝" /></div>
@@ -7790,8 +7848,8 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2Payments.slice(0, 20).map((p) => html`
               <tr>
                 <td>${p.id}</td>
-                <td>${p.name || '-'}</td>
-                <td class="muted">${p.payment || '-'}</td>
+                <td>${escapeHtml(p.name || '-')}</td>
+                <td class="muted">${escapeHtml(p.payment || '-')}</td>
                 <td class="muted">${p.enable ? '是' : '否'}</td>
                 <td class="row end">
                   <button class="btn small" data-v2-payment-toggle="${p.id}">${p.enable ? '禁用' : '启用'}</button>
@@ -7817,7 +7875,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2Notices.slice(0, 20).map((n) => html`
               <tr>
                 <td>${n.id}</td>
-                <td>${n.title || '-'}</td>
+                <td>${escapeHtml(n.title || '-')}</td>
                 <td class="muted">${n.show ? '是' : '否'}</td>
                 <td class="row end">
                   <button class="btn small" data-v2-notice-toggle="${n.id}">显示开关</button>
@@ -7833,7 +7891,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
     <div class="grid cols-2" style="margin-top:12px;">
       <div class="card">
         <h2>工单与优惠券</h2>
-        ${(migratedV2TicketErr || migratedV2CouponErr) ? `<div class="notice error">${migratedV2TicketErr || migratedV2CouponErr}</div>` : ''}
+        ${(migratedV2TicketErr || migratedV2CouponErr) ? `<div class="notice error">${escapeHtml(migratedV2TicketErr || migratedV2CouponErr)}</div>` : ''}
         <h3>工单处理</h3>
         <table class="table">
           <thead><tr><th>ID</th><th>用户</th><th>主题</th><th>状态</th><th></th></tr></thead>
@@ -7841,9 +7899,9 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2Tickets.slice(0, 20).map((t) => html`
               <tr>
                 <td>${t.id}</td>
-                <td class="muted">${t?.user?.email || '-'}</td>
-                <td>${t.subject || '-'}</td>
-                <td class="muted">${t.status || '-'}</td>
+                <td class="muted">${escapeHtml(t?.user?.email || '-')}</td>
+                <td>${escapeHtml(t.subject || '-')}</td>
+                <td class="muted">${escapeHtml(t.status || '-')}</td>
                 <td class="row end">
                   <button class="btn small" data-v2-ticket-detail="${t.id}">查看</button>
                   <button class="btn small danger" data-v2-ticket-close="${t.id}">关闭</button>
@@ -7886,8 +7944,8 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2Coupons.slice(0, 20).map((c) => html`
               <tr>
                 <td>${c.id}</td>
-                <td>${c.name || '-'}</td>
-                <td class="muted">${c.code || '-'}</td>
+                <td>${escapeHtml(c.name || '-')}</td>
+                <td class="muted">${escapeHtml(c.code || '-')}</td>
                 <td class="muted">${c.show ? '是' : '否'}</td>
                 <td class="row end">
                   <button class="btn small" data-v2-coupon-toggle="${c.id}">显示开关</button>
@@ -7901,13 +7959,13 @@ async function renderAdmin(errorText = '', activeCardId = '') {
 
       <div class="card">
         <h2>礼品卡与插件</h2>
-        ${(migratedV2GiftErr || migratedV2PluginErr) ? `<div class="notice error">${migratedV2GiftErr || migratedV2PluginErr}</div>` : ''}
+        ${(migratedV2GiftErr || migratedV2PluginErr) ? `<div class="notice error">${escapeHtml(migratedV2GiftErr || migratedV2PluginErr)}</div>` : ''}
         <h3>批量生成礼品卡兑换码</h3>
         <div class="grid cols-2">
           <div class="field">
             <label>模板</label>
             <select id="v2_gift_template_id">
-              ${migratedV2GiftTemplates.map((t) => `<option value="${t.id}">${t.name} (#${t.id})</option>`).join('')}
+              ${migratedV2GiftTemplates.map((t) => `<option value="${t.id}">${escapeHtml(t.name)} (#${t.id})</option>`).join('')}
             </select>
           </div>
           <div class="field"><label>生成数量</label><input id="v2_gift_count" type="number" min="1" max="10000" value="10" /></div>
@@ -7923,9 +7981,9 @@ async function renderAdmin(errorText = '', activeCardId = '') {
             ${migratedV2GiftCodes.slice(0, 20).map((g) => html`
               <tr>
                 <td>${g.id}</td>
-                <td class="muted">${g.template_name || g.template_id || '-'}</td>
-                <td>${g.code || '-'}</td>
-                <td class="muted">${g.status_name || g.status || '-'}</td>
+                <td class="muted">${escapeHtml(g.template_name || g.template_id || '-')}</td>
+                <td>${escapeHtml(g.code || '-')}</td>
+                <td class="muted">${escapeHtml(g.status_name || g.status || '-')}</td>
                 <td class="row end">
                   <button class="btn small" data-v2-gift-toggle="${g.id}" data-v2-gift-action="${String(g.status_name || '').includes('禁用') ? 'enable' : 'disable'}">${String(g.status_name || '').includes('禁用') ? '启用' : '禁用'}</button>
                 </td>
@@ -7940,7 +7998,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           <tbody>
             ${migratedV2Plugins.slice(0, 30).map((p) => html`
               <tr>
-                <td>${p.name || p.code}</td>
+                <td>${escapeHtml(p.name || p.code)}</td>
                 <td class="muted">${p.is_installed ? (p.is_enabled ? '已启用' : '已安装') : '未安装'}</td>
                 <td class="row end">
                   ${p.is_installed ? `<button class="btn small" data-v2-plugin-act="${p.is_enabled ? 'disable' : 'enable'}" data-v2-plugin-code="${p.code}">${p.is_enabled ? '禁用' : '启用'}</button>` : `<button class="btn small" data-v2-plugin-act="install" data-v2-plugin-code="${p.code}">安装</button>`}
@@ -7957,7 +8015,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
     <div class="grid cols-2" style="margin-top:12px;">
       <div class="card">
         <h2>系统状态与日志</h2>
-        ${migratedV2SystemErr ? `<div class="notice error">${migratedV2SystemErr}</div>` : ''}
+        ${migratedV2SystemErr ? `<div class="notice error">${escapeHtml(migratedV2SystemErr)}</div>` : ''}
         <div class="kvs">
           <div class="k">定时任务</div><div class="v">${migratedV2SystemStatus?.schedule ? '正常' : '异常'}</div>
           <div class="k">队列</div><div class="v">${migratedV2SystemStatus?.horizon ? '正常' : '异常'}</div>
@@ -7985,7 +8043,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
 
       <div class="card">
         <h2>流量重置管理</h2>
-        ${migratedV2TrafficErr ? `<div class="notice error">${migratedV2TrafficErr}</div>` : ''}
+        ${migratedV2TrafficErr ? `<div class="notice error">${escapeHtml(migratedV2TrafficErr)}</div>` : ''}
         <div class="kvs">
           <div class="k">近30天总重置</div><div class="v">${migratedV2TrafficStats?.total_resets ?? '-'}</div>
           <div class="k">自动重置</div><div class="v">${migratedV2TrafficStats?.auto_resets ?? '-'}</div>
@@ -8011,7 +8069,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           <button class="btn" id="admGroupRefresh">刷新</button>
         </div>
       </div>
-      ${groupErr ? `<div class="notice error">${groupErr}</div>` : ''}
+      ${groupErr ? `<div class="notice error">${escapeHtml(groupErr)}</div>` : ''}
       <table class="table" style="margin-top:10px;">
         <thead>
           <tr><th>等级</th><th>名称</th><th>上行</th><th>下行</th><th>设备</th><th>连接</th><th></th></tr>
@@ -8020,7 +8078,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           ${groupLimits.length ? groupLimits.map((g) => html`
             <tr>
               <td>${g.trust_level}</td>
-              <td class="muted">${g.trust_level_name || '-'}</td>
+              <td class="muted">${escapeHtml(g.trust_level_name || '-')}</td>
               <td><input id="gl_up_${g.trust_level}" type="number" value="${g.speed_limit_up ?? 0}" /></td>
               <td><input id="gl_down_${g.trust_level}" type="number" value="${g.speed_limit_down ?? 0}" /></td>
               <td><input id="gl_dev_${g.trust_level}" type="number" value="${g.device_limit ?? 0}" /></td>
@@ -8058,11 +8116,11 @@ async function renderAdmin(errorText = '', activeCardId = '') {
       ${me?.is_super_admin ? html`
         <div class="card">
           <h2>赞助收款配置（超管）</h2>
-          ${sponsorErr ? `<div class="notice error">${sponsorErr}</div>` : ''}
+          ${sponsorErr ? `<div class="notice error">${escapeHtml(sponsorErr)}</div>` : ''}
           <div class="grid">
-            <div class="field"><label>网关 URL</label><input id="sp_url" value="${sponsorProfile?.url || 'https://credit.linux.do/epay'}"></div>
-            <div class="field"><label>提交路径</label><input id="sp_submit" value="${sponsorProfile?.submit_path || '/pay/submit.php'}"></div>
-            <div class="field"><label>商户号 PID</label><input id="sp_pid" value="${sponsorProfile?.pid || ''}"></div>
+            <div class="field"><label>网关 URL</label><input id="sp_url" value="${escapeHtml(sponsorProfile?.url || 'https://credit.linux.do/epay')}"></div>
+            <div class="field"><label>提交路径</label><input id="sp_submit" value="${escapeHtml(sponsorProfile?.submit_path || '/pay/submit.php')}"></div>
+            <div class="field"><label>商户号 PID</label><input id="sp_pid" value="${escapeHtml(sponsorProfile?.pid || '')}"></div>
             <div class="field"><label>商户密钥</label><input id="sp_key" type="password" placeholder="${sponsorProfile?.has_key ? '已设置，重新输入可覆盖' : ''}"></div>
             <div class="field"><label>提交方式</label>
               <select id="sp_post">
@@ -8070,8 +8128,8 @@ async function renderAdmin(errorText = '', activeCardId = '') {
                 <option value="0" ${(sponsorProfile?.use_post ?? true) ? '' : 'selected'}>GET</option>
               </select>
             </div>
-            <div class="field"><label>站点名称（可选）</label><input id="sp_site" value="${sponsorProfile?.sitename || ''}"></div>
-            <div class="field"><label>设备标识（可选）</label><input id="sp_device" value="${sponsorProfile?.device || ''}"></div>
+            <div class="field"><label>站点名称（可选）</label><input id="sp_site" value="${escapeHtml(sponsorProfile?.sitename || '')}"></div>
+            <div class="field"><label>设备标识（可选）</label><input id="sp_device" value="${escapeHtml(sponsorProfile?.device || '')}"></div>
             <div class="row end">
               <button class="btn primary" id="admSponsorSaveBtn">保存赞助收款</button>
             </div>
@@ -8105,7 +8163,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
         <h2>节点套餐（全局）</h2>
         <button class="btn primary" id="admNewNodePlan">新建</button>
       </div>
-      ${(nodePlanErr || adminNodeOptionsErr) ? `<div class="notice error">${nodePlanErr || adminNodeOptionsErr}</div>` : ''}
+      ${(nodePlanErr || adminNodeOptionsErr) ? `<div class="notice error">${escapeHtml(nodePlanErr || adminNodeOptionsErr)}</div>` : ''}
       <div class="muted" style="margin-top:10px;">超管可管理全部用户发布的节点套餐：编辑、上架开关、售卖开关、续费开关、删除。</div>
       <table class="table" style="margin-top:10px;">
         <thead><tr><th>ID</th><th>名称</th><th>owner</th><th>节点</th><th>可见方式</th><th>试用</th><th>付费额度(GB)</th><th>专属购买链接</th><th>显示/售卖/续费</th><th></th></tr></thead>
@@ -8113,7 +8171,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
           ${nodePlans.slice(0, 60).map((p) => html`
             <tr>
               <td>${p.id}</td>
-              <td>${p.name}</td>
+              <td>${escapeHtml(String(p.name || ''))}</td>
               <td class="muted">${p.owner_user_id || '-'}</td>
               <td class="muted">${asArray(p.node_ids).join(',')}</td>
               <td class="muted">
@@ -8152,7 +8210,7 @@ async function renderAdmin(errorText = '', activeCardId = '') {
         <h2>退款（全局）</h2>
         <button class="btn" id="admRefundFinalize">结算到期投票</button>
       </div>
-      ${refundErr ? `<div class="notice error">${refundErr}</div>` : ''}
+      ${refundErr ? `<div class="notice error">${escapeHtml(refundErr)}</div>` : ''}
       <table class="table" style="margin-top:10px;">
         <thead><tr><th>ID</th><th>订单</th><th>用户</th><th>状态</th><th>退回/收费(分)</th><th></th></tr></thead>
         <tbody>
@@ -9009,9 +9067,9 @@ async function renderAdmin(errorText = '', activeCardId = '') {
     apiSearchBody.innerHTML = apiSearchState.items.map((u) => html`
       <tr>
         <td>${u.id}</td>
-        <td class="muted">${u.email || '-'}</td>
-        <td class="muted">${u.linux_do_username || '-'}</td>
-        <td class="muted">${u.api_key_prefix || '-'}</td>
+        <td class="muted">${escapeHtml(u.email || '-')}</td>
+        <td class="muted">${escapeHtml(u.linux_do_username || '-')}</td>
+        <td class="muted">${escapeHtml(u.api_key_prefix || '-')}</td>
         <td class="row end">
           <button class="btn small" data-ak-act="detail" data-ak-id="${u.id}">详情</button>
           <button class="btn small primary" data-ak-act="generate" data-ak-id="${u.id}">生成</button>
@@ -9211,10 +9269,10 @@ async function renderProfile(errorText = '') {
     <div class="grid cols-2">
       <div class="card">
         <h2>账户信息</h2>
-        ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+        ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
         <div class="kvs">
-          <div class="k">邮箱</div><div class="v">${info?.data?.email || '-'}</div>
-          <div class="k">第三方用户名</div><div class="v">${me?.linux_do_username || '-'}</div>
+          <div class="k">邮箱</div><div class="v">${escapeHtml(info?.data?.email || '-')}</div>
+          <div class="k">第三方用户名</div><div class="v">${escapeHtml(me?.linux_do_username || '-')}</div>
           <div class="k">订阅链接</div><div class="v"><button class="btn small" id="copySubBtnProfile">复制订阅链接</button></div>
           <div class="k">重置订阅</div><div class="v"><button class="btn small" id="resetSecBtn">重置</button></div>
         </div>
@@ -9316,7 +9374,7 @@ async function renderInvite(errorText = '') {
         <h2>邀请</h2>
         <button class="btn" id="newInviteBtn">生成邀请码</button>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="grid cols-3" style="margin-top:10px;">
         <div class="notice"><strong>邀请注册数：</strong>${stat[0] ?? 0}</div>
         <div class="notice"><strong>已获得佣金：</strong>${stat[1] ?? 0}</div>
@@ -9875,7 +9933,7 @@ async function renderTools(errorText = '') {
     <div class="grid cols-2">
       <div class="card">
         <h2>优惠券</h2>
-        ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+        ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
         <div class="row">
           <input id="couponCode" placeholder="请输入优惠码">
           <button class="btn" id="couponCheckBtn">查询</button>
@@ -9911,7 +9969,7 @@ async function renderTools(errorText = '') {
       const res = await apiFetch('/api/v1/user/coupon/check', { method: 'POST', body: { code: qs('#couponCode').value.trim() } });
       qs('#couponOut').innerHTML = renderCouponCheckSummary(res?.data || {});
     } catch (e) {
-      qs('#couponOut').innerHTML = `<div class="notice error">${e.message || '失败'}</div>`;
+      qs('#couponOut').innerHTML = `<div class="notice error">${escapeHtml(e.message || '失败')}</div>`;
     }
   });
 
@@ -9920,7 +9978,7 @@ async function renderTools(errorText = '') {
       const res = await apiFetch('/api/v1/user/gift-card/check', { method: 'POST', body: { code: qs('#giftCode').value.trim() } });
       qs('#giftOut').innerHTML = renderGiftCheckSummary(res?.data || {});
     } catch (e) {
-      qs('#giftOut').innerHTML = `<div class="notice error">${e.message || '失败'}</div>`;
+      qs('#giftOut').innerHTML = `<div class="notice error">${escapeHtml(e.message || '失败')}</div>`;
     }
   });
 
@@ -9929,7 +9987,7 @@ async function renderTools(errorText = '') {
       const res = await apiFetch('/api/v1/user/gift-card/redeem', { method: 'POST', body: { code: qs('#giftCode').value.trim() } });
       qs('#giftOut').innerHTML = renderGiftRedeemSummary(res?.data || {});
     } catch (e) {
-      qs('#giftOut').innerHTML = `<div class="notice error">${e.message || '失败'}</div>`;
+      qs('#giftOut').innerHTML = `<div class="notice error">${escapeHtml(e.message || '失败')}</div>`;
     }
   });
 
@@ -9937,14 +9995,14 @@ async function renderTools(errorText = '') {
     const traffic = await apiFetch('/api/v1/user/node-traffic');
     qs('#nodeTrafficOut').innerHTML = renderNodeTrafficSummary(asArray(traffic?.data));
   } catch (e) {
-    qs('#nodeTrafficOut').innerHTML = `<div class="notice error">${e.message || '失败'}</div>`;
+    qs('#nodeTrafficOut').innerHTML = `<div class="notice error">${escapeHtml(e.message || '失败')}</div>`;
   }
 
   try {
     const logs = await apiFetch('/api/v1/user/traffic-usage-logs?days=7&limit=100');
     qs('#trafficUsageLogOut').innerHTML = renderTrafficUsageLogs(asArray(logs?.data));
   } catch (e) {
-    qs('#trafficUsageLogOut').innerHTML = `<div class="notice error">${e.message || '失败'}</div>`;
+    qs('#trafficUsageLogOut').innerHTML = `<div class="notice error">${escapeHtml(e.message || '失败')}</div>`;
   }
 }
 
@@ -9975,11 +10033,11 @@ async function renderPaymentProfile(errorText = '') {
     <div class="grid ${me?.is_super_admin ? 'cols-2' : ''}">
       <div class="card">
         <h2>我的收款（EPay 协议）</h2>
-        ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+        ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
         <div class="grid">
-          <div class="field"><label>网关 URL</label><input id="pp_url" value="${mine?.url || 'https://credit.linux.do/epay'}"></div>
-          <div class="field"><label>提交路径</label><input id="pp_submit" value="${mine?.submit_path || '/pay/submit.php'}"></div>
-          <div class="field"><label>商户号 PID</label><input id="pp_pid" value="${mine?.pid || ''}"></div>
+          <div class="field"><label>网关 URL</label><input id="pp_url" value="${escapeHtml(mine?.url || 'https://credit.linux.do/epay')}"></div>
+          <div class="field"><label>提交路径</label><input id="pp_submit" value="${escapeHtml(mine?.submit_path || '/pay/submit.php')}"></div>
+          <div class="field"><label>商户号 PID</label><input id="pp_pid" value="${escapeHtml(mine?.pid || '')}"></div>
           <div class="field"><label>商户密钥（加密保存）</label><input id="pp_key" type="password" placeholder="${mine?.has_key ? '已设置(重新输入可覆盖)' : ''}"></div>
           <div class="field"><label>提交方式</label>
             <select id="pp_post">
@@ -9987,8 +10045,8 @@ async function renderPaymentProfile(errorText = '') {
               <option value="0">GET</option>
             </select>
           </div>
-          <div class="field"><label>站点名称（可选）</label><input id="pp_site" value="${mine?.sitename || ''}"></div>
-          <div class="field"><label>设备标识（可选）</label><input id="pp_device" value="${mine?.device || ''}"></div>
+          <div class="field"><label>站点名称（可选）</label><input id="pp_site" value="${escapeHtml(mine?.sitename || '')}"></div>
+          <div class="field"><label>设备标识（可选）</label><input id="pp_device" value="${escapeHtml(mine?.device || '')}"></div>
           <div class="row end"><button class="btn primary" id="pp_save">保存</button></div>
         </div>
         <div class="muted" style="margin-top:10px;">
@@ -9999,11 +10057,11 @@ async function renderPaymentProfile(errorText = '') {
       ${me?.is_super_admin ? html`
         <div class="card">
           <h2>赞助收款（超管）</h2>
-          ${sponsorErr ? `<div class="notice error">${sponsorErr}</div>` : ''}
+          ${sponsorErr ? `<div class="notice error">${escapeHtml(sponsorErr)}</div>` : ''}
           <div class="grid">
-            <div class="field"><label>网关 URL</label><input id="sp_url" value="${sponsor?.url || 'https://credit.linux.do/epay'}"></div>
-            <div class="field"><label>提交路径</label><input id="sp_submit" value="${sponsor?.submit_path || '/pay/submit.php'}"></div>
-            <div class="field"><label>商户号 PID</label><input id="sp_pid" value="${sponsor?.pid || ''}"></div>
+            <div class="field"><label>网关 URL</label><input id="sp_url" value="${escapeHtml(sponsor?.url || 'https://credit.linux.do/epay')}"></div>
+            <div class="field"><label>提交路径</label><input id="sp_submit" value="${escapeHtml(sponsor?.submit_path || '/pay/submit.php')}"></div>
+            <div class="field"><label>商户号 PID</label><input id="sp_pid" value="${escapeHtml(sponsor?.pid || '')}"></div>
             <div class="field"><label>商户密钥</label><input id="sp_key" type="password" placeholder="${sponsor?.has_key ? '已设置(重新输入可覆盖)' : ''}"></div>
             <div class="field"><label>提交方式</label>
               <select id="sp_post">
@@ -10011,8 +10069,8 @@ async function renderPaymentProfile(errorText = '') {
                 <option value="0">GET</option>
               </select>
             </div>
-            <div class="field"><label>站点名称（可选）</label><input id="sp_site" value="${sponsor?.sitename || ''}"></div>
-            <div class="field"><label>设备标识（可选）</label><input id="sp_device" value="${sponsor?.device || ''}"></div>
+            <div class="field"><label>站点名称（可选）</label><input id="sp_site" value="${escapeHtml(sponsor?.sitename || '')}"></div>
+            <div class="field"><label>设备标识（可选）</label><input id="sp_device" value="${escapeHtml(sponsor?.device || '')}"></div>
             <div class="row end"><button class="btn" id="sp_save">保存</button></div>
           </div>
           <div class="muted" style="margin-top:10px;">
@@ -10090,12 +10148,12 @@ async function renderSponsor(errorText = '') {
         <h2>赞助</h2>
         <div class="muted">独立于套餐购买</div>
       </div>
-      ${errorText ? `<div class="notice error">${errorText}</div>` : ''}
+      ${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}
       <div class="grid cols-2" style="margin-top: 10px;">
         <div class="field"><label>金额（元）</label><input id="sp_amount" type="number" step="0.01" value="10"></div>
         <div class="field"><label>支付方式（EPay）</label>
           <select id="sp_method">
-            ${methods.map(m => `<option value="${m.id}">${m.name}</option>`).join('')}
+            ${methods.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -10119,15 +10177,30 @@ async function renderSponsor(errorText = '') {
 
       const box = qs('#sp_out');
       if (out?.type === 1 && typeof out?.data === 'string' && out.data.includes('<form')) {
-        box.innerHTML = `<div class="notice">已生成支付表单，正在跳转...</div>` + out.data;
+        submitSafeEpayPostForm(box, out.data, '已生成支付表单，正在跳转...');
         return;
       }
       if (out?.type === 1 && typeof out?.data === 'string') {
-        box.innerHTML = `<div class="notice">支付链接：<a href="${out.data}" target="_blank">${out.data}</a></div>`;
-        window.location.href = out.data;
+        const paymentUrl = normalizeHttpUrl(out.data);
+        if (!paymentUrl) throw new Error('支付网关返回了无效链接');
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.append(document.createTextNode('支付链接：'));
+        const link = document.createElement('a');
+        link.href = paymentUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = paymentUrl;
+        notice.append(link);
+        box.replaceChildren(notice);
+        window.location.href = paymentUrl;
         return;
       }
-      box.innerHTML = `<pre style="white-space:pre-wrap;color:var(--muted)">${JSON.stringify(out, null, 2)}</pre>`;
+      const pre = document.createElement('pre');
+      pre.style.whiteSpace = 'pre-wrap';
+      pre.style.color = 'var(--muted)';
+      pre.textContent = JSON.stringify(out, null, 2);
+      box.replaceChildren(pre);
     } catch (e) {
       renderSponsor(e.message || '发起失败');
     }
@@ -10252,8 +10325,39 @@ async function router() {
   if (page === 'sponsor' && a) return renderSponsorDetail(a);
   if (page === 'sponsor') return renderSponsor();
 
-  setView(`<div class="notice error">未知页面：${hash}</div>`);
+  setView(`<div class="notice error">未知页面：${escapeHtml(hash)}</div>`);
 }
+
+function setNavOpen(open) {
+  const enabled = Boolean(open);
+  document.body.classList.toggle('nav-open', enabled);
+  if (NAV_TOGGLE) {
+    NAV_TOGGLE.setAttribute('aria-expanded', enabled ? 'true' : 'false');
+    NAV_TOGGLE.setAttribute('aria-label', enabled ? '关闭导航' : '打开导航');
+  }
+  if (NAV_SCRIM) NAV_SCRIM.tabIndex = enabled ? 0 : -1;
+}
+
+if (NAV_TOGGLE) {
+  NAV_TOGGLE.addEventListener('click', () => {
+    setNavOpen(!document.body.classList.contains('nav-open'));
+  });
+}
+
+if (NAV_SCRIM) {
+  NAV_SCRIM.addEventListener('click', () => setNavOpen(false));
+}
+
+NAV_LINKS.forEach((link) => {
+  link.addEventListener('click', () => setNavOpen(false));
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.body.classList.contains('nav-open')) {
+    setNavOpen(false);
+    NAV_TOGGLE?.focus();
+  }
+});
 
 logoutBtn.addEventListener('click', (e) => {
   if (!store.auth) return;
@@ -10269,17 +10373,20 @@ window.addEventListener('storage', (event) => {
   syncAuthNav();
   router().catch((e) => {
     if (e?.handled) return;
-    setView(`<div class="notice error">${e.message || '发生错误'}</div>`);
+    setView(`<div class="notice error">${escapeHtml(e.message || '发生错误')}</div>`);
   });
 });
 
-window.addEventListener('hashchange', () => router().catch(e => {
-  if (e?.handled) return;
-  setView(`<div class="notice error">${e.message || '发生错误'}</div>`);
-}));
+window.addEventListener('hashchange', () => {
+  setNavOpen(false);
+  router().catch(e => {
+    if (e?.handled) return;
+    setView(`<div class="notice error">${escapeHtml(e.message || '发生错误')}</div>`);
+  });
+});
 
 // First load
 router().catch(e => {
   if (e?.handled) return;
-  setView(`<div class="notice error">${e.message || '发生错误'}</div>`);
+  setView(`<div class="notice error">${escapeHtml(e.message || '发生错误')}</div>`);
 });

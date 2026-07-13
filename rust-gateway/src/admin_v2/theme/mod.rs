@@ -1,8 +1,10 @@
 use super::super::*;
 use crate::archive_limit_support::{
-    copy_zip_entry_limited, validate_zip_metadata, THEME_ARCHIVE_LIMITS,
-    THEME_ARCHIVE_MAX_BYTES,
+    copy_zip_entry_limited, validate_zip_metadata, PrivateTempDirectory,
+    THEME_ARCHIVE_LIMITS, THEME_ARCHIVE_MAX_BYTES,
 };
+
+static THEME_UPLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub async fn get_themes(
     State(state): State<Arc<AppState>>,
@@ -83,7 +85,7 @@ async fn build_get_theme_config_response(
     _uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let _admin = authenticate_admin_user(state, &headers).await?;
+    let _admin = authenticate_super_admin_user(state, &headers).await?;
     let payload = parse_json_body(body).await?;
     let name = parse_theme_name(&payload)?;
     let theme = theme_support::find_theme(&name)
@@ -98,7 +100,7 @@ async fn build_save_theme_config_response(
     _uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let _admin = authenticate_admin_user(state, &headers).await?;
+    let _admin = authenticate_super_admin_user(state, &headers).await?;
     let payload = parse_json_body(body).await?;
     let name = parse_theme_name(&payload)?;
     let theme = theme_support::find_theme(&name)
@@ -155,31 +157,89 @@ async fn build_upload_theme_response(
 
     let extracted = extract_theme_archive(&file_bytes)?;
     let target_root = crate::runtime_paths::state_path("theme");
-    std::fs::create_dir_all(&target_root).map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    std::fs::create_dir_all(&target_root)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
     if theme_support::is_system_theme(&extracted.name) {
-        return Ok(json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Cannot upload theme with same name as system theme"})));
+        return Ok(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"Cannot upload theme with same name as system theme"}),
+        ));
     }
+    let _upload_guard = THEME_UPLOAD_LOCK.lock().await;
+    reject_theme_case_fold_collision(&target_root, &extracted.name)?;
 
     let target_path = target_root.join(&extracted.name);
-    if target_path.exists() {
-        let old_config_raw = std::fs::read_to_string(target_path.join("config.json"))
-            .map_err(|_| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Existing theme missing config file"})))?;
-        let old_value = serde_json::from_str::<Value>(&old_config_raw)
-            .map_err(|_| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Existing theme missing config file"})))?;
-        let old_version = old_value.get("version").and_then(Value::as_str).unwrap_or("0.0.0");
-        if compare_semver(&extracted.version, old_version) <= 0 {
-            return Ok(json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Theme exists and not a newer version"})));
+    let target_metadata = match std::fs::symlink_metadata(&target_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Theme upload failed",
+            ))
         }
-        std::fs::remove_dir_all(&target_path).map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    };
+    if let Some(ref target_metadata) = target_metadata {
+        if target_metadata.file_type().is_symlink() || !target_metadata.is_dir() {
+            return Ok(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme path is not a safe directory"}),
+            ));
+        }
+        let old_config_path = target_path.join("config.json");
+        let old_config_metadata = std::fs::symlink_metadata(&old_config_path).map_err(|_| {
+            json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme missing config file"}),
+            )
+        })?;
+        if old_config_metadata.file_type().is_symlink() || !old_config_metadata.is_file() {
+            return Ok(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme config path is unsafe"}),
+            ));
+        }
+        let old_config_raw = std::fs::read_to_string(&old_config_path).map_err(|_| {
+            json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme missing config file"}),
+            )
+        })?;
+        let old_value = serde_json::from_str::<Value>(&old_config_raw).map_err(|_| {
+            json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme missing config file"}),
+            )
+        })?;
+        if old_value.get("name").and_then(Value::as_str).map(str::trim)
+            != Some(extracted.name.as_str())
+        {
+            return Ok(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Existing theme directory belongs to a different theme"}),
+            ));
+        }
+        let old_version = old_value
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or("0.0.0");
+        if compare_semver(&extracted.version, old_version) <= 0 {
+            return Ok(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Theme exists and not a newer version"}),
+            ));
+        }
     }
+    install_theme_directory_atomically(
+        &target_root,
+        &target_path,
+        &extracted.directory,
+        target_metadata.is_some(),
+    )?;
 
-    std::fs::rename(&extracted.directory, &target_path).or_else(|_| {
-        copy_dir_all(&extracted.directory, &target_path)?;
-        std::fs::remove_dir_all(&extracted.directory)
-    })
-    .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
-
-    Ok(json_value_response(success_response_payload(Value::Bool(true))))
+    Ok(json_value_response(success_response_payload(Value::Bool(
+        true,
+    ))))
 }
 
 async fn build_delete_theme_response(
@@ -215,19 +275,49 @@ async fn build_delete_theme_response(
 }
 
 fn parse_theme_name(payload: &Value) -> Result<String, Response<Body>> {
-    payload
+    let name = payload
         .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))
+        .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))?;
+    validate_theme_name(&name)?;
+    Ok(name)
+}
+
+fn reject_theme_case_fold_collision(
+    target_root: &std::path::Path,
+    incoming_name: &str,
+) -> Result<(), Response<Body>> {
+    let entries = std::fs::read_dir(target_root)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+        let entry_name = entry.file_name();
+        let entry_name = entry_name.to_string_lossy();
+        if entry_name.eq_ignore_ascii_case(incoming_name) && entry_name != incoming_name {
+            return Err(json_status_response(
+                StatusCode::BAD_REQUEST,
+                json!({"message":"Theme name conflicts with an existing theme by letter case"}),
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct ExtractedTheme {
     name: String,
     version: String,
     directory: std::path::PathBuf,
+    temp_root: std::path::PathBuf,
+}
+
+impl Drop for ExtractedTheme {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.temp_root);
+    }
 }
 
 fn extract_theme_archive(bytes: &bytes::Bytes) -> Result<ExtractedTheme, Response<Body>> {
@@ -236,8 +326,9 @@ fn extract_theme_archive(bytes: &bytes::Bytes) -> Result<ExtractedTheme, Respons
         .map_err(|_| json_status_response(StatusCode::BAD_REQUEST, json!({"message":"Invalid theme package"})))?;
     validate_zip_metadata(&mut archive, THEME_ARCHIVE_LIMITS, "Theme package is too large")?;
     let temp_root = std::env::temp_dir().join(format!("notxboard-theme-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_root)
+    let temp_directory = PrivateTempDirectory::create(temp_root)
         .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    let temp_root = temp_directory.path();
 
     let mut total_written = 0_u64;
     for index in 0..archive.len() {
@@ -271,7 +362,7 @@ fn extract_theme_archive(bytes: &bytes::Bytes) -> Result<ExtractedTheme, Respons
 
     let mut candidate_dirs = Vec::new();
     if temp_root.join("config.json").exists() {
-        candidate_dirs.push(temp_root.clone());
+        candidate_dirs.push(temp_root.to_path_buf());
     }
     if let Ok(entries) = std::fs::read_dir(&temp_root) {
         for entry in entries.flatten() {
@@ -315,7 +406,61 @@ fn extract_theme_archive(bytes: &bytes::Bytes) -> Result<ExtractedTheme, Respons
         name,
         version,
         directory: theme_dir,
+        temp_root: temp_directory.into_path(),
     })
+}
+
+fn install_theme_directory_atomically(
+    target_root: &std::path::Path,
+    target_path: &std::path::Path,
+    source_dir: &std::path::Path,
+    replacing_existing: bool,
+) -> Result<(), Response<Body>> {
+    if !is_direct_child(target_root, target_path) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"));
+    }
+    let staging_root = crate::runtime_paths::state_root();
+    let staging_path = staging_root.join(format!(".theme-staging-{}", uuid::Uuid::new_v4().simple()));
+    if !is_direct_child(&staging_root, &staging_path) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"));
+    }
+    let staging_directory = PrivateTempDirectory::create(staging_path)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    let staging = staging_directory.path();
+    if let Err(error) = copy_dir_all(source_dir, staging) {
+        error!("theme staging copy failed: {error}");
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"));
+    }
+
+    if !replacing_existing {
+        return std::fs::rename(staging, target_path).map_err(|_| {
+            json_status_response(
+                StatusCode::CONFLICT,
+                json!({"message":"Theme target changed; upload again"}),
+            )
+        });
+    }
+
+    let metadata = std::fs::symlink_metadata(target_path)
+        .map_err(|_| json_status_response(StatusCode::CONFLICT, json!({"message":"Theme target changed; upload again"})))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(json_status_response(
+            StatusCode::BAD_REQUEST,
+            json!({"message":"Existing theme path is not a safe directory"}),
+        ));
+    }
+    let backup = staging_root.join(format!(".theme-backup-{}", uuid::Uuid::new_v4().simple()));
+    if !is_direct_child(&staging_root, &backup) {
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"));
+    }
+    std::fs::rename(target_path, &backup)
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"))?;
+    if std::fs::rename(staging, target_path).is_err() {
+        let _ = std::fs::rename(&backup, target_path);
+        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "Theme upload failed"));
+    }
+    let _ = std::fs::remove_dir_all(backup);
+    Ok(())
 }
 
 fn validate_theme_name(name: &str) -> Result<(), Response<Body>> {
@@ -366,4 +511,8 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
         }
     }
     Ok(())
+}
+
+fn is_direct_child(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    candidate != root && candidate.parent() == Some(root) && candidate.file_name().is_some()
 }

@@ -1,189 +1,413 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ $title }} · 公共概览</title>
+    <meta name="color-scheme" content="light">
+    <title>{{ $title }} · 运行概览</title>
     <meta name="description" content="{{ $description }}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg: #0F172A;
-            --panel: #111C32;
-            --panel-2: #0B1426;
-            --stroke: #22304A;
-            --text: #F8FAFC;
-            --muted: #94A3B8;
-            --accent: #22C55E;
-            --accent-2: #1F9D4B;
-            --code: #FDE68A;
+            color-scheme: light;
+            --canvas: #f3f6f5;
+            --surface: #ffffff;
+            --surface-subtle: #f8faf9;
+            --ink: #172026;
+            --muted: #5e6b73;
+            --line: #dce4e1;
+            --line-strong: #c7d2ce;
+            --primary: #0f766e;
+            --primary-strong: #0b5f59;
+            --primary-soft: #e6f4f1;
+            --blue: #2563eb;
+            --amber: #b45309;
+            --danger: #b42318;
+            --focus: #0e7490;
+            --radius: 8px;
+            --content: 1200px;
+            --shadow: 0 8px 24px rgba(23, 32, 38, 0.07);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        * { box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+            letter-spacing: 0;
+        }
+
+        html {
+            background: var(--canvas);
+            scroll-behavior: smooth;
+        }
+
         body {
             margin: 0;
-            font-family: "Fira Sans", "Segoe UI", sans-serif;
-            color: var(--text);
-            background: radial-gradient(circle at top, #1B2645 0%, #0B1120 45%, #070B14 100%);
+            min-width: 320px;
+            color: var(--ink);
+            background: var(--canvas);
+            line-height: 1.55;
+            -webkit-font-smoothing: antialiased;
         }
 
-        a { color: inherit; text-decoration: none; }
-
-        .page {
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
+        a {
+            color: inherit;
+            text-decoration: none;
         }
 
-        .nav {
+        button,
+        a {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        :focus-visible {
+            outline: 3px solid rgba(14, 116, 144, 0.34);
+            outline-offset: 3px;
+        }
+
+        .topbar {
             position: sticky;
             top: 0;
-            z-index: 10;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 18px 6vw;
-            background: rgba(9, 16, 30, 0.85);
-            border-bottom: 1px solid var(--stroke);
+            z-index: 20;
+            border-bottom: 1px solid rgba(199, 210, 206, 0.9);
+            background: rgba(255, 255, 255, 0.94);
             backdrop-filter: blur(12px);
         }
 
-        .brand {
+        .topbar-inner {
+            width: min(var(--content), calc(100% - 40px));
+            min-height: 64px;
+            margin: 0 auto;
             display: flex;
             align-items: center;
-            gap: 12px;
-            font-weight: 600;
+            justify-content: space-between;
+            gap: 20px;
         }
 
-        .brand-logo {
-            width: 36px;
-            height: 36px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, #1E293B, #1E3A8A);
-            border: 1px solid var(--stroke);
+        .brand {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            font-weight: 700;
+        }
+
+        .brand-mark {
+            width: 34px;
+            height: 34px;
+            flex: 0 0 34px;
             display: grid;
             place-items: center;
-            font-family: "Fira Code", monospace;
-            color: var(--code);
-            font-size: 14px;
+            border-radius: 7px;
+            color: #ffffff;
+            background: var(--primary);
+            font-size: 12px;
+            font-weight: 800;
         }
 
-        .btn {
-            padding: 10px 16px;
-            border-radius: 10px;
-            background: var(--accent);
-            color: #0A0F1D;
-            font-weight: 600;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-            box-shadow: 0 10px 30px rgba(34, 197, 94, 0.2);
-        }
-
-        .btn:hover { transform: translateY(-1px); }
-
-        .hero {
-            padding: 80px 6vw 40px;
-            display: grid;
-            gap: 24px;
-        }
-
-        .hero h1 {
-            font-size: clamp(28px, 4vw, 48px);
-            margin: 0;
-        }
-
-        .hero p {
-            margin: 0;
-            color: var(--muted);
-            font-size: 16px;
-            max-width: 680px;
-        }
-
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 16px;
-            margin-top: 16px;
-        }
-
-        .card {
-            background: linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(8, 15, 28, 0.9));
-            border: 1px solid var(--stroke);
-            border-radius: 16px;
-            padding: 20px;
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
-        }
-
-        .card .label {
-            color: var(--muted);
-            font-size: 13px;
-        }
-
-        .card .value {
-            font-family: "Fira Code", monospace;
-            font-size: 22px;
-            margin-top: 8px;
-        }
-
-        .grid {
-            padding: 20px 6vw 80px;
-            display: grid;
-            gap: 24px;
-        }
-
-        .section-title {
-            font-size: 18px;
-            margin: 0 0 12px;
-        }
-
-        .leaderboards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-        }
-
-        .list {
-            list-style: none;
-            padding: 0;
-            margin: 16px 0 0;
-            display: grid;
-            gap: 10px;
-        }
-
-        .list-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px 12px;
-            border-radius: 10px;
-            background: rgba(30, 41, 59, 0.35);
-            border: 1px solid rgba(34, 48, 74, 0.6);
-        }
-
-        .list-item span {
-            font-size: 13px;
-            color: var(--muted);
-        }
-
-        .list-item strong {
-            font-family: "Fira Code", monospace;
-            font-size: 13px;
-        }
-
-        .map-wrap {
-            display: grid;
-            grid-template-columns: minmax(240px, 1fr) minmax(320px, 1.4fr);
-            gap: 20px;
-        }
-
-        .map {
-            position: relative;
-            background: radial-gradient(circle at 20% 20%, rgba(14, 165, 233, 0.12), transparent 70%), linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(8, 15, 28, 0.95));
-            border: 1px solid rgba(34, 48, 74, 0.8);
-            border-radius: 20px;
+        .brand-name {
             overflow: hidden;
-            min-height: 360px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .console-link {
+            min-height: 40px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 9px 14px;
+            border: 1px solid var(--primary);
+            border-radius: 7px;
+            color: #ffffff;
+            background: var(--primary);
+            font-size: 14px;
+            font-weight: 650;
+            cursor: pointer;
+            transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+        }
+
+        .console-link:hover {
+            border-color: var(--primary-strong);
+            background: var(--primary-strong);
+            box-shadow: 0 6px 16px rgba(15, 118, 110, 0.18);
+        }
+
+        .console-link svg {
+            width: 16px;
+            height: 16px;
+            flex: 0 0 16px;
+        }
+
+        main {
+            width: min(var(--content), calc(100% - 40px));
+            margin: 0 auto;
+        }
+
+        .summary {
+            padding: 38px 0 24px;
+        }
+
+        .summary-heading {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 22px;
+        }
+
+        .eyebrow {
+            margin: 0 0 6px;
+            color: var(--primary);
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        h1 {
+            margin: 0;
+            max-width: 760px;
+            font-size: 34px;
+            line-height: 1.2;
+            font-weight: 760;
+        }
+
+        .summary-copy {
+            margin: 10px 0 0;
+            max-width: 760px;
+            color: var(--muted);
+            font-size: 15px;
+        }
+
+        .live-state {
+            min-width: max-content;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 4px;
+            padding: 7px 10px;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            color: var(--muted);
+            background: var(--surface);
+            font-size: 12px;
+            font-weight: 650;
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 0 4px var(--primary-soft);
+        }
+
+        .live-state[data-tone="error"] .live-dot {
+            background: var(--danger);
+            box-shadow: 0 0 0 4px #feeceb;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .metric {
+            min-width: 0;
+            min-height: 126px;
+            padding: 17px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: 0 2px 8px rgba(23, 32, 38, 0.035);
+        }
+
+        .metric-label {
+            min-height: 40px;
+            margin: 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .metric-value {
+            min-height: 32px;
+            margin: 7px 0 3px;
+            overflow: hidden;
+            color: var(--ink);
+            font-variant-numeric: tabular-nums;
+            font-size: 24px;
+            font-weight: 740;
+            line-height: 1.25;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .metric-note {
+            margin: 0;
+            color: #758087;
+            font-size: 12px;
+        }
+
+        .skeleton {
+            display: inline-block;
+            width: 72%;
+            height: 20px;
+            border-radius: 4px;
+            background: #e8eeeb;
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+
+        .section {
+            padding: 26px 0;
+            border-top: 1px solid var(--line);
+        }
+
+        .section-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 14px;
+        }
+
+        .section h2 {
+            margin: 0;
+            font-size: 20px;
+            line-height: 1.35;
+        }
+
+        .section-description {
+            margin: 4px 0 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .section-status {
+            min-height: 20px;
+            color: var(--muted);
+            font-size: 12px;
+            text-align: right;
+        }
+
+        .section-status[data-tone="error"] {
+            color: var(--danger);
+        }
+
+        .surface-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+
+        .surface {
+            min-width: 0;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+
+        .surface-head {
+            min-height: 54px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 13px 16px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .surface-title {
+            margin: 0;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
+        .surface-meta {
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .rank-list {
+            min-height: 250px;
+            margin: 0;
+            padding: 4px 16px 8px;
+            list-style: none;
+        }
+
+        .rank-item {
+            min-height: 48px;
+            display: grid;
+            grid-template-columns: 30px minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid #edf1ef;
+            font-size: 13px;
+        }
+
+        .rank-item:last-child {
+            border-bottom: 0;
+        }
+
+        .rank-index {
+            color: #7b878d;
+            font-variant-numeric: tabular-nums;
+            font-size: 12px;
+        }
+
+        .rank-name {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .rank-value {
+            color: var(--ink);
+            font-variant-numeric: tabular-nums;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .rank-placeholder {
+            height: 48px;
+            display: grid;
+            grid-template-columns: 22px 1fr 70px;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid #edf1ef;
+        }
+
+        .rank-placeholder span {
+            height: 10px;
+            border-radius: 3px;
+            background: #e8eeeb;
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+
+        .empty-row {
+            min-height: 250px;
+            display: grid;
+            place-items: center;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+        }
+
+        .geo-grid {
+            display: grid;
+            grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.55fr);
+            gap: 14px;
+        }
+
+        .map-surface {
+            position: relative;
+            min-width: 0;
+            aspect-ratio: 16 / 9;
+            overflow: hidden;
+            border: 1px solid #263950;
+            border-radius: var(--radius);
+            background: #0c1724;
+            box-shadow: var(--shadow);
         }
 
         .map-chart {
@@ -191,43 +415,172 @@
             inset: 0;
         }
 
+        .map-loading {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            color: #cbd5e1;
+            background: #0c1724;
+            font-size: 13px;
+            text-align: center;
+        }
+
+        .map-loading[hidden] {
+            display: none;
+        }
+
         .map-summary {
             position: absolute;
-            left: 18px;
-            right: 18px;
-            bottom: 18px;
-            padding: 10px 14px;
-            border-radius: 14px;
+            left: 14px;
+            right: 14px;
+            bottom: 14px;
+            z-index: 3;
+            padding: 9px 11px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 6px;
+            color: #dbe7f3;
+            background: rgba(8, 18, 31, 0.88);
             font-size: 12px;
-            line-height: 1.6;
-            color: #dbeafe;
-            background: rgba(2, 6, 23, 0.8);
-            border: 1px solid rgba(96, 165, 250, 0.24);
-            backdrop-filter: blur(8px);
-            box-shadow: 0 14px 28px rgba(2, 6, 23, 0.35);
         }
 
-        .footer {
-            margin-top: auto;
-            padding: 24px 6vw 40px;
+        footer {
+            width: min(var(--content), calc(100% - 40px));
+            margin: 16px auto 0;
+            padding: 24px 0 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            border-top: 1px solid var(--line);
             color: var(--muted);
             font-size: 12px;
-            border-top: 1px solid var(--stroke);
         }
 
-        .muted {
-            color: var(--muted);
-            font-size: 13px;
+        @keyframes pulse {
+            0%, 100% { opacity: 0.55; }
+            50% { opacity: 1; }
         }
 
-        @media (max-width: 960px) {
-            .map-wrap {
+        @media (max-width: 1040px) {
+            .metric-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .geo-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .map-surface {
+                min-height: 360px;
+            }
+        }
+
+        @media (max-width: 720px) {
+            .topbar-inner,
+            main,
+            footer {
+                width: min(100% - 28px, var(--content));
+            }
+
+            .summary {
+                padding-top: 26px;
+            }
+
+            .summary-heading {
+                display: grid;
+                gap: 14px;
+            }
+
+            h1 {
+                font-size: 28px;
+            }
+
+            .live-state {
+                justify-self: start;
+            }
+
+            .metric-grid,
+            .surface-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .section-head {
+                align-items: flex-start;
+            }
+
+            .section-status {
+                max-width: 140px;
+            }
+        }
+
+        @media (max-width: 460px) {
+            .brand-name {
+                max-width: 130px;
+            }
+
+            .console-link {
+                width: 40px;
+                padding: 9px;
+            }
+
+            .console-link span {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                overflow: hidden;
+                clip: rect(0 0 0 0);
+                clip-path: inset(50%);
+                white-space: nowrap;
+            }
+
+            .surface-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .metric {
+                min-height: 112px;
+                padding: 14px;
+            }
+
+            .metric-label {
+                min-height: auto;
+            }
+
+            .metric-value {
+                font-size: 20px;
+            }
+
+            .section-head,
+            footer {
+                display: grid;
+            }
+
+            .section-status {
+                max-width: none;
+                text-align: left;
+            }
+
+            .map-surface {
+                min-height: 300px;
+                aspect-ratio: auto;
             }
         }
 
         @media (prefers-reduced-motion: reduce) {
-            .btn { transition: none; }
+            html {
+                scroll-behavior: auto;
+            }
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: 1ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 1ms !important;
+            }
         }
     </style>
 </head>
@@ -236,238 +589,414 @@
     (function () {
         var hash = String(window.location.hash || '').trim();
         if (!hash || !hash.startsWith('#/')) return;
-        var target = '/app' + (window.location.search || '') + hash;
         if (window.location.pathname === '/app') return;
-        window.location.replace(target);
-    })();
+        window.location.replace('/app' + (window.location.search || '') + hash);
+    }());
 </script>
-<div class="page">
-    <div class="nav">
-        <div class="brand">
-            <div class="brand-logo">NX</div>
-            <div>{{ $title }}</div>
-        </div>
-        <a class="btn" href="/app/#/login">进入控制台</a>
+
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="brand" href="/" aria-label="{{ $title }} 首页">
+            <span class="brand-mark" aria-hidden="true">NX</span>
+            <span class="brand-name">{{ $title }}</span>
+        </a>
+        <a class="console-link" href="/app/#/login">
+            <span>进入控制台</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h14"></path>
+                <path d="m13 6 6 6-6 6"></path>
+            </svg>
+        </a>
     </div>
+</header>
 
-    <section class="hero">
-        <h1>为全球服务器提供共享统一管理平台。</h1>
-        <p>实时展示全站运行概览、流量消耗排行、节点活跃度与区域分布。无需登录即可快速了解平台状态。</p>
+<main>
+    <section class="summary" aria-labelledby="page-title">
+        <div class="summary-heading">
+            <div>
+                <p class="eyebrow">公共运行数据</p>
+                <h1 id="page-title">{{ $title }} 运行概览</h1>
+                <p class="summary-copy">查看平台活跃度、实时带宽、节点规模与区域分布。公开数据会定时刷新。</p>
+            </div>
+            <div class="live-state" id="overview-status" role="status" aria-live="polite">
+                <span class="live-dot" aria-hidden="true"></span>
+                <span>正在同步</span>
+            </div>
+        </div>
 
-        <div class="stats" id="overview-cards">
-            <div class="card">
-                <div class="label">正在使用的人数</div>
-                <div class="value" id="active-users">--</div>
-                <div class="muted">60 秒内有流量更新的用户</div>
-            </div>
-            <div class="card">
-                <div class="label">一分钟内平均上行带宽</div>
-                <div class="value" id="avg-up">--</div>
-                <div class="muted">全站平均上传速率</div>
-            </div>
-            <div class="card">
-                <div class="label">一分钟内平均下行带宽</div>
-                <div class="value" id="avg-down">--</div>
-                <div class="muted">全站平均下载速率</div>
-            </div>
-            <div class="card">
-                <div class="label">已接入节点</div>
-                <div class="value" id="node-count">--</div>
-                <div class="muted">当前可管理的节点数量</div>
-            </div>
-            <div class="card">
-                <div class="label">已注册人数</div>
-                <div class="value" id="user-count">--</div>
-                <div class="muted">累计注册用户</div>
-            </div>
+        <div class="metric-grid" aria-label="平台核心指标">
+            <article class="metric">
+                <p class="metric-label">60 秒活跃用户</p>
+                <div class="metric-value" id="active-users"><span class="skeleton" aria-hidden="true"></span></div>
+                <p class="metric-note">近期有流量更新</p>
+            </article>
+            <article class="metric">
+                <p class="metric-label">平均上行带宽</p>
+                <div class="metric-value" id="avg-up"><span class="skeleton" aria-hidden="true"></span></div>
+                <p class="metric-note">最近一分钟</p>
+            </article>
+            <article class="metric">
+                <p class="metric-label">平均下行带宽</p>
+                <div class="metric-value" id="avg-down"><span class="skeleton" aria-hidden="true"></span></div>
+                <p class="metric-note">最近一分钟</p>
+            </article>
+            <article class="metric">
+                <p class="metric-label">已接入节点</p>
+                <div class="metric-value" id="node-count"><span class="skeleton" aria-hidden="true"></span></div>
+                <p class="metric-note">平台当前规模</p>
+            </article>
+            <article class="metric">
+                <p class="metric-label">注册用户</p>
+                <div class="metric-value" id="user-count"><span class="skeleton" aria-hidden="true"></span></div>
+                <p class="metric-note">累计账户数量</p>
+            </article>
         </div>
     </section>
 
-    <section class="grid">
-        <div class="card">
-            <h2 class="section-title">流量消耗排行</h2>
-            <div class="leaderboards">
-                <div>
-                    <div class="muted">消耗最多的用户（已打码）</div>
-                    <ul class="list" id="user-rank"></ul>
-                </div>
-                <div>
-                    <div class="muted">消耗最多的节点</div>
-                    <ul class="list" id="node-rank"></ul>
-                </div>
+    <section class="section" id="leaderboards-section" aria-labelledby="leaderboards-title">
+        <div class="section-head">
+            <div>
+                <h2 id="leaderboards-title">流量排行</h2>
+                <p class="section-description">用户信息经过脱敏处理，统计结果定时更新。</p>
             </div>
+            <div class="section-status" id="leaderboards-status" role="status" aria-live="polite">等待加载</div>
         </div>
-
-        <div class="card">
-            <h2 class="section-title">使用地区排行榜</h2>
-            <div class="map-wrap">
-                <div>
-                    <div class="muted">访问来源（按地区统计）</div>
-                    <ul class="list" id="region-rank"></ul>
-                </div>
-                <div class="map" id="region-map">
-                    <div class="map-chart" id="region-map-chart"></div>
-                    <div class="map-summary" id="map-summary"></div>
-                </div>
-            </div>
+        <div class="surface-grid">
+            <article class="surface">
+                <header class="surface-head">
+                    <h3 class="surface-title">用户流量</h3>
+                    <span class="surface-meta">已脱敏</span>
+                </header>
+                <ol class="rank-list" id="user-rank" aria-label="用户流量排行"></ol>
+            </article>
+            <article class="surface">
+                <header class="surface-head">
+                    <h3 class="surface-title">节点流量</h3>
+                    <span class="surface-meta">全站节点</span>
+                </header>
+                <ol class="rank-list" id="node-rank" aria-label="节点流量排行"></ol>
+            </article>
         </div>
     </section>
 
-    <footer class="footer">
-        Public Dashboard · v{{ $version }}
-    </footer>
-</div>
+    <section class="section" id="geo-section" aria-labelledby="geo-title">
+        <div class="section-head">
+            <div>
+                <h2 id="geo-title">区域分布</h2>
+                <p class="section-description">按访问来源聚合热点地区，地图进入视口后加载。</p>
+            </div>
+            <div class="section-status" id="geo-status" role="status" aria-live="polite">等待加载</div>
+        </div>
+        <div class="geo-grid">
+            <article class="surface">
+                <header class="surface-head">
+                    <h3 class="surface-title">来源地区</h3>
+                    <span class="surface-meta">访问次数</span>
+                </header>
+                <ol class="rank-list" id="region-rank" aria-label="访问来源地区排行"></ol>
+            </article>
+            <div class="map-surface" id="region-map" aria-label="访问来源世界地图">
+                <div class="map-chart" id="region-map-chart"></div>
+                <div class="map-loading" id="map-loading" role="status">地图将在进入视口后加载</div>
+                <div class="map-summary" id="map-summary" hidden></div>
+            </div>
+        </div>
+    </section>
+</main>
 
-<script src="/assets/world-map/echarts.min.js?v={{ $version }}"></script>
-<script src="/assets/world-map/world.js?v={{ $version }}"></script>
-<script src="/assets/world-map/notxboard-geo-map.js?v={{ $version }}"></script>
+<footer>
+    <span>{{ $title }} 公共数据页</span>
+    <span>v{{ $version }}</span>
+</footer>
 
 <script>
-    const endpoints = {
-        overview: '/api/v1/guest/public/overview',
-        leaderboards: '/api/v1/guest/public/leaderboards',
-        geo: '/api/v1/guest/public/geo'
-    };
+    (function () {
+        'use strict';
 
-    const formatMbps = (bps) => {
-        const value = (bps * 8) / 1_000_000;
-        return value.toFixed(2) + ' Mbps';
-    };
-
-    const setText = (id, value) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = value;
-    };
-
-    const formatCompactNumber = (value) => new Intl.NumberFormat('zh-CN', {
-        notation: 'compact',
-        maximumFractionDigits: 1
-    }).format(Number(value || 0));
-
-    const shortRegionLabel = (label, key) => {
-        const value = String(label || key || '').trim();
-        if (!value) return key || '--';
-        const cleaned = value.replace(/(特别行政区|自治区|省|市|地区)$/u, '').trim();
-        if (cleaned.length <= 6) return cleaned;
-        return key || cleaned.slice(0, 6);
-    };
-
-    const buildMapPoints = (regions) => {
-        const geoMap = window.NotXboardGeoMap;
-        const points = new Map();
-        (Array.isArray(regions) ? regions : []).forEach((region) => {
-            const key = geoMap ? geoMap.resolveLocationKey(region?.name, region?.code) : '';
-            const coord = geoMap ? geoMap.coordFor(region?.name, region?.code) : null;
-            if (!key || !coord) return;
-            if (!points.has(key)) {
-                points.set(key, {
-                    key,
-                    label: region?.name || region?.code || key,
-                    count: 0,
-                    coord,
-                    shortLabel: shortRegionLabel(region?.name || region?.code, key),
-                    detail: ''
-                });
-            }
-            const point = points.get(key);
-            point.count += Number(region?.count || 0);
-            if (region?.name && (point.label === point.key || String(region.name).length < String(point.label).length)) {
-                point.label = region.name;
-                point.shortLabel = shortRegionLabel(region.name, key);
-            }
-        });
-        return Array.from(points.values()).sort((left, right) => right.count - left.count);
-    };
-
-    const fillList = (id, items) => {
-        const list = document.getElementById(id);
-        if (!list) return;
-        list.replaceChildren();
-        items.forEach((item, index) => {
-            const li = document.createElement('li');
-            li.className = 'list-item';
-            const label = document.createElement('div');
-            label.textContent = `${index + 1}. ${item.name || item.code || ''}`;
-            const value = document.createElement('strong');
-            value.textContent = String(item.value_text ?? item.count ?? '');
-            li.append(label, value);
-            list.appendChild(li);
-        });
-    };
-
-    const renderMapMarkers = (regions) => {
-        const geoMap = window.NotXboardGeoMap;
-        const chartEl = document.getElementById('region-map-chart');
-        const summary = document.getElementById('map-summary');
-        if (!geoMap || !chartEl || !summary) return;
-
-        const points = buildMapPoints(regions).slice(0, 24);
-        const totalCount = points.reduce((sum, item) => sum + Number(item.count || 0), 0);
-        const hub = {
-            name: '平台调度中心',
-            label: '平台调度中心',
-            coord: [104.1954, 35.8617],
-            detail: 'Public Dashboard Relay'
+        const endpoints = {
+            overview: '/api/v1/guest/public/overview',
+            leaderboards: '/api/v1/guest/public/leaderboards',
+            geo: '/api/v1/guest/public/geo'
         };
-        const links = points.map((point, index) => ({
-            label: `平台 -> ${point.label}`,
-            coords: [hub.coord, point.coord],
-            value: point.count,
-            tone: index < 2 ? 'warn' : 'stable',
-            detail: `${point.label} · ${formatCompactNumber(point.count)} 来源`
-        }));
+        const assetVersion = encodeURIComponent('{{ $version }}');
+        const mapAssets = [
+            `/assets/world-map/echarts.min.js?v=${assetVersion}`,
+            `/assets/world-map/world.js?v=${assetVersion}`,
+            `/assets/world-map/notxboard-geo-map.js?v=${assetVersion}`
+        ];
+        let mapAssetsPromise = null;
 
-        geoMap.render(chartEl, {
-            mode: 'public',
-            hub,
-            points: points,
-            links: links,
-            minPointSize: 12,
-            maxPointSize: 24,
-            showLabels: true,
-            maxLabels: 8
+        const numberFormatter = new Intl.NumberFormat('zh-CN');
+        const compactFormatter = new Intl.NumberFormat('zh-CN', {
+            notation: 'compact',
+            maximumFractionDigits: 1
         });
 
-        summary.textContent = points.length
-            ? `已覆盖 ${points.length} 个热点地区 · 最活跃 ${points[0].label} · 来源 ${formatCompactNumber(totalCount)}`
-            : '暂无地区热力数据';
-    };
+        const formatCount = (value) => numberFormatter.format(Number(value || 0));
+        const formatCompactNumber = (value) => compactFormatter.format(Number(value || 0));
+        const formatMbps = (bps) => `${((Number(bps || 0) * 8) / 1_000_000).toFixed(2)} Mbps`;
 
-    const loadOverview = async () => {
-        const res = await fetch(endpoints.overview);
-        const data = await res.json();
-        if (data.code !== 0) return;
-        const d = data.data;
-        setText('active-users', d.active_users ?? '--');
-        setText('avg-up', formatMbps(d.avg_bandwidth?.upload_bps ?? 0));
-        setText('avg-down', formatMbps(d.avg_bandwidth?.download_bps ?? 0));
-        setText('node-count', d.node_count ?? '--');
-        setText('user-count', d.registered_users ?? '--');
-    };
+        function setText(id, value) {
+            const element = document.getElementById(id);
+            if (element) element.textContent = value;
+        }
 
-    const loadLeaderboards = async () => {
-        const res = await fetch(endpoints.leaderboards);
-        const data = await res.json();
-        if (data.code !== 0) return;
-        fillList('user-rank', data.data.top_users || []);
-        fillList('node-rank', data.data.top_nodes || []);
-    };
+        function setStatus(id, text, tone) {
+            const element = document.getElementById(id);
+            if (!element) return;
+            const label = element.querySelector('span:last-child');
+            if (label) label.textContent = text;
+            else element.textContent = text;
+            if (tone) element.dataset.tone = tone;
+            else delete element.dataset.tone;
+        }
 
-    const loadGeo = async () => {
-        const res = await fetch(endpoints.geo);
-        const data = await res.json();
-        if (data.code !== 0) return;
-        const regions = data.data?.regions || [];
-        fillList('region-rank', regions);
-        renderMapMarkers(regions);
-    };
+        async function requestJson(path) {
+            const controller = new AbortController();
+            const timeout = window.setTimeout(() => controller.abort(), 10000);
+            try {
+                const response = await fetch(path, {
+                    signal: controller.signal,
+                    headers: { Accept: 'application/json' }
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const payload = await response.json();
+                if (payload.code !== 0) throw new Error(payload.message || 'Request failed');
+                return payload.data || {};
+            } finally {
+                window.clearTimeout(timeout);
+            }
+        }
 
-    loadOverview();
-    loadLeaderboards();
-    loadGeo();
-    setInterval(loadOverview, 60000);
-    setInterval(loadLeaderboards, 180000);
-    setInterval(loadGeo, 180000);
+        function placeholderRows(listId, count) {
+            const list = document.getElementById(listId);
+            if (!list || list.children.length) return;
+            const fragment = document.createDocumentFragment();
+            for (let index = 0; index < count; index += 1) {
+                const row = document.createElement('li');
+                row.className = 'rank-placeholder';
+                row.setAttribute('aria-hidden', 'true');
+                row.append(document.createElement('span'), document.createElement('span'), document.createElement('span'));
+                fragment.appendChild(row);
+            }
+            list.appendChild(fragment);
+        }
+
+        function fillList(listId, items, emptyText) {
+            const list = document.getElementById(listId);
+            if (!list) return;
+            list.replaceChildren();
+            const normalized = Array.isArray(items) ? items : [];
+            if (!normalized.length) {
+                const empty = document.createElement('li');
+                empty.className = 'empty-row';
+                empty.textContent = emptyText;
+                list.appendChild(empty);
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+            normalized.forEach((item, index) => {
+                const row = document.createElement('li');
+                row.className = 'rank-item';
+                const rank = document.createElement('span');
+                rank.className = 'rank-index';
+                rank.textContent = String(index + 1).padStart(2, '0');
+                const name = document.createElement('span');
+                name.className = 'rank-name';
+                name.textContent = String(item.name || item.code || '未命名');
+                const value = document.createElement('strong');
+                value.className = 'rank-value';
+                value.textContent = String(item.value_text ?? item.count ?? '--');
+                row.append(rank, name, value);
+                fragment.appendChild(row);
+            });
+            list.appendChild(fragment);
+        }
+
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const existing = document.querySelector(`script[data-map-src="${src}"]`);
+                if (existing) {
+                    if (existing.dataset.loaded === 'true') resolve();
+                    else existing.addEventListener('load', resolve, { once: true });
+                    return;
+                }
+                const script = document.createElement('script');
+                script.src = src;
+                script.async = true;
+                script.dataset.mapSrc = src;
+                script.addEventListener('load', () => {
+                    script.dataset.loaded = 'true';
+                    resolve();
+                }, { once: true });
+                script.addEventListener('error', () => reject(new Error(`Unable to load ${src}`)), { once: true });
+                document.head.appendChild(script);
+            });
+        }
+
+        function ensureMapAssets() {
+            if (!mapAssetsPromise) {
+                mapAssetsPromise = mapAssets.reduce(
+                    (promise, src) => promise.then(() => loadScript(src)),
+                    Promise.resolve()
+                );
+            }
+            return mapAssetsPromise;
+        }
+
+        function observeOnce(element, callback, rootMargin) {
+            if (!element) return;
+            if (!('IntersectionObserver' in window)) {
+                callback();
+                return;
+            }
+            const observer = new IntersectionObserver((entries) => {
+                if (!entries.some((entry) => entry.isIntersecting)) return;
+                observer.disconnect();
+                callback();
+            }, { rootMargin: rootMargin || '220px 0px' });
+            observer.observe(element);
+        }
+
+        function createPoller(task, interval) {
+            let timer = null;
+            const tick = async () => {
+                if (!document.hidden) await task();
+                timer = window.setTimeout(tick, interval);
+            };
+            tick();
+            return () => window.clearTimeout(timer);
+        }
+
+        async function loadOverview() {
+            try {
+                const data = await requestJson(endpoints.overview);
+                setText('active-users', formatCount(data.active_users));
+                setText('avg-up', formatMbps(data.avg_bandwidth?.upload_bps));
+                setText('avg-down', formatMbps(data.avg_bandwidth?.download_bps));
+                setText('node-count', formatCount(data.node_count));
+                setText('user-count', formatCount(data.registered_users));
+                setStatus('overview-status', '数据已同步');
+            } catch (error) {
+                ['active-users', 'avg-up', 'avg-down', 'node-count', 'user-count'].forEach((id) => setText(id, '--'));
+                setStatus('overview-status', '暂时无法同步', 'error');
+            }
+        }
+
+        async function loadLeaderboards() {
+            setStatus('leaderboards-status', '正在更新');
+            try {
+                const data = await requestJson(endpoints.leaderboards);
+                fillList('user-rank', data.top_users, '暂无用户流量数据');
+                fillList('node-rank', data.top_nodes, '暂无节点流量数据');
+                setStatus('leaderboards-status', '已更新');
+            } catch (error) {
+                fillList('user-rank', [], '暂时无法加载排行');
+                fillList('node-rank', [], '暂时无法加载排行');
+                setStatus('leaderboards-status', '加载失败', 'error');
+            }
+        }
+
+        function shortRegionLabel(label, key) {
+            const value = String(label || key || '').trim();
+            if (!value) return key || '--';
+            const cleaned = value.replace(/(特别行政区|自治区|省|市|地区)$/u, '').trim();
+            return cleaned.length <= 6 ? cleaned : (key || cleaned.slice(0, 6));
+        }
+
+        function buildMapPoints(regions) {
+            const geoMap = window.NotXboardGeoMap;
+            const points = new Map();
+            (Array.isArray(regions) ? regions : []).forEach((region) => {
+                const key = geoMap ? geoMap.resolveLocationKey(region?.name, region?.code) : '';
+                const coord = geoMap ? geoMap.coordFor(region?.name, region?.code) : null;
+                if (!key || !coord) return;
+                if (!points.has(key)) {
+                    points.set(key, {
+                        key,
+                        label: region?.name || region?.code || key,
+                        count: 0,
+                        coord,
+                        shortLabel: shortRegionLabel(region?.name || region?.code, key)
+                    });
+                }
+                const point = points.get(key);
+                point.count += Number(region?.count || 0);
+            });
+            return Array.from(points.values()).sort((left, right) => right.count - left.count);
+        }
+
+        function renderMap(regions) {
+            const geoMap = window.NotXboardGeoMap;
+            const chartElement = document.getElementById('region-map-chart');
+            const summary = document.getElementById('map-summary');
+            if (!geoMap || !chartElement || !summary) throw new Error('Map runtime unavailable');
+
+            const points = buildMapPoints(regions).slice(0, 24);
+            const totalCount = points.reduce((sum, item) => sum + Number(item.count || 0), 0);
+            const hub = {
+                name: '平台调度中心',
+                label: '平台调度中心',
+                coord: [104.1954, 35.8617],
+                detail: 'Public Dashboard Relay'
+            };
+            const links = points.map((point, index) => ({
+                label: `平台 -> ${point.label}`,
+                coords: [hub.coord, point.coord],
+                value: point.count,
+                tone: index < 2 ? 'warn' : 'stable',
+                detail: `${point.label} · ${formatCompactNumber(point.count)} 来源`
+            }));
+
+            geoMap.render(chartElement, {
+                mode: 'public',
+                hub,
+                points,
+                links,
+                minPointSize: 12,
+                maxPointSize: 24,
+                showLabels: true,
+                maxLabels: 8
+            });
+            summary.textContent = points.length
+                ? `覆盖 ${points.length} 个热点地区 · 最活跃 ${points[0].label} · ${formatCompactNumber(totalCount)} 次来源`
+                : '暂无区域数据';
+            summary.hidden = false;
+        }
+
+        async function loadGeo() {
+            const mapLoading = document.getElementById('map-loading');
+            setStatus('geo-status', '正在更新');
+            if (mapLoading) mapLoading.textContent = '正在加载区域数据';
+            try {
+                const data = await requestJson(endpoints.geo);
+                const regions = Array.isArray(data.regions) ? data.regions : [];
+                fillList('region-rank', regions, '暂无区域数据');
+                if (!regions.length) {
+                    if (mapLoading) mapLoading.textContent = '暂无可绘制的区域数据';
+                    setStatus('geo-status', '暂无数据');
+                    return;
+                }
+                if (mapLoading) mapLoading.textContent = '正在加载地图组件';
+                await ensureMapAssets();
+                renderMap(regions);
+                if (mapLoading) mapLoading.hidden = true;
+                setStatus('geo-status', '已更新');
+            } catch (error) {
+                fillList('region-rank', [], '暂时无法加载区域数据');
+                if (mapLoading) mapLoading.textContent = '地图暂时不可用';
+                setStatus('geo-status', '加载失败', 'error');
+            }
+        }
+
+        placeholderRows('user-rank', 5);
+        placeholderRows('node-rank', 5);
+        placeholderRows('region-rank', 5);
+        createPoller(loadOverview, 60000);
+        observeOnce(document.getElementById('leaderboards-section'), () => createPoller(loadLeaderboards, 180000));
+        observeOnce(document.getElementById('region-map'), () => createPoller(loadGeo, 180000), '80px 0px');
+    }());
 </script>
 </body>
 </html>

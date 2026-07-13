@@ -3,11 +3,9 @@ use crate::db_retry_support::retry_db_write;
 use crate::uniproxy_user_support::build_uniproxy_user_response;
 use sqlx::QueryBuilder;
 
-#[derive(Clone)]
-struct CachedNodeAuth {
-    node: ServerNodeRow,
-    expires_at: Instant,
-}
+const MAX_TRAFFIC_DELTA_KB: i64 = 100_000_000;
+const MAX_TRAFFIC_BATCH_KB: i64 = 1_000_000_000;
+const MAX_ALIVE_IPS_PER_USER: usize = 64;
 
 #[derive(Clone)]
 pub(crate) struct QueuedPushTrafficJob {
@@ -38,49 +36,12 @@ pub(crate) async fn load_uniproxy_alive_counts(
     state: &AppState,
     node: &ServerNodeRow,
 ) -> Result<Map<String, Value>, sqlx::Error> {
-    let min_trust_level = node
-        .access_control
-        .as_ref()
-        .and_then(|json| json.0.get("min_trust_level"))
-        .and_then(|value| value.as_i64());
-    let now = Utc::now().timestamp();
-    let unlimited_allowance = 8_000_000_000_000_000i64;
-
-    let mut candidate_sql = String::from(
-        "SELECT ? AS user_id
-         UNION
-         SELECT id AS user_id
-         FROM v2_user
-         WHERE is_super_admin = 1
-         UNION
-         SELECT user_id
-         FROM user_node_access
-         WHERE node_id = ?
-         UNION
-         SELECT upa.user_id
-         FROM user_node_plan_access upa
-         JOIN user_plan_subscriptions ups
-           ON ups.user_id = upa.user_id
-          AND ups.plan_id = upa.plan_id
-         WHERE upa.node_id = ?
-           AND ups.status = 1
-           AND (ups.expired_at IS NULL OR ups.expired_at > ?)
-           AND (
-             ups.traffic_allowance_kb >= ?
-             OR ups.traffic_allowance_kb > ups.used_traffic_kb
-           )"
-    );
-
-    if min_trust_level.is_some() {
-        candidate_sql.push_str(
-            " UNION
-              SELECT id AS user_id
-              FROM v2_user
-              WHERE trust_level >= ?",
-        );
+    let accessible_user_ids = get_accessible_user_ids_for_node(state, node, Some(100_000), None).await?;
+    if accessible_user_ids.is_empty() {
+        return Ok(Map::new());
     }
 
-    let mut sql = String::from(
+    let mut query = QueryBuilder::<sqlx::MySql>::new(
         "SELECT
             accessible.id AS user_id,
             COUNT(DISTINCT CASE WHEN INSTR(s.ip_address, ':') = 0 THEN s.ip_address END) AS ipv4_count,
@@ -89,34 +50,37 @@ pub(crate) async fn load_uniproxy_alive_counts(
             SELECT
                 u.id,
                 CASE
-                    WHEN ? > 0 AND (
+                    WHEN "
+    );
+    query.push_bind(node.device_limit);
+    query.push(
+        " > 0 AND (
                         COALESCE(NULLIF(uil.device_limit, 0), NULLIF(ugl.device_limit, 0), 2) <= 0
-                        OR COALESCE(NULLIF(uil.device_limit, 0), NULLIF(ugl.device_limit, 0), 2) > ?
-                    ) THEN ?
+                        OR COALESCE(NULLIF(uil.device_limit, 0), NULLIF(ugl.device_limit, 0), 2) > "
+    );
+    query.push_bind(node.device_limit);
+    query.push(
+        "
+                    ) THEN "
+    );
+    query.push_bind(node.device_limit);
+    query.push(
+        "
                     ELSE COALESCE(NULLIF(uil.device_limit, 0), NULLIF(ugl.device_limit, 0), 2)
                 END AS effective_device_limit
-            FROM ("
-    );
-    sql.push_str(&candidate_sql);
-    sql.push_str(
-        ") candidate_users
-            JOIN v2_user u ON u.id = candidate_users.user_id
+            FROM v2_user u
             LEFT JOIN user_individual_limits uil ON uil.user_id = u.id
             LEFT JOIN user_group_limits ugl ON ugl.trust_level = COALESCE(u.trust_level, 0)
-            WHERE u.banned = 0
-              AND (
-                u.id = ?
-                OR COALESCE(u.is_super_admin, 0) = 1
-                OR (u.expired_at IS NULL OR u.expired_at >= ?)
-              )
-              AND (
-                u.id = ?
-                OR COALESCE(u.is_super_admin, 0) = 1
-                OR NOT EXISTS (
-                  SELECT 1 FROM user_node_blacklist ub
-                  WHERE ub.node_id = ? AND ub.user_id = u.id
-                )
-              )
+            WHERE u.id IN ("
+    );
+    {
+        let mut separated = query.separated(", ");
+        for user_id in &accessible_user_ids {
+            separated.push_bind(user_id);
+        }
+    }
+    query.push(
+        ")
          ) accessible
          LEFT JOIN user_online_sessions s
            ON s.user_id = accessible.id
@@ -124,28 +88,7 @@ pub(crate) async fn load_uniproxy_alive_counts(
          WHERE accessible.effective_device_limit > 0
          GROUP BY accessible.id",
     );
-
-    let mut query = sqlx::query(&sql)
-        .bind(node.device_limit)
-        .bind(node.device_limit)
-        .bind(node.device_limit)
-        .bind(node.user_id)
-        .bind(node.id)
-        .bind(node.id)
-        .bind(now)
-        .bind(unlimited_allowance);
-
-    if let Some(min) = min_trust_level {
-        query = query.bind(min);
-    }
-
-    query = query
-        .bind(node.user_id)
-        .bind(now)
-        .bind(node.user_id)
-        .bind(node.id);
-
-    let rows = query.fetch_all(&state.db).await?;
+    let rows = query.build().fetch_all(&state.db).await?;
     let mut result = Map::new();
     for row in rows {
         let user_id: i64 = row.get("user_id");
@@ -343,15 +286,21 @@ async fn flush_alive_session_jobs(
         }
     }
 
+    let mut first_error = None;
     for (node_id, reported) in per_node {
         let reported = reported.into_iter().collect::<HashMap<_, _>>();
-        write_merged_alive_sessions(state, node_id, &reported).await?;
+        if let Err(err) = write_merged_alive_sessions(state, node_id, &reported).await {
+            error!(node_id, error = %err, "alive session write failed for one node");
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
     }
 
     state
         .async_queue_metrics
         .record_alive_flush(jobs.len() as u64, total_users);
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 async fn flush_push_traffic_jobs(
@@ -364,26 +313,38 @@ async fn flush_push_traffic_jobs(
         let node_rows = per_node.entry(job.node_id).or_default();
         for row in &job.rows {
             let entry = node_rows.entry(row.user_id).or_insert((0, 0));
-            entry.0 += row.upload.max(0);
-            entry.1 += row.download.max(0);
+            entry.0 = entry
+                .0
+                .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
+                .min(MAX_TRAFFIC_BATCH_KB);
+            entry.1 = entry
+                .1
+                .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
+                .min(MAX_TRAFFIC_BATCH_KB);
         }
     }
 
+    let mut first_error = None;
     for (node_id, merged) in per_node {
         let merged_rows = merged
             .into_iter()
             .map(|(user_id, (upload, download))| {
-                let billed = ((upload + download) as f64).ceil() as i64;
+                let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
                 (user_id, upload, download, billed.max(0))
             })
             .collect::<Vec<AggregatedTrafficRow>>();
-        write_merged_push_traffic(state, node_id, &merged_rows).await?;
+        if let Err(err) = write_merged_push_traffic(state, node_id, &merged_rows).await {
+            error!(node_id, error = %err, "traffic write failed for one node");
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
     }
 
     state
         .async_queue_metrics
         .record_push_flush(jobs.len() as u64, total_rows);
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn push_traffic_flush_interval() -> Duration {
@@ -526,7 +487,7 @@ pub(crate) fn build_uniproxy_read_cache_key(kind: &str, uri: &Uri) -> String {
         return format!("uniproxy:{kind}:{}", build_cache_key(uri));
     }
 
-    format!("uniproxy:{kind}:{token}:{node_id}")
+    format!("uniproxy:{kind}:{}:{node_id}", sha256_hex(token))
 }
 
 pub(crate) fn clamp_snapshot_ttl(value: i64, default_secs: i64, min_secs: i64, max_secs: i64) -> Duration {
@@ -557,11 +518,11 @@ async fn build_uniproxy_config_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    let node = authenticate_node(state, &uri).await?;
     let cache_key = build_uniproxy_read_cache_key("config", &uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
     }
-    let node = authenticate_node(state, &uri).await?;
 
     let push_interval = get_setting_int(state, "server_push_interval", 60).await;
     let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
@@ -590,11 +551,11 @@ async fn build_uniproxy_alivelist_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    let node = authenticate_node(state, &uri).await?;
     let cache_key = build_uniproxy_read_cache_key("alivelist", &uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
     }
-    let node = authenticate_node(state, &uri).await?;
 
     let alive = load_uniproxy_alive_counts(state, &node)
         .await
@@ -616,6 +577,9 @@ async fn build_uniproxy_push_response(
     let payload = parse_json_body(body).await?;
     let rows = normalize_push_payload(&payload)
         .ok_or_else(|| json_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid data format"))?;
+    if rows.len() > 20_000 {
+        return Err(json_error(StatusCode::PAYLOAD_TOO_LARGE, "Too many traffic rows"));
+    }
     if rows.is_empty() {
         return Ok(json_value_response(json!({ "data": true })));
     }
@@ -632,6 +596,26 @@ async fn build_uniproxy_push_response(
 
     if filtered_rows.is_empty() {
         return Ok(json_value_response(json!({ "data": true })));
+    }
+    let mut replay_rows = filtered_rows
+        .iter()
+        .map(|row| (row.user_id, row.upload, row.download))
+        .collect::<Vec<_>>();
+    replay_rows.sort_unstable();
+    let replay_fingerprint = sha256_hex(
+        &serde_json::to_string(&replay_rows).unwrap_or_default(),
+    );
+    let replay_key = format!(
+        "{}{}machine-replay:uniproxy:{}:{}",
+        state.redis_prefix,
+        state.cache_prefix,
+        node.id,
+        replay_fingerprint,
+    );
+    match redis_set_nx_ex_raw(state, &replay_key, 10, "1").await {
+        Ok(false) => return Ok(json_value_response(json!({ "data": true }))),
+        Err(err) => warn!(node_id = node.id, error = %err, "traffic replay guard unavailable"),
+        Ok(true) => {}
     }
 
     enqueue_push_traffic(state, node.id, &filtered_rows)
@@ -651,6 +635,9 @@ async fn build_uniproxy_alive_response(
         .as_object()
         .cloned()
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Invalid online data"))?;
+    if map.len() > 20_000 {
+        return Err(json_error(StatusCode::PAYLOAD_TOO_LARGE, "Too many online users"));
+    }
 
     let candidate_user_ids = map
         .keys()
@@ -732,6 +719,12 @@ async fn build_uniproxy_audit_response(
         .and_then(|v| v.as_i64())
         .filter(|v| *v > 0)
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Invalid user_id"))?;
+    let allowed_user_ids = get_accessible_user_ids_for_node(state, &node, Some(1), Some(&[user_id]))
+        .await
+        .map_err(internal_error)?;
+    if !allowed_user_ids.contains(&user_id) {
+        return Err(json_error(StatusCode::FORBIDDEN, "User is not accessible from this node"));
+    }
     let ip_address = object
         .get("ip_address")
         .and_then(|v| v.as_str())
@@ -794,7 +787,9 @@ pub(crate) async fn authenticate_node(
     let token = params.get("token").cloned().unwrap_or_default();
     let node_id = params.get("node_id").cloned().unwrap_or_default();
 
-    if token.trim().is_empty() || node_id.trim().is_empty() {
+    if !crate::machine_bootstrap_support::is_strong_machine_token(token.trim())
+        || node_id.trim().is_empty()
+    {
         return Err(json_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Missing token or node_id",
@@ -805,28 +800,29 @@ pub(crate) async fn authenticate_node(
         .parse::<i64>()
         .map_err(|_| json_error(StatusCode::UNAUTHORIZED, "Invalid server token"))?;
 
-    let cache_key = format!("{}:{}", token, node_id_value);
-    if let Some(node) = cached_authenticated_node(&cache_key) {
-        return Ok(node);
-    }
-
     let node = sqlx::query_as::<_, ServerNodeRow>(
-        "SELECT id, user_id, name, host, port, service_port, protocol, settings, access_control, device_limit, connection_limit, speed_limit_down, created_at
-         FROM (
-             SELECT
-                 id, user_id, name, host, port, service_port, protocol, settings, access_control, device_limit, connection_limit, speed_limit_down, created_at
-             FROM server_nodes
-             WHERE v2bx_token = ? AND id = ?
-             UNION ALL
-             SELECT
-                 id, user_id, name, host, port, service_port, protocol, settings, access_control, device_limit, connection_limit, speed_limit_down, created_at
-             FROM server_nodes
-             WHERE v2bx_token = ? AND v2bx_node_id = ? AND id <> ?
-         ) matched_nodes
+        "SELECT n.id, n.user_id, n.name, n.host, n.port, n.service_port, n.protocol,
+                n.settings, n.access_control, n.device_limit, n.connection_limit,
+                n.speed_limit_down, n.created_at
+         FROM server_nodes n
+         JOIN v2_user owner ON owner.id = n.user_id
+         WHERE n.v2bx_token = ?
+           AND (n.id = ? OR n.v2bx_node_id = ?)
+           AND n.status = 'active'
+           AND owner.banned = 0
+           AND (
+               owner.api_key IS NULL
+               OR owner.api_key = ''
+               OR n.v2bx_token <> owner.api_key
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM server_nodes duplicate
+               WHERE duplicate.v2bx_token = n.v2bx_token
+                 AND duplicate.id <> n.id
+           )
          LIMIT 1",
     )
-    .bind(&token)
-    .bind(node_id_value)
     .bind(&token)
     .bind(node_id_value)
     .bind(node_id_value)
@@ -834,46 +830,7 @@ pub(crate) async fn authenticate_node(
     .await
     .map_err(internal_error)?;
 
-    let node =
-        node.ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid server token"))?;
-    cache_authenticated_node(cache_key, node.clone());
-    Ok(node)
-}
-
-fn node_auth_cache() -> &'static parking_lot::RwLock<HashMap<String, CachedNodeAuth>> {
-    static NODE_AUTH_CACHE: OnceLock<parking_lot::RwLock<HashMap<String, CachedNodeAuth>>> =
-        OnceLock::new();
-    NODE_AUTH_CACHE.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
-}
-
-fn cached_authenticated_node(cache_key: &str) -> Option<ServerNodeRow> {
-    {
-        let cache = node_auth_cache().read();
-        let cached = cache.get(cache_key)?;
-        if cached.expires_at > Instant::now() {
-            return Some(cached.node.clone());
-        }
-    }
-    node_auth_cache().write().remove(cache_key);
-    None
-}
-
-fn cache_authenticated_node(cache_key: String, node: ServerNodeRow) {
-    let mut cache = node_auth_cache().write();
-    if cache.len() >= 4096 {
-        let now = Instant::now();
-        cache.retain(|_, value| value.expires_at > now);
-        if cache.len() >= 8192 {
-            cache.clear();
-        }
-    }
-    cache.insert(
-        cache_key,
-        CachedNodeAuth {
-            node,
-            expires_at: Instant::now() + Duration::from_secs(3),
-        },
-    );
+    node.ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid server token"))
 }
 
 fn build_server_node_panel_config(
@@ -1011,6 +968,7 @@ fn effective_service_port(node: &ServerNodeRow) -> i64 {
 }
 
 fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
+    let mut batch_total = 0_i64;
     if let Some(list) = value.as_array() {
         let mut rows = Vec::new();
         for item in list {
@@ -1020,8 +978,12 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
             }
             let user_id = item.first()?.as_i64()?;
             let traffic = item.get(1)?.as_i64()?;
-            if user_id <= 0 || traffic <= 0 {
+            if user_id <= 0 || !(1..=MAX_TRAFFIC_DELTA_KB).contains(&traffic) {
                 continue;
+            }
+            batch_total = batch_total.checked_add(traffic)?;
+            if batch_total > MAX_TRAFFIC_BATCH_KB {
+                return None;
             }
             rows.push(TrafficRow {
                 user_id,
@@ -1042,8 +1004,19 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
         }
         let upload = row.first().and_then(|v| v.as_i64()).unwrap_or(0);
         let download = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
-        if user_id <= 0 || upload + download <= 0 {
+        let total = upload.checked_add(download)?;
+        if user_id <= 0
+            || upload < 0
+            || download < 0
+            || upload > MAX_TRAFFIC_DELTA_KB
+            || download > MAX_TRAFFIC_DELTA_KB
+            || total <= 0
+        {
             continue;
+        }
+        batch_total = batch_total.checked_add(total)?;
+        if batch_total > MAX_TRAFFIC_BATCH_KB {
+            return None;
         }
         rows.push(TrafficRow {
             user_id,
@@ -1099,13 +1072,19 @@ fn merge_push_traffic_rows(rows: &[QueuedPushTrafficRow]) -> Vec<AggregatedTraff
     let mut merged = HashMap::<i64, (i64, i64)>::new();
     for row in rows {
         let entry = merged.entry(row.user_id).or_insert((0, 0));
-        entry.0 += row.upload.max(0);
-        entry.1 += row.download.max(0);
+        entry.0 = entry
+            .0
+            .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
+            .min(MAX_TRAFFIC_BATCH_KB);
+        entry.1 = entry
+            .1
+            .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
+            .min(MAX_TRAFFIC_BATCH_KB);
     }
     let mut merged_rows = merged
         .into_iter()
         .map(|(user_id, (upload, download))| {
-            let billed = ((upload + download) as f64).ceil() as i64;
+            let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
             (user_id, upload, download, billed.max(0))
         })
         .collect::<Vec<AggregatedTrafficRow>>();
@@ -1242,8 +1221,10 @@ fn normalize_alive_payload(
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|value| value.as_str().map(|v| v.trim().to_string()))
-                    .filter(|value| !value.is_empty())
+                    .filter_map(Value::as_str)
+                    .filter_map(|value| value.trim().parse::<std::net::IpAddr>().ok())
+                    .map(|address| address.to_string())
+                    .take(MAX_ALIVE_IPS_PER_USER)
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();

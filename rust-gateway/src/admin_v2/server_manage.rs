@@ -104,10 +104,11 @@ async fn build_get_nodes_response(
     let rows = load_legacy_servers(state).await.map_err(internal_error)?;
     let group_names = load_server_group_name_map(state).await.map_err(internal_error)?;
     let route_names = load_server_route_name_map(state).await.map_err(internal_error)?;
+    let server_token = get_setting_string(state, "server_token", "").await;
 
     Ok(json_value_response(success_response_payload(Value::Array(
         rows.iter()
-            .map(|row| serialize_legacy_server(row, &group_names, &route_names))
+            .map(|row| serialize_legacy_server(row, &group_names, &route_names, &server_token))
             .collect::<Vec<_>>()
     ))))
 }
@@ -418,6 +419,7 @@ fn serialize_legacy_server(
     row: &LegacyServerRow,
     group_names: &HashMap<i64, String>,
     route_names: &HashMap<i64, String>,
+    master_server_token: &str,
 ) -> Value {
     let group_ids = parse_json_i64_array(row.group_ids.as_ref().map(|v| &v.0));
     let route_ids = parse_json_i64_array(row.route_ids.as_ref().map(|v| &v.0));
@@ -465,6 +467,11 @@ fn serialize_legacy_server(
         "host": row.host,
         "port": row.port,
         "server_port": row.server_port,
+        "node_token": crate::legacy_server_v1::derive_legacy_server_token(
+            master_server_token,
+            &row.server_type,
+            row.id,
+        ),
         "protocol_settings": protocol_settings,
         "show": row.show,
         "sort": row.sort,

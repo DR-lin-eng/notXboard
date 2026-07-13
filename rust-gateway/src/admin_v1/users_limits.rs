@@ -63,18 +63,6 @@ pub async fn user_limits_store(
     }
 }
 
-pub async fn self_limits_store(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    uri: Uri,
-    body: Body,
-) -> Response<Body> {
-    match build_self_limits_store_response(&state, headers, uri, body).await {
-        Ok(response) => response,
-        Err(response) => response,
-    }
-}
-
 pub async fn user_limits_destroy(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
@@ -82,17 +70,6 @@ pub async fn user_limits_destroy(
     uri: Uri,
 ) -> Response<Body> {
     match build_user_limits_destroy_response(&state, user_id, headers, uri).await {
-        Ok(response) => response,
-        Err(response) => response,
-    }
-}
-
-pub async fn self_limits_destroy(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Response<Body> {
-    match build_self_limits_destroy_response(&state, headers, uri).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -159,7 +136,7 @@ async fn build_index_response(
     let (count_sql, data_sql, bind_search) = if search.is_some() {
         (
             "SELECT COUNT(*) FROM v2_user WHERE email LIKE ? OR linux_do_username LIKE ?",
-            "SELECT id, token, subscribe_key, subscribe_salt, uuid, u, d, transfer_enable, expired_at, trust_level, is_silenced, subscription_credential_version
+            "SELECT id, token, group_id, subscribe_key, subscribe_salt, uuid, u, d, transfer_enable, expired_at, trust_level, banned, is_super_admin, is_silenced, subscription_credential_version
              FROM v2_user
              WHERE email LIKE ? OR linux_do_username LIKE ?
              ORDER BY id DESC
@@ -169,7 +146,7 @@ async fn build_index_response(
     } else {
         (
             "SELECT COUNT(*) FROM v2_user",
-            "SELECT id, token, subscribe_key, subscribe_salt, uuid, u, d, transfer_enable, expired_at, trust_level, is_silenced, subscription_credential_version
+            "SELECT id, token, group_id, subscribe_key, subscribe_salt, uuid, u, d, transfer_enable, expired_at, trust_level, banned, is_super_admin, is_silenced, subscription_credential_version
              FROM v2_user
              ORDER BY id DESC
              LIMIT ? OFFSET ?",
@@ -404,6 +381,7 @@ async fn build_user_limits_store_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let effective = load_effective_limits_by_profiles(
         state,
@@ -441,17 +419,6 @@ async fn build_user_limits_store_response(
     })))
 }
 
-async fn build_self_limits_store_response(
-    state: &AppState,
-    headers: HeaderMap,
-    uri: Uri,
-    body: Body,
-) -> Result<Response<Body>, Response<Body>> {
-    let user = authenticate_bearer_user(state, &headers).await?;
-    let _ = uri;
-    build_owned_user_limits_store_response(state, user.id, body).await
-}
-
 async fn build_user_limits_destroy_response(
     state: &AppState,
     user_id: i64,
@@ -478,6 +445,7 @@ async fn build_user_limits_destroy_response(
             "error": "No individual limits found for this user"
         })));
     }
+    clear_all_authorization_caches(state);
 
     let effective = load_effective_limits_by_profiles(
         state,
@@ -506,15 +474,6 @@ async fn build_user_limits_destroy_response(
             }
         }
     })))
-}
-
-async fn build_self_limits_destroy_response(
-    state: &AppState,
-    headers: HeaderMap,
-    _uri: Uri,
-) -> Result<Response<Body>, Response<Body>> {
-    let user = authenticate_bearer_user(state, &headers).await?;
-    build_owned_user_limits_destroy_response(state, user.id).await
 }
 
 async fn build_concurrent_ip_limit_show_response(
@@ -574,6 +533,7 @@ async fn build_concurrent_ip_limit_update_response(
             "error": "User not found"
         })));
     }
+    clear_all_authorization_caches(state);
 
     Ok(json_value_response(json!({
         "success": true,
@@ -581,138 +541,6 @@ async fn build_concurrent_ip_limit_update_response(
         "data": {
             "user_id": user_id,
             "concurrent_ip_limit": concurrent_ip_limit,
-        }
-    })))
-}
-
-async fn build_owned_user_limits_store_response(
-    state: &AppState,
-    user_id: i64,
-    body: Body,
-) -> Result<Response<Body>, Response<Body>> {
-    let user = load_bearer_user_by_id(state, user_id).await.map_err(internal_error)?;
-    let Some(user) = user else {
-        return Ok(json_status_response(StatusCode::NOT_FOUND, json!({
-            "success": false,
-            "error": "User not found"
-        })));
-    };
-
-    let payload = parse_json_body(body).await?;
-    let obj = payload.as_object().ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))?;
-    let speed_limit_up = obj.get("speed_limit_up").and_then(parse_i64_value).unwrap_or(0);
-    let speed_limit_down = obj.get("speed_limit_down").and_then(parse_i64_value).unwrap_or(0);
-    let device_limit = obj.get("device_limit").and_then(parse_i64_value).unwrap_or(0);
-    let connection_limit = obj.get("connection_limit").and_then(parse_i64_value).unwrap_or(0);
-    validate_admin_group_limit_values(0, speed_limit_up, speed_limit_down, device_limit, connection_limit)?;
-
-    let now = Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO user_individual_limits (user_id, speed_limit_up, speed_limit_down, device_limit, connection_limit, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, FROM_UNIXTIME(?), FROM_UNIXTIME(?))
-         ON DUPLICATE KEY UPDATE
-           speed_limit_up = VALUES(speed_limit_up),
-           speed_limit_down = VALUES(speed_limit_down),
-           device_limit = VALUES(device_limit),
-           connection_limit = VALUES(connection_limit),
-           updated_at = VALUES(updated_at)"
-    )
-    .bind(user_id)
-    .bind(speed_limit_up)
-    .bind(speed_limit_down)
-    .bind(device_limit)
-    .bind(connection_limit)
-    .bind(now)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .map_err(internal_error)?;
-
-    let effective = load_effective_limits_by_profiles(
-        state,
-        &[UserLimitProfile {
-            user_id,
-            trust_level: user.trust_level,
-        }],
-    )
-    .await
-    .map_err(internal_error)?;
-    let effective_limit = effective.get(&user_id).cloned().unwrap_or(EffectiveLimits {
-        speed_limit_down: 0,
-        device_limit: 2,
-        connection_limit: 10,
-    });
-
-    Ok(json_value_response(json!({
-        "success": true,
-        "message": "User limits updated successfully",
-        "data": {
-            "user_id": user_id,
-            "individual_limits": {
-                "speed_limit_up": speed_limit_up,
-                "speed_limit_down": speed_limit_down,
-                "device_limit": device_limit,
-                "connection_limit": connection_limit,
-                "updated_at": now,
-            },
-            "effective_limits": {
-                "speed_limit_down": effective_limit.speed_limit_down,
-                "device_limit": effective_limit.device_limit,
-                "connection_limit": effective_limit.connection_limit,
-            }
-        }
-    })))
-}
-
-async fn build_owned_user_limits_destroy_response(
-    state: &AppState,
-    user_id: i64,
-) -> Result<Response<Body>, Response<Body>> {
-    let user = load_bearer_user_by_id(state, user_id).await.map_err(internal_error)?;
-    let Some(user) = user else {
-        return Ok(json_status_response(StatusCode::NOT_FOUND, json!({
-            "success": false,
-            "error": "User not found"
-        })));
-    };
-
-    let deleted = sqlx::query("DELETE FROM user_individual_limits WHERE user_id = ?")
-        .bind(user_id)
-        .execute(&state.db)
-        .await
-        .map_err(internal_error)?;
-    if deleted.rows_affected() == 0 {
-        return Ok(json_status_response(StatusCode::NOT_FOUND, json!({
-            "success": false,
-            "error": "No individual limits found for this user"
-        })));
-    }
-
-    let effective = load_effective_limits_by_profiles(
-        state,
-        &[UserLimitProfile {
-            user_id,
-            trust_level: user.trust_level,
-        }],
-    )
-    .await
-    .map_err(internal_error)?;
-    let effective_limit = effective.get(&user_id).cloned().unwrap_or(EffectiveLimits {
-        speed_limit_down: 0,
-        device_limit: 2,
-        connection_limit: 10,
-    });
-
-    Ok(json_value_response(json!({
-        "success": true,
-        "message": "Individual limits removed successfully. User will now use group limits.",
-        "data": {
-            "user_id": user_id,
-            "effective_limits": {
-                "speed_limit_down": effective_limit.speed_limit_down,
-                "device_limit": effective_limit.device_limit,
-                "connection_limit": effective_limit.connection_limit,
-            }
         }
     })))
 }
@@ -763,6 +591,7 @@ async fn build_batch_update_response(
         .execute(&state.db)
         .await
         .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let results = existing_users
         .into_iter()
@@ -832,4 +661,39 @@ fn batch_upsert_user_individual_limits(
             updated_at = VALUES(updated_at)",
     );
     builder
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_user_limit_mutation_invalidates_authorization_caches() {
+        let source = include_str!("users_limits.rs");
+        for (start, end) in [
+            (
+                "async fn build_user_limits_store_response",
+                "async fn build_user_limits_destroy_response",
+            ),
+            (
+                "async fn build_user_limits_destroy_response",
+                "async fn build_concurrent_ip_limit_show_response",
+            ),
+            (
+                "async fn build_concurrent_ip_limit_update_response",
+                "async fn build_batch_update_response",
+            ),
+            (
+                "async fn build_batch_update_response",
+                "async fn load_batch_user_summary_rows",
+            ),
+        ] {
+            let section = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+                .expect("mutation handler must remain present");
+            assert!(
+                section.contains("clear_all_authorization_caches(state);"),
+                "{start} must invalidate authorization caches after a successful write"
+            );
+        }
+    }
 }

@@ -188,12 +188,23 @@ async fn build_checkout_response(
         })));
     };
 
-    sqlx::query("UPDATE sponsor_donations SET payment_id = ?, updated_at = NOW() WHERE id = ?")
+    let updated = sqlx::query(
+        "UPDATE sponsor_donations
+         SET payment_id = ?, updated_at = NOW()
+         WHERE id = ? AND user_id = ? AND status = 0",
+    )
         .bind(payment.id)
         .bind(donation.id)
+        .bind(user.id)
         .execute(&state.db)
         .await
         .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        return Ok(json_value_response(json!({
+            "success": false,
+            "error": "Donation not found or already paid"
+        })));
+    }
 
     let data = build_sponsor_epay_checkout_payload(
         &donation.trade_no,

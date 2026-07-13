@@ -130,7 +130,7 @@ async fn build_detail_response(
     let mut value = order_to_value(order.clone());
     value["try_out_plan_id"] = Value::from(get_setting_int(state, "try_out_plan_id", 0).await);
     if let Some(ids) = order.surplus_order_ids.as_deref().and_then(parse_order_id_list) {
-        let surplus_orders = load_orders_by_ids(state, &ids).await.map_err(internal_error)?;
+        let surplus_orders = load_orders_by_ids(state, user.id, &ids).await.map_err(internal_error)?;
         value["surplus_orders"] = Value::Array(surplus_orders.into_iter().map(order_to_value).collect());
     }
     Ok(json_value_response(success_response_payload(value)))

@@ -1,6 +1,9 @@
 use crate::*;
 use crate::db_retry_support::retry_db_write;
 
+const MAX_LEGACY_TRAFFIC_DELTA_KB: i64 = 100_000_000;
+const MAX_LEGACY_TRAFFIC_BATCH_KB: i64 = 1_000_000_000;
+
 #[derive(Clone)]
 pub(crate) struct QueuedLegacySubmitJob {
     pub(crate) server_id: u64,
@@ -50,7 +53,10 @@ pub(crate) async fn enqueue_legacy_submit_traffic(
         .filter_map(|row| {
             let upload = row.upload.max(0);
             let download = row.download.max(0);
-            if upload + download <= 0 {
+            if upload
+                .checked_add(download)
+                .is_none_or(|total| total <= 0 || total > MAX_LEGACY_TRAFFIC_BATCH_KB)
+            {
                 return None;
             }
             Some(QueuedLegacyTrafficRow {
@@ -175,17 +181,24 @@ async fn flush_legacy_submit_jobs(
             .or_default();
         for row in &job.rows {
             let entry = node_rows.entry(row.user_id).or_insert((0, 0));
-            entry.0 += row.billed_upload.max(0);
-            entry.1 += row.billed_download.max(0);
+            entry.0 = entry
+                .0
+                .saturating_add(row.billed_upload.clamp(0, MAX_LEGACY_TRAFFIC_DELTA_KB))
+                .min(MAX_LEGACY_TRAFFIC_BATCH_KB);
+            entry.1 = entry
+                .1
+                .saturating_add(row.billed_download.clamp(0, MAX_LEGACY_TRAFFIC_DELTA_KB))
+                .min(MAX_LEGACY_TRAFFIC_BATCH_KB);
         }
     }
 
+    let mut first_error = None;
     for ((server_id, server_type, rate_basis_points, record_at), merged) in grouped {
         let merged_rows = merged
             .into_iter()
             .map(|(user_id, (upload, download))| (user_id, upload, download, 0))
             .collect::<Vec<AggregatedTrafficRow>>();
-        write_merged_legacy_submit_traffic(
+        if let Err(err) = write_merged_legacy_submit_traffic(
             state,
             server_id,
             &server_type,
@@ -193,21 +206,32 @@ async fn flush_legacy_submit_jobs(
             record_at,
             &merged_rows,
         )
-        .await?;
+        .await {
+            error!(server_id, error = %err, "legacy traffic write failed for one server");
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
     }
 
     state
         .async_queue_metrics
         .record_legacy_flush(jobs.len() as u64, total_rows);
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 fn merge_legacy_submit_rows(rows: &[QueuedLegacyTrafficRow]) -> Vec<AggregatedTrafficRow> {
     let mut merged = std::collections::BTreeMap::<i64, (i64, i64)>::new();
     for row in rows {
         let entry = merged.entry(row.user_id).or_insert((0, 0));
-        entry.0 += row.billed_upload.max(0);
-        entry.1 += row.billed_download.max(0);
+        entry.0 = entry
+            .0
+            .saturating_add(row.billed_upload.clamp(0, MAX_LEGACY_TRAFFIC_DELTA_KB))
+            .min(MAX_LEGACY_TRAFFIC_BATCH_KB);
+        entry.1 = entry
+            .1
+            .saturating_add(row.billed_download.clamp(0, MAX_LEGACY_TRAFFIC_DELTA_KB))
+            .min(MAX_LEGACY_TRAFFIC_BATCH_KB);
     }
     merged
         .into_iter()
@@ -234,8 +258,14 @@ async fn write_merged_legacy_submit_traffic(
         batch_update_user_traffic_totals(&mut tx, now_ts, merged_rows).await?;
         batch_upsert_legacy_stat_user(&mut tx, server_rate, record_at, now_ts, merged_rows).await?;
 
-        let total_u = merged_rows.iter().map(|(_, upload, _, _)| *upload).sum::<i64>();
-        let total_d = merged_rows.iter().map(|(_, _, download, _)| *download).sum::<i64>();
+        let total_u = merged_rows
+            .iter()
+            .try_fold(0_i64, |total, (_, upload, _, _)| total.checked_add(*upload))
+            .ok_or_else(|| sqlx::Error::Protocol("legacy upload total overflow".to_string()))?;
+        let total_d = merged_rows
+            .iter()
+            .try_fold(0_i64, |total, (_, _, download, _)| total.checked_add(*download))
+            .ok_or_else(|| sqlx::Error::Protocol("legacy download total overflow".to_string()))?;
         sqlx::query(
             "INSERT INTO v2_stat_server (record_at, server_id, server_type, record_type, u, d, created_at, updated_at)
              VALUES (?, ?, ?, 'd', ?, ?, ?, ?)

@@ -15,6 +15,7 @@ DB_ROOT_USERNAME="${DB_ROOT_USERNAME:-root}"
 DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-change-me-root}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-notxboard-redis-1}"
 APP_KEY="${APP_KEY:-base64:h8KOzHFYUR2mToeLkkAAqw2/Oaibg+YEzOVW0gfAzNo=}"
+BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN:-notxboard-test-bootstrap-token-2026}"
 APP_NAME="${APP_NAME:-notXboard}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-fulladmin@example.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-Passw0rd!2026}"
@@ -47,6 +48,7 @@ docker run --name "${TEST_CONTAINER}" \
   -e REDIS_HOST=redis \
   -e REDIS_PORT=6379 \
   -e APP_KEY="${APP_KEY}" \
+  -e BOOTSTRAP_TOKEN="${BOOTSTRAP_TOKEN}" \
   -e APP_URL="http://127.0.0.1:${HOST_PORT}" \
   -e APP_NAME="${APP_NAME}" \
   -e RUST_RUNTIME_ROOT=/app/runtime \
@@ -66,6 +68,7 @@ done
 echo "[5/6] run /bootstrap/full"
 curl -fsS -X POST "http://127.0.0.1:${HOST_PORT}/bootstrap/full" \
   -H 'Content-Type: application/json' \
+  -H "X-Bootstrap-Token: ${BOOTSTRAP_TOKEN}" \
   --data "{\"app_name\":\"${APP_NAME}\",\"app_url\":\"http://127.0.0.1:${HOST_PORT}\",\"admin_email\":\"${ADMIN_EMAIL}\",\"admin_password\":\"${ADMIN_PASSWORD}\"}"
 echo
 

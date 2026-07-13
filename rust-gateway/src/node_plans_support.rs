@@ -68,7 +68,9 @@ pub(crate) fn parse_node_plan_mutation_input(
         input.is_unlimited_traffic = payload.get("is_unlimited_traffic").and_then(|v| v.as_bool());
     }
 
-    input.content = request_optional_string_field(payload, "content");
+    input.content = request_optional_string_field(payload, "content").map(|content| {
+        content.map(|value| crate::html_safety_support::sanitize_rich_html(&value))
+    });
     input.owner_user_id = request_optional_i64_field(payload, "owner_user_id");
     input.sort = request_optional_i64_field(payload, "sort").unwrap_or(None);
     input.capacity_limit = request_optional_i64_field(payload, "capacity_limit");
@@ -90,6 +92,17 @@ pub(crate) fn parse_node_plan_mutation_input(
     };
     input.access_user_ids = request_optional_i64_array_field(payload, "access_user_ids")?;
     input.share_token = request_optional_string_field(payload, "share_token");
+    if input
+        .share_token
+        .as_ref()
+        .and_then(|value| value.as_deref())
+        .is_some_and(|token| !valid_node_plan_share_token(token))
+    {
+        return Err(fail_json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "share_token must be 32-64 URL-safe characters",
+        ));
+    }
 
     if let Some(min_trust_level) = input.min_trust_level.flatten() {
         if !(0..=4).contains(&min_trust_level) {
@@ -304,11 +317,15 @@ pub(crate) fn normalize_node_plan_free_quota(value: Option<&Value>) -> Option<Va
 
 pub(crate) fn normalize_node_plan_share_token(value: Option<&Value>) -> Option<String> {
     let token = value?.as_str()?.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
+    valid_node_plan_share_token(token).then(|| token.to_string())
+}
+
+pub(crate) fn valid_node_plan_share_token(token: &str) -> bool {
+    token == token.trim()
+        && (32..=64).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub(crate) fn normalize_node_plan_visibility_scope(value: Option<&Value>) -> String {
@@ -341,7 +358,10 @@ pub(crate) async fn resolve_node_plan_share_token(
     requested_token: Option<&str>,
     ignore_plan_id: Option<i64>,
 ) -> Result<Option<String>, sqlx::Error> {
-    let requested_token = requested_token.map(|token| token.trim()).filter(|token| !token.is_empty()).map(|token| token.to_string());
+    let requested_token = requested_token
+        .map(str::trim)
+        .filter(|token| valid_node_plan_share_token(token))
+        .map(ToString::to_string);
     if visibility_scope != "link_only" {
         return Ok(requested_token);
     }
@@ -356,6 +376,30 @@ pub(crate) async fn resolve_node_plan_share_token(
         let token = random_alnum(32);
         if !node_plan_share_token_exists(state, &token, ignore_plan_id).await? {
             return Ok(Some(token));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_tokens_require_strong_url_safe_values() {
+        assert!(valid_node_plan_share_token(
+            "0123456789abcdef0123456789abcdef"
+        ));
+        assert!(valid_node_plan_share_token(
+            "0123456789abcdef-_-0123456789abcdef"
+        ));
+        for invalid in [
+            "short",
+            "0123456789abcdef0123456789abcde!",
+            "0123456789abcdef0123456789abcde/",
+            "0123456789abcdef0123456789abcde ",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+        ] {
+            assert!(!valid_node_plan_share_token(invalid), "accepted {invalid:?}");
         }
     }
 }

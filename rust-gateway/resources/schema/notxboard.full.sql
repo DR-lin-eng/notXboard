@@ -232,7 +232,7 @@ CREATE TABLE `server_nodes` (
   KEY `server_nodes_status_index` (`status`),
   KEY `server_nodes_protocol_index` (`protocol`),
   KEY `server_nodes_v2bx_node_id_index` (`v2bx_node_id`),
-  KEY `idx_server_nodes_v2bx_token` (`v2bx_token`),
+  UNIQUE KEY `server_nodes_v2bx_token_unique` (`v2bx_token`),
   KEY `idx_server_nodes_v2bx_node_token` (`v2bx_node_id`,`v2bx_token`),
   KEY `idx_server_nodes_status_user` (`status`,`user_id`),
   CONSTRAINT `server_nodes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
@@ -1133,6 +1133,7 @@ CREATE TABLE `v2_user` (
   UNIQUE KEY `email` (`email`),
   UNIQUE KEY `v2_user_linux_do_id_unique` (`linux_do_id`),
   UNIQUE KEY `v2_user_api_key_unique` (`api_key`),
+  UNIQUE KEY `v2_user_telegram_id_unique` (`telegram_id`),
   KEY `v2_user_u_d_expired_at_group_id_banned_transfer_enable_index` (`u`,`d`,`expired_at`,`group_id`,`banned`,`transfer_enable`),
   KEY `v2_user_t_index` (`t`),
   KEY `v2_user_online_count_index` (`online_count`),

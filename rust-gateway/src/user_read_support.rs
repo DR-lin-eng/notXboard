@@ -105,6 +105,9 @@ pub(crate) async fn load_user_visible_plan_by_share_token(
     state: &AppState,
     share_token: &str,
 ) -> Result<Option<PlanRow>, sqlx::Error> {
+    if !valid_node_plan_share_token(share_token) {
+        return Ok(None);
+    }
     sqlx::query_as::<_, PlanRow>(
         "SELECT
             p.id, p.scope, p.owner_user_id, p.min_trust_level, p.free_quota_gb_by_trust_level,
@@ -216,7 +219,11 @@ pub(crate) async fn plan_available_for_user(
     let scope = normalize_visibility_scope(plan.visibility_scope.as_str());
     if scope == "link_only" {
         let token = purchase_token.unwrap_or("").trim();
-        return Ok(!token.is_empty() && plan.share_token.as_deref().unwrap_or("") == token);
+        return Ok(valid_node_plan_share_token(token)
+            && plan
+                .share_token
+                .as_deref()
+                .is_some_and(|expected| valid_node_plan_share_token(expected) && expected == token));
     }
     if scope == "assigned_only" {
         let assigned = plan

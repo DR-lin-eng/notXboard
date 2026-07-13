@@ -1,5 +1,6 @@
 use crate::*;
 use std::io::{Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
 pub(crate) const THEME_ARCHIVE_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const PLUGIN_ARCHIVE_MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -22,6 +23,43 @@ pub(crate) const PLUGIN_ARCHIVE_LIMITS: ArchiveExtractionLimits = ArchiveExtract
     max_total_uncompressed_bytes: 50 * 1024 * 1024,
     max_file_uncompressed_bytes: 10 * 1024 * 1024,
 };
+
+pub(crate) struct PrivateTempDirectory {
+    path: Option<PathBuf>,
+}
+
+impl PrivateTempDirectory {
+    pub(crate) fn create(path: PathBuf) -> std::io::Result<Self> {
+        create_private_directory(&path)?;
+        Ok(Self { path: Some(path) })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.path.as_deref().expect("temporary directory is active")
+    }
+
+    pub(crate) fn into_path(mut self) -> PathBuf {
+        self.path.take().expect("temporary directory is active")
+    }
+}
+
+impl Drop for PrivateTempDirectory {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+pub(crate) fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
 
 pub(crate) fn validate_zip_metadata<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
@@ -90,4 +128,34 @@ fn upload_limit_response(message: &'static str) -> Response<Body> {
         StatusCode::UNPROCESSABLE_ENTITY,
         json!({ "message": message }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_temp_directory_is_removed_on_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "notxboard-private-temp-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let directory =
+                PrivateTempDirectory::create(path.clone()).expect("create private temp directory");
+            assert_eq!(directory.path(), path.as_path());
+            assert!(path.is_dir());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path)
+                    .expect("read private temp metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o700);
+            }
+        }
+        assert!(!path.exists());
+    }
 }

@@ -1,5 +1,14 @@
 use crate::*;
 
+#[derive(Clone, Copy)]
+struct GroupLimitMutation {
+    trust_level: i64,
+    speed_limit_up: i64,
+    speed_limit_down: i64,
+    device_limit: i64,
+    connection_limit: i64,
+}
+
 pub async fn index(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -182,6 +191,7 @@ async fn build_store_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     Ok(json_value_response(json!({
         "success": true,
@@ -212,7 +222,7 @@ async fn build_batch_update_response(
     })?;
 
     let now = Utc::now().timestamp();
-    let mut data = Vec::with_capacity(items.len());
+    let mut updates = Vec::with_capacity(items.len());
     for item in items {
         let row = item.as_object().ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))?;
         let trust_level = row.get("trust_level").and_then(parse_i64_value).ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"))?;
@@ -222,6 +232,17 @@ async fn build_batch_update_response(
         let connection_limit = row.get("connection_limit").and_then(parse_i64_value).unwrap_or(0);
         validate_admin_group_limit_values(trust_level, speed_limit_up, speed_limit_down, device_limit, connection_limit)?;
 
+        updates.push(GroupLimitMutation {
+            trust_level,
+            speed_limit_up,
+            speed_limit_down,
+            device_limit,
+            connection_limit,
+        });
+    }
+
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    for update in &updates {
         sqlx::query(
             "INSERT INTO user_group_limits (trust_level, speed_limit_up, speed_limit_down, device_limit, connection_limit, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, FROM_UNIXTIME(?), FROM_UNIXTIME(?))
@@ -232,27 +253,32 @@ async fn build_batch_update_response(
                connection_limit = VALUES(connection_limit),
                updated_at = VALUES(updated_at)"
         )
-        .bind(trust_level)
-        .bind(speed_limit_up)
-        .bind(speed_limit_down)
-        .bind(device_limit)
-        .bind(connection_limit)
+        .bind(update.trust_level)
+        .bind(update.speed_limit_up)
+        .bind(update.speed_limit_down)
+        .bind(update.device_limit)
+        .bind(update.connection_limit)
         .bind(now)
         .bind(now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(internal_error)?;
-
-        data.push(json!({
-            "trust_level": trust_level,
-            "trust_level_name": admin_trust_level_display_name(trust_level),
-            "speed_limit_up": speed_limit_up,
-            "speed_limit_down": speed_limit_down,
-            "device_limit": device_limit,
-            "connection_limit": connection_limit,
-            "updated_at": now,
-        }));
     }
+    tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
+
+    let data = updates
+        .into_iter()
+        .map(|update| json!({
+            "trust_level": update.trust_level,
+            "trust_level_name": admin_trust_level_display_name(update.trust_level),
+            "speed_limit_up": update.speed_limit_up,
+            "speed_limit_down": update.speed_limit_down,
+            "device_limit": update.device_limit,
+            "connection_limit": update.connection_limit,
+            "updated_at": now,
+        }))
+        .collect::<Vec<_>>();
 
     Ok(json_value_response(json!({
         "success": true,
@@ -286,6 +312,7 @@ async fn build_destroy_response(
             "error": "Group limit not found"
         })));
     }
+    clear_all_authorization_caches(state);
 
     Ok(json_value_response(json!({
         "success": true,
@@ -314,6 +341,7 @@ async fn build_defaults_apply_response(
     let _admin = authenticate_super_admin_user(state, &headers).await?;
     let now = Utc::now().timestamp();
     let defaults = admin_group_limit_defaults();
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
 
     for row in &defaults {
         let trust_level = row.get("trust_level").and_then(Value::as_i64).unwrap_or(0);
@@ -339,10 +367,12 @@ async fn build_defaults_apply_response(
         .bind(connection_limit)
         .bind(now)
         .bind(now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(internal_error)?;
     }
+    tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     Ok(json_value_response(json!({
         "success": true,
@@ -354,4 +384,64 @@ async fn build_defaults_apply_response(
             item
         }).collect::<Vec<_>>()
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_group_limit_mutation_invalidates_authorization_caches() {
+        let source = include_str!("group_limits.rs");
+        for (start, end) in [
+            (
+                "async fn build_store_response",
+                "async fn build_batch_update_response",
+            ),
+            (
+                "async fn build_batch_update_response",
+                "async fn build_destroy_response",
+            ),
+            (
+                "async fn build_destroy_response",
+                "async fn build_defaults_template_response",
+            ),
+            (
+                "async fn build_defaults_apply_response",
+                "#[cfg(test)]",
+            ),
+        ] {
+            let section = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+                .expect("mutation handler must remain present");
+            assert!(
+                section.contains("clear_all_authorization_caches(state);"),
+                "{start} must invalidate authorization caches after a successful write"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_row_group_limit_mutations_commit_before_invalidation() {
+        let source = include_str!("group_limits.rs");
+        for (start, end) in [
+            (
+                "async fn build_batch_update_response",
+                "async fn build_destroy_response",
+            ),
+            (
+                "async fn build_defaults_apply_response",
+                "#[cfg(test)]",
+            ),
+        ] {
+            let section = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+                .expect("multi-row mutation handler must remain present");
+            let commit = section.find("tx.commit().await").expect("writes must commit");
+            let invalidate = section
+                .find("clear_all_authorization_caches(state);")
+                .expect("writes must invalidate caches");
+            assert!(commit < invalidate, "{start} must invalidate only after commit");
+        }
+    }
 }

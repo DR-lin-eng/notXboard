@@ -153,7 +153,14 @@ async fn build_deny_response(
         return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
     };
 
-    deny_refund_request_as_admin(state, refund_id, user.id as u64, reason.clone()).await?;
+    deny_refund_request_as_admin(
+        state,
+        refund_id,
+        user.id as u64,
+        reason.clone(),
+        Some(user.id as u64),
+    )
+    .await?;
     let _ = notify_refund_status_changed(state, refund_id).await;
     let req = load_assigned_admin_refund_request_detail(state, refund_id, user.id as u64)
         .await
@@ -179,7 +186,13 @@ async fn build_approve_response(
         return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
     };
 
-    approve_refund_request_as_admin(state, refund_id, user.id as u64).await?;
+    approve_refund_request_as_admin(
+        state,
+        refund_id,
+        user.id as u64,
+        Some(user.id as u64),
+    )
+    .await?;
     let _ = notify_refund_status_changed(state, refund_id).await;
     let req = load_assigned_admin_refund_request_detail(state, refund_id, user.id as u64)
         .await
@@ -256,18 +269,23 @@ async fn build_dispute_response(
         .map_err(internal_error)?;
     }
 
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE order_refund_requests
          SET status = 'voting',
              voting_ends_at = DATE_ADD(NOW(), INTERVAL ? MINUTE),
              updated_at = NOW()
-         WHERE id = ?"
+         WHERE id = ? AND assigned_admin_user_id = ? AND status = 'pending'"
     )
     .bind(minutes)
     .bind(refund_id)
+    .bind(user.id as u64)
     .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Ok(fail_json_response(StatusCode::CONFLICT, "Refund assignment changed"));
+    }
 
     tx.commit().await.map_err(internal_error)?;
     let _ = notify_refund_vote_started(state, refund_id).await;
@@ -308,6 +326,19 @@ async fn build_evidence_response(
         return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
     };
 
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    let locked = load_assigned_admin_refund_request_detail_for_update(
+        &mut tx,
+        refund_id,
+        user.id as u64,
+    )
+    .await
+    .map_err(internal_error)?;
+    if locked.is_none() {
+        tx.rollback().await.ok();
+        return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
+    }
+
     sqlx::query(
         "INSERT INTO order_refund_evidences
             (refund_request_id, user_id, role, content, created_at, updated_at)
@@ -316,9 +347,10 @@ async fn build_evidence_response(
     .bind(refund_id)
     .bind(user.id as u64)
     .bind(content)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    tx.commit().await.map_err(internal_error)?;
 
     Ok(json_value_response(success_response_payload(Value::Bool(true))))
 }

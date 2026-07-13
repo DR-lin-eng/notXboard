@@ -9,7 +9,7 @@ pub async fn rust_fallback(
 ) -> Response<Body> {
     if method == Method::GET {
         if let Some(response) = web_pages::try_render_page(&state, &headers, &uri).await {
-            return response;
+            return exposure_control::protect_fallback_web_response(&state, &headers, response);
         }
     }
 

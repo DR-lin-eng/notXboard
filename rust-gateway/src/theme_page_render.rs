@@ -64,7 +64,7 @@ pub(crate) fn render_portal_theme(
     };
     let custom_js = if theme_support::theme_has_asset(theme_name, "assets/custom.js") {
         format!(
-            "<script src=\"/theme/{theme_name}/assets/custom.js?v={}\"></script>",
+            "<script defer src=\"/theme/{theme_name}/assets/custom.js?v={}\"></script>",
             escape_html(asset_version)
         )
     } else {

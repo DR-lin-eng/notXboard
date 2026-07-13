@@ -1,5 +1,7 @@
 use crate::*;
 
+const ALL_SETTINGS_CACHE_KEY: &str = "__notxboard_all_settings__";
+
 pub(crate) async fn get_setting_string(state: &AppState, name: &str, default: &str) -> String {
     load_cached_setting_value(state, name)
         .await
@@ -240,7 +242,144 @@ fn calculate_pow_increment(load_ratio: Option<f64>, queue_backlog: Option<i64>) 
     increment
 }
 
-async fn load_cached_setting_value(
+pub(crate) async fn warm_setting_cache(
+    state: &AppState,
+    names: &[&str],
+) -> Result<(), sqlx::Error> {
+    let now = Instant::now();
+    let mut seen = HashSet::new();
+    let normalized = names
+        .iter()
+        .map(|name| normalized_setting_cache_key(name))
+        .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return Ok(());
+    }
+
+    let missing = {
+        let cache = state.settings_cache.read();
+        normalized
+            .iter()
+            .filter(|name| {
+                cache
+                    .get(*name)
+                    .map(|entry| entry.expires_at <= now)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    {
+        let mut cache = state.settings_cache.write();
+        for name in &missing {
+            cache.remove(name);
+        }
+    }
+
+    let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "SELECT name, value FROM v2_settings WHERE name IN (",
+    );
+    {
+        let mut separated = query.separated(", ");
+        for name in &missing {
+            separated.push_bind(name);
+        }
+    }
+    query.push(") ORDER BY id DESC");
+    let rows = query.build().fetch_all(&state.db).await?;
+
+    let mut values = missing
+        .iter()
+        .map(|name| (name.clone(), None))
+        .collect::<HashMap<String, Option<String>>>();
+    let mut loaded = HashSet::new();
+    for row in rows {
+        let name = normalized_setting_cache_key(&row.try_get::<String, _>("name")?);
+        if !loaded.insert(name.clone()) {
+            continue;
+        }
+        values.insert(name, row.try_get::<Option<String>, _>("value")?);
+    }
+
+    let expires_at = Instant::now() + setting_cache_ttl();
+    let mut cache = state.settings_cache.write();
+    if cache.len() >= 256 {
+        cache.retain(|_, entry| entry.expires_at > now);
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+    }
+    for (name, value) in values {
+        cache.insert(
+            name,
+            CachedSetting {
+                value,
+                expires_at,
+            },
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn warm_all_settings_cache(state: &AppState) -> Result<(), sqlx::Error> {
+    let now = Instant::now();
+    {
+        let cache = state.settings_cache.read();
+        if cache
+            .get(ALL_SETTINGS_CACHE_KEY)
+            .map(|entry| entry.expires_at > now)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+
+    let rows = sqlx::query(
+        "SELECT name, value FROM v2_settings ORDER BY id DESC LIMIT 1024",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let expires_at = Instant::now() + setting_cache_ttl();
+    let mut loaded = HashSet::new();
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = normalized_setting_cache_key(&row.try_get::<String, _>("name")?);
+        if name.is_empty() || !loaded.insert(name.clone()) {
+            continue;
+        }
+        values.push((name, row.try_get::<Option<String>, _>("value")?));
+    }
+
+    let mut cache = state.settings_cache.write();
+    cache.retain(|_, entry| entry.expires_at > now);
+    if cache.len() + values.len() >= 1024 {
+        cache.clear();
+    }
+    for (name, value) in values {
+        cache.insert(
+            name,
+            CachedSetting {
+                value,
+                expires_at,
+            },
+        );
+    }
+    cache.insert(
+        ALL_SETTINGS_CACHE_KEY.to_string(),
+        CachedSetting {
+            value: None,
+            expires_at,
+        },
+    );
+    Ok(())
+}
+
+pub(crate) async fn load_cached_setting_value(
     state: &AppState,
     name: &str,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -259,7 +398,7 @@ async fn load_cached_setting_value(
     let value = sqlx::query_scalar::<_, Option<String>>(
         "SELECT value FROM v2_settings WHERE name = ? ORDER BY id DESC LIMIT 1",
     )
-    .bind(name)
+    .bind(&cache_key)
     .fetch_optional(&state.db)
     .await?
     .flatten();
@@ -284,11 +423,17 @@ async fn load_cached_setting_value(
     Ok(value)
 }
 
-fn invalidate_setting_cache(state: &AppState, name: &str) {
-    state
-        .settings_cache
-        .write()
-        .remove(&normalized_setting_cache_key(name));
+pub(crate) fn invalidate_setting_cache(state: &AppState, name: &str) {
+    let mut cache = state.settings_cache.write();
+    invalidate_setting_cache_entries(&mut cache, name);
+}
+
+fn invalidate_setting_cache_entries(
+    cache: &mut HashMap<String, CachedSetting>,
+    name: &str,
+) {
+    cache.remove(&normalized_setting_cache_key(name));
+    cache.remove(ALL_SETTINGS_CACHE_KEY);
 }
 
 fn normalized_setting_cache_key(name: &str) -> String {
@@ -302,4 +447,45 @@ fn setting_cache_ttl() -> Duration {
         .map(|value| value.clamp(1, 30))
         .unwrap_or(3);
     Duration::from_secs(seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached_setting(value: &str) -> CachedSetting {
+        CachedSetting {
+            value: Some(value.to_string()),
+            expires_at: Instant::now() + Duration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn setting_cache_keys_are_trimmed_and_case_insensitive() {
+        assert_eq!(normalized_setting_cache_key("  App_Name  "), "app_name");
+    }
+
+    #[test]
+    fn invalidation_removes_the_setting_and_all_settings_marker_only() {
+        let mut cache = HashMap::from([
+            ("app_name".to_string(), cached_setting("notXboard")),
+            ("theme".to_string(), cached_setting("Maintainable")),
+            (
+                ALL_SETTINGS_CACHE_KEY.to_string(),
+                CachedSetting {
+                    value: None,
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            ),
+        ]);
+
+        invalidate_setting_cache_entries(&mut cache, "  APP_NAME ");
+
+        assert!(!cache.contains_key("app_name"));
+        assert!(!cache.contains_key(ALL_SETTINGS_CACHE_KEY));
+        assert_eq!(
+            cache.get("theme").and_then(|entry| entry.value.as_deref()),
+            Some("Maintainable")
+        );
+    }
 }

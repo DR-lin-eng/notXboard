@@ -173,6 +173,7 @@ async fn build_store_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let plan = load_latest_owned_node_plan(state, user.id).await.map_err(internal_error)?
         .ok_or_else(|| fail_json_response(StatusCode::INTERNAL_SERVER_ERROR, "Subscription plan does not exist"))?;
@@ -311,6 +312,7 @@ async fn build_update_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let refreshed = load_owned_node_plan_by_id(state, user.id, plan_id).await.map_err(internal_error)?
         .ok_or_else(|| fail_json_response(StatusCode::BAD_REQUEST, "Subscription plan does not exist"))?;
@@ -337,5 +339,6 @@ async fn build_destroy_response(
     if deleted.rows_affected() == 0 {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Subscription plan does not exist"));
     }
+    clear_all_authorization_caches(state);
     Ok(json_value_response(success_response_payload(Value::Bool(true))))
 }

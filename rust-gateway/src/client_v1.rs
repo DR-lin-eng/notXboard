@@ -39,11 +39,6 @@ async fn build_app_get_config_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
-    let cache_key = build_cache_key(&uri);
-    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
-        return Ok(response);
-    }
-
     let params = parse_query(&uri);
     let token = params
         .get("token")
@@ -60,31 +55,47 @@ async fn build_app_get_config_response(
     let Some(user) = user else {
         return Err(json_error(StatusCode::FORBIDDEN, "token is error"));
     };
+    if !user_is_available(&user) {
+        return Err(json_error(StatusCode::FORBIDDEN, "token is error"));
+    }
+    let credential_version = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(subscription_credential_version, 0) FROM v2_user WHERE id = ? LIMIT 1",
+    )
+    .bind(user.id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_error)?
+    .unwrap_or(0);
+    let cache_key = format!(
+        "client-config:node-credential-v1:{}:{}:{}",
+        user.id,
+        credential_version,
+        sha256_hex(uri.query().unwrap_or_default()),
+    );
+    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
+        return Ok(response);
+    }
 
-    let mut servers = if user_is_available(&user) {
-        let user_row = UserRow {
-            id: user.id,
-            token: Some(user.token.clone()),
-            group_id: user.group_id,
-            subscribe_key: user.subscribe_key.clone(),
-            subscribe_salt: user.subscribe_salt.clone(),
-            uuid: Some(user.uuid.clone()),
-            u: Some(user.u),
-            d: Some(user.d),
-            transfer_enable: Some(user.transfer_enable),
-            expired_at: user.expired_at,
-            trust_level: Some(user.trust_level),
-            banned: Some(user.banned),
-            is_super_admin: Some(user.is_super_admin),
-            is_silenced: Some(user.is_silenced),
-            subscription_credential_version: Some(0),
-        };
-        load_subscribe_servers_for_user(state, &user_row)
-            .await
-            .map_err(internal_error)?
-    } else {
-        Vec::new()
+    let user_row = UserRow {
+        id: user.id,
+        token: Some(user.token.clone()),
+        group_id: user.group_id,
+        subscribe_key: user.subscribe_key.clone(),
+        subscribe_salt: user.subscribe_salt.clone(),
+        uuid: Some(user.uuid.clone()),
+        u: Some(user.u),
+        d: Some(user.d),
+        transfer_enable: Some(user.transfer_enable),
+        expired_at: user.expired_at,
+        trust_level: Some(user.trust_level),
+        banned: Some(user.banned),
+        is_super_admin: Some(user.is_super_admin),
+        is_silenced: Some(user.is_silenced),
+        subscription_credential_version: Some(credential_version),
     };
+    let mut servers = load_subscribe_servers_for_user(state, &user_row)
+        .await
+        .map_err(internal_error)?;
 
     servers.retain(|server| {
         matches!(
@@ -94,7 +105,7 @@ async fn build_app_get_config_response(
     });
 
     let rotate_credentials = get_setting_bool(state, "rotate_subscription_credentials_daily", false).await;
-    let uuid = effective_uuid(&user.uuid, 0, rotate_credentials);
+    let uuid = effective_uuid(&user.uuid, credential_version, rotate_credentials);
     let proxies = build_clash_proxies(&servers, &uuid, state).await
         .into_iter()
         .filter(|proxy| {
@@ -226,11 +237,6 @@ async fn build_subscribe_legacy_response(
         return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
     }
 
-    let cache_key = format!("legacy-subscribe:{}?{}", path, uri.query().unwrap_or_default());
-    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
-        return Ok(response);
-    }
-
     let params = parse_query(&uri);
     let ip_hint = headers
         .get("x-forwarded-for")
@@ -247,6 +253,16 @@ async fn build_subscribe_legacy_response(
     }
 
     let mode = rust_subscribe_mode(&params, &headers).unwrap_or(RustSubscribeMode::General);
+    let cache_key = format!(
+        "legacy-subscribe:node-credential-v1:{}:{}:{}:{}",
+        user.id,
+        user.subscription_credential_version.unwrap_or(0),
+        rust_subscribe_mode_cache_key(mode),
+        sha256_hex(uri.query().unwrap_or_default()),
+    );
+    if let Some(response) = try_cached_response(state, &cache_key, &headers) {
+        return Ok(response);
+    }
     let payload = build_rust_subscribe_payload(state, &user, &params, mode).await?;
     Ok(cached_plain_response(
         state,

@@ -122,6 +122,9 @@ pub(crate) async fn load_order_plan_by_share_token(
     state: &AppState,
     share_token: &str,
 ) -> Result<Option<OrderPlanRow>, sqlx::Error> {
+    if !valid_node_plan_share_token(share_token) {
+        return Ok(None);
+    }
     sqlx::query_as::<_, OrderPlanRow>(
         "SELECT id, name, prices, sell, renew, `show` AS `show`, visibility_scope, share_token, min_trust_level, capacity_limit
          FROM v2_plan WHERE share_token = ? LIMIT 1",

@@ -35,9 +35,19 @@ pub(crate) async fn bootstrap_status(
 
 pub(crate) async fn bootstrap_minimal(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
-    match build_bootstrap_minimal_response(&state, body).await {
+    if let Err(response) = require_bootstrap_token(&headers) {
+        return response;
+    }
+    let lock = match acquire_bootstrap_lock(&state).await {
+        Ok(lock) => lock,
+        Err(response) => return response,
+    };
+    let result = build_bootstrap_minimal_response(&state, body).await;
+    let _ = lock.commit().await;
+    match result {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -45,12 +55,78 @@ pub(crate) async fn bootstrap_minimal(
 
 pub(crate) async fn bootstrap_full(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
-    match build_bootstrap_full_response(&state, body).await {
+    if let Err(response) = require_bootstrap_token(&headers) {
+        return response;
+    }
+    let lock = match acquire_bootstrap_lock(&state).await {
+        Ok(lock) => lock,
+        Err(response) => return response,
+    };
+    let result = build_bootstrap_full_response(&state, body).await;
+    let _ = lock.commit().await;
+    match result {
         Ok(response) => response,
         Err(response) => response,
     }
+}
+
+fn require_bootstrap_token(headers: &HeaderMap) -> Result<(), Response<Body>> {
+    let expected = std::env::var("BOOTSTRAP_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.len() >= 24)
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Bootstrap is disabled until BOOTSTRAP_TOKEN is configured",
+            )
+        })?;
+    let supplied = headers
+        .get("x-bootstrap-token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or_default();
+    if !crate::secure_compare_support::constant_time_eq_str(supplied, &expected) {
+        return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
+    }
+    Ok(())
+}
+
+async fn acquire_bootstrap_lock(
+    state: &AppState,
+) -> Result<sqlx::Transaction<'_, sqlx::MySql>, Response<Body>> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rust_bootstrap_lock (
+            id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+    sqlx::query("INSERT IGNORE INTO rust_bootstrap_lock (id) VALUES (1)")
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    sqlx::query("SET innodb_lock_wait_timeout = 15")
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+    sqlx::query("SELECT id FROM rust_bootstrap_lock WHERE id = 1 FOR UPDATE")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| {
+            json_error(
+                StatusCode::CONFLICT,
+                "Another bootstrap operation is already running",
+            )
+        })?;
+    Ok(tx)
 }
 
 async fn build_bootstrap_status_response(
@@ -123,7 +199,7 @@ async fn build_bootstrap_minimal_response(
         get_setting_string(state, "frontend_admin_path", "").await,
         String::new(),
     ]);
-    let resolved_secure_path = if secure_path.is_empty() {
+    let resolved_secure_path = if !is_valid_secure_admin_path(&secure_path) {
         let generated = random_alnum(10);
         upsert_bootstrap_setting(state, "secure_path", &generated).await.map_err(|err| {
             json_error(StatusCode::INTERNAL_SERVER_ERROR, &err)
@@ -230,7 +306,7 @@ async fn build_bootstrap_full_response(
         get_setting_string(state, "frontend_admin_path", "").await,
         String::new(),
     ]);
-    let resolved_secure_path = if secure_path.is_empty() {
+    let resolved_secure_path = if !is_valid_secure_admin_path(&secure_path) {
         let generated = random_alnum(10);
         upsert_bootstrap_setting(state, "secure_path", &generated).await.map_err(|err| {
             json_error(StatusCode::INTERNAL_SERVER_ERROR, &err)

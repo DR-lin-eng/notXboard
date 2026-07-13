@@ -62,6 +62,24 @@ pub(crate) async fn find_user_checkout_order(
     .await
 }
 
+pub(crate) async fn load_checkout_order_by_trade_no(
+    state: &AppState,
+    trade_no: &str,
+) -> Result<Option<CheckoutOrderRow>, sqlx::Error> {
+    if trade_no.trim().is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, CheckoutOrderRow>(
+        "SELECT id, trade_no, user_id, plan_id, total_amount, handling_amount, payment_id, status
+         FROM v2_order
+         WHERE trade_no = ?
+         LIMIT 1",
+    )
+    .bind(trade_no)
+    .fetch_optional(&state.db)
+    .await
+}
+
 pub(crate) async fn load_payment_notify_method_by_uuid(
     state: &AppState,
     uuid: &str,
@@ -165,15 +183,18 @@ pub(crate) fn verify_epay_notify_signature(
     params: &HashMap<String, String>,
     config: &EpayConfig,
 ) -> bool {
-    let trade_status = params.get("trade_status").map(|v| v.to_uppercase());
-    if let Some(status) = trade_status {
-        if !matches!(status.as_str(), "TRADE_SUCCESS" | "TRADE_FINISHED" | "SUCCESS") {
-            return false;
-        }
+    let Some(trade_status) = params.get("trade_status") else {
+        return false;
+    };
+    if !matches!(
+        trade_status.trim().to_ascii_uppercase().as_str(),
+        "TRADE_SUCCESS" | "TRADE_FINISHED"
+    ) {
+        return false;
     }
 
     let sign = params.get("sign").cloned().unwrap_or_default();
-    if sign.is_empty() {
+    if sign.is_empty() || config.key.is_empty() {
         return false;
     }
 
@@ -193,6 +214,80 @@ pub(crate) fn verify_epay_notify_signature(
         eprintln!("EPAY VERIFY params={:?} payload={payload} expected={expected} sign={sign}", params);
     }
     crate::secure_compare_support::constant_time_eq_str(&sign, &expected)
+}
+
+pub(crate) fn epay_notify_matches_config(
+    params: &HashMap<String, String>,
+    config: &EpayConfig,
+) -> bool {
+    let Some(pid) = params.get("pid") else {
+        return false;
+    };
+    !config.pid.is_empty()
+        && !config.key.is_empty()
+        && crate::secure_compare_support::constant_time_eq_str(pid, &config.pid)
+}
+
+pub(crate) fn epay_notify_amount_matches(
+    params: &HashMap<String, String>,
+    expected_cents: i64,
+) -> bool {
+    expected_cents >= 0
+        && params
+            .get("money")
+            .and_then(|money| parse_epay_money_cents(money))
+            == Some(expected_cents)
+}
+
+pub(crate) fn epay_notify_matches_order(
+    params: &HashMap<String, String>,
+    config: &EpayConfig,
+    order: &CheckoutOrderRow,
+    payment: &PaymentNotifyRow,
+) -> bool {
+    let Some(expected_cents) = order
+        .total_amount
+        .checked_add(order.handling_amount.unwrap_or(0))
+    else {
+        return false;
+    };
+
+    payment.enable
+        && payment.payment.eq_ignore_ascii_case("EPay")
+        && order.payment_id == Some(payment.id)
+        && epay_notify_matches_config(params, config)
+        && epay_notify_amount_matches(params, expected_cents)
+}
+
+fn parse_epay_money_cents(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with(['+', '-']) {
+        return None;
+    }
+
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) => {
+            if fraction.contains('.') || fraction.is_empty() || fraction.len() > 2 {
+                return None;
+            }
+            (whole, Some(fraction))
+        }
+        None => (value, None),
+    };
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|digits| !digits.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+
+    let whole_cents = whole.parse::<i64>().ok()?.checked_mul(100)?;
+    let fraction_cents = match fraction {
+        Some(digits) if digits.len() == 1 => digits.parse::<i64>().ok()?.checked_mul(10)?,
+        Some(digits) => digits.parse::<i64>().ok()?,
+        None => 0,
+    };
+    whole_cents.checked_add(fraction_cents)
 }
 
 pub(crate) async fn mark_order_paid_processing(
@@ -339,6 +434,7 @@ pub(crate) async fn complete_processing_order_by_id(
         .await?;
 
     tx.commit().await?;
+    clear_all_authorization_caches(state);
     let _ = notify_payment_success_by_order_id(state, order_id).await;
     Ok(())
 }
@@ -479,7 +575,12 @@ pub(crate) async fn validate_order_plan_for_user(
     }
     let scope = plan.visibility_scope.as_deref().unwrap_or("public").trim().to_lowercase();
     if scope == "link_only" {
-        if purchase_token != plan.share_token.as_deref() {
+        let requested_token = purchase_token.unwrap_or_default();
+        let stored_token = plan.share_token.as_deref().unwrap_or_default();
+        if !valid_node_plan_share_token(requested_token)
+            || !valid_node_plan_share_token(stored_token)
+            || requested_token != stored_token
+        {
             return Err(fail_json_response(StatusCode::BAD_REQUEST, "This subscription has been sold out, please choose another subscription"));
         }
     } else if scope == "assigned_only" {
@@ -612,16 +713,13 @@ pub(crate) fn build_epay_checkout_payload(
         .collect::<Vec<_>>()
         .join("&");
     let sign = format!("{:x}", md5::compute(format!("{}{}", payload, config.key)));
-    crate::epay_render_support::ensure_http_checkout_url(&config.url)?;
-    let submit_url = format!(
-        "{}{}",
-        config.url.trim_end_matches('/'),
-        if config.submit_path.starts_with('/') {
-            config.submit_path.clone()
-        } else {
-            format!("/{}", config.submit_path)
-        }
-    );
+    let submit_url = crate::url_security_support::join_http_url_path(
+        &config.url,
+        Some(&config.submit_path),
+        "/submit.php",
+        false,
+    )
+    .map_err(|_| fail_json_response(StatusCode::BAD_REQUEST, "Invalid payment gateway URL"))?;
 
     let mut final_params = serde_json::Map::new();
     for (k, v) in params {
@@ -642,5 +740,163 @@ pub(crate) fn build_epay_checkout_payload(
             .collect::<Vec<_>>()
             .join("&");
         Ok(Value::String(format!("{}?{}", submit_url, query)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> EpayConfig {
+        EpayConfig {
+            pid: "merchant-42".to_string(),
+            key: "test-secret".to_string(),
+            url: "https://pay.example.test".to_string(),
+            submit_path: "/submit.php".to_string(),
+            use_post: true,
+            sitename: None,
+            device: None,
+        }
+    }
+
+    fn order() -> CheckoutOrderRow {
+        CheckoutOrderRow {
+            id: 1,
+            trade_no: "ORDER-1".to_string(),
+            user_id: 2,
+            plan_id: 3,
+            total_amount: 1_200,
+            handling_amount: Some(50),
+            payment_id: Some(7),
+            status: 0,
+        }
+    }
+
+    fn payment() -> PaymentNotifyRow {
+        PaymentNotifyRow {
+            id: 7,
+            uuid: "payment-route".to_string(),
+            payment: "EPay".to_string(),
+            enable: true,
+        }
+    }
+
+    fn checkout_style_params() -> HashMap<String, String> {
+        HashMap::from([
+            ("money".to_string(), "12.50".to_string()),
+            ("name".to_string(), "ORDER-1".to_string()),
+            (
+                "notify_url".to_string(),
+                "https://app.example.test/api/v1/guest/payment/notify/EPay/payment-route"
+                    .to_string(),
+            ),
+            ("out_trade_no".to_string(), "ORDER-1".to_string()),
+            ("pid".to_string(), "merchant-42".to_string()),
+            (
+                "return_url".to_string(),
+                "https://app.example.test/app#/order/ORDER-1".to_string(),
+            ),
+            ("type".to_string(), "epay".to_string()),
+        ])
+    }
+
+    fn sign(params: &mut HashMap<String, String>, key: &str) {
+        params.remove("sign");
+        let mut items = params
+            .iter()
+            .filter(|(name, value)| *name != "sign_type" && !value.is_empty())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        let payload = items
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        params.insert(
+            "sign".to_string(),
+            format!("{:x}", md5::compute(format!("{payload}{key}"))),
+        );
+        params.insert("sign_type".to_string(), "MD5".to_string());
+    }
+
+    #[test]
+    fn checkout_signature_cannot_be_replayed_as_notify() {
+        let config = config();
+        let mut params = checkout_style_params();
+        sign(&mut params, &config.key);
+
+        assert!(!verify_epay_notify_signature(&params, &config));
+    }
+
+    #[test]
+    fn notify_rejects_non_protocol_success_status() {
+        let config = config();
+        let mut params = checkout_style_params();
+        params.insert("trade_status".to_string(), "SUCCESS".to_string());
+        sign(&mut params, &config.key);
+
+        assert!(!verify_epay_notify_signature(&params, &config));
+    }
+
+    #[test]
+    fn notify_accepts_only_epay_success_statuses_with_valid_signatures() {
+        let config = config();
+        for status in ["TRADE_SUCCESS", "TRADE_FINISHED"] {
+            let mut params = checkout_style_params();
+            params.insert("trade_status".to_string(), status.to_string());
+            sign(&mut params, &config.key);
+
+            assert!(verify_epay_notify_signature(&params, &config));
+        }
+    }
+
+    #[test]
+    fn notify_context_binds_payment_pid_and_exact_amount() {
+        let config = config();
+        let order = order();
+        let payment = payment();
+        let params = checkout_style_params();
+
+        assert!(epay_notify_matches_order(
+            &params, &config, &order, &payment
+        ));
+
+        let mut wrong_payment = payment.clone();
+        wrong_payment.id = 8;
+        assert!(!epay_notify_matches_order(
+            &params,
+            &config,
+            &order,
+            &wrong_payment,
+        ));
+
+        let mut wrong_pid = params.clone();
+        wrong_pid.insert("pid".to_string(), "merchant-elsewhere".to_string());
+        assert!(!epay_notify_matches_order(
+            &wrong_pid, &config, &order, &payment,
+        ));
+
+        for money in ["12.49", "12.51"] {
+            let mut wrong_money = params.clone();
+            wrong_money.insert("money".to_string(), money.to_string());
+            assert!(!epay_notify_matches_order(
+                &wrong_money,
+                &config,
+                &order,
+                &payment,
+            ));
+        }
+    }
+
+    #[test]
+    fn notify_money_parser_is_decimal_and_cent_exact() {
+        let params = |money: &str| HashMap::from([("money".to_string(), money.to_string())]);
+
+        assert!(epay_notify_amount_matches(&params("12.5"), 1_250));
+        assert!(epay_notify_amount_matches(&params("12.50"), 1_250));
+        assert!(!epay_notify_amount_matches(&params("12.500"), 1_250));
+        assert!(!epay_notify_amount_matches(&params("1.25e1"), 1_250));
+        assert!(!epay_notify_amount_matches(&params("-12.50"), 1_250));
     }
 }

@@ -54,8 +54,12 @@ pub(crate) async fn build_uniproxy_user_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    let node = authenticate_node(state, &uri).await?;
     let response_format = requested_uniproxy_user_format(&headers);
-    let snapshot_cache_key = build_uniproxy_read_cache_key("user", &uri);
+    let snapshot_cache_key = format!(
+        "{}:node-credential-v1",
+        build_uniproxy_read_cache_key("user", &uri),
+    );
     let response_cache_key = format!("{}:{}", snapshot_cache_key, response_format);
 
     if !request_wants_delta(&headers) {
@@ -64,7 +68,6 @@ pub(crate) async fn build_uniproxy_user_response(
         }
     }
 
-    let node = authenticate_node(state, &uri).await?;
     let requested_snapshot_version = requested_snapshot_version(&headers);
     let must_refresh_current_snapshot =
         request_wants_delta(&headers) && requested_snapshot_version.is_some();
@@ -241,10 +244,14 @@ async fn load_or_build_uniproxy_user_snapshot(
 
             UniProxyUserItem {
                 id: user.id,
-                uuid: effective_uuid(
-                    &user.uuid.clone().unwrap_or_default(),
-                    user.subscription_credential_version.unwrap_or(0),
-                    rotate_credentials,
+                uuid: node_scoped_uuid(
+                    &state.app_key,
+                    &effective_uuid(
+                        &user.uuid.clone().unwrap_or_default(),
+                        user.subscription_credential_version.unwrap_or(0),
+                        rotate_credentials,
+                    ),
+                    node,
                 ),
                 speed_limit: limit.speed_limit_down,
                 device_limit: limit.device_limit,

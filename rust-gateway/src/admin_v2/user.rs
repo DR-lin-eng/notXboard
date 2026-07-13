@@ -546,6 +546,7 @@ async fn build_update_response(
     }
 
     tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
     Ok(json_value_response(success_response_payload(Value::Bool(true))))
 }
 
@@ -631,7 +632,10 @@ async fn build_destroy_response(
         .execute(&mut *tx)
         .await
         .map_err(internal_error)?;
-    sqlx::query("DELETE FROM personal_access_tokens WHERE tokenable_id = ?")
+    sqlx::query(
+        "DELETE FROM personal_access_tokens
+         WHERE tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'"
+    )
         .bind(user_id as u64)
         .execute(&mut *tx)
         .await
@@ -1346,11 +1350,28 @@ async fn apply_ban_updates(
             .execute(&mut **tx)
             .await
             .map_err(internal_error)?;
-            sqlx::query("DELETE FROM personal_access_tokens WHERE tokenable_id = ?")
+            sqlx::query(
+                "DELETE FROM personal_access_tokens
+                 WHERE tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'"
+            )
                 .bind(user_id as u64)
                 .execute(&mut **tx)
                 .await
                 .map_err(internal_error)?;
+            sqlx::query(
+                "UPDATE server_nodes SET status = 'inactive', updated_at = NOW() WHERE user_id = ?",
+            )
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(internal_error)?;
+            sqlx::query(
+                "UPDATE tcping_agents SET is_enabled = 0, updated_at = UNIX_TIMESTAMP() WHERE user_id = ?",
+            )
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(internal_error)?;
             sqlx::query(
                 "INSERT INTO user_ban_records (user_id, admin_id, action, reason, source, context, created_at, updated_at)
                  VALUES (?, ?, 'ban', ?, 'manual', ?, ?, ?)"

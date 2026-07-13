@@ -156,14 +156,14 @@ async fn require_secure_path(
 ) -> Response {
     let admin_path = params
         .get("admin_path")
-        .map(|value| value.trim().to_string())
+        .cloned()
         .unwrap_or_default();
     let expected = first_non_empty(&[
         get_setting_string(&state, "secure_path", "").await,
         get_setting_string(&state, "frontend_admin_path", "").await,
         String::new(),
     ]);
-    if expected.trim().is_empty() || admin_path != expected.trim() {
+    if !secure_admin_path_matches(&expected, &admin_path) {
         return json_error(StatusCode::NOT_FOUND, "Not found");
     }
     next.run(request).await

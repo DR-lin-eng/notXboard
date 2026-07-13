@@ -8,6 +8,24 @@ pub(crate) struct BannableUserRow {
     pub(crate) ban_reason: Option<String>,
 }
 
+pub(crate) const LINUX_DO_INACTIVE_BAN_REASON: &str = "Linux DO account is inactive";
+
+pub(crate) async fn lock_bannable_user_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    user_id: i64,
+) -> Result<Option<BannableUserRow>, sqlx::Error> {
+    sqlx::query_as::<_, BannableUserRow>(
+        "SELECT id, banned, ban_reason
+         FROM v2_user
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
 pub(crate) async fn batch_ban_users(
     state: &AppState,
     users: &[BannableUserRow],
@@ -35,8 +53,10 @@ pub(crate) async fn batch_ban_users(
     let mut tx = state.db.begin().await.map_err(internal_error)?;
     batch_update_ban_state(&mut tx, &candidates, &effective_reason, admin_id, now).await?;
     batch_delete_user_tokens(&mut tx, &candidates).await?;
+    batch_disable_owned_machine_resources(&mut tx, &candidates).await?;
     batch_insert_ban_records(&mut tx, &candidates, &effective_reason, admin_id, now).await?;
     tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let admin_email = load_admin_email_for_ban_notice(state, admin_id)
         .await
@@ -62,6 +82,31 @@ pub(crate) async fn batch_ban_users(
     .await;
 
     Ok(candidates.len() as i64)
+}
+
+async fn batch_disable_owned_machine_resources(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    user_ids: &[i64],
+) -> Result<(), Response<Body>> {
+    for statement in [
+        "UPDATE server_nodes SET status = 'inactive', updated_at = NOW() WHERE user_id IN (",
+        "UPDATE tcping_agents SET is_enabled = 0, updated_at = UNIX_TIMESTAMP() WHERE user_id IN (",
+    ] {
+        let mut builder = QueryBuilder::<MySql>::new(statement);
+        {
+            let mut separated = builder.separated(", ");
+            for user_id in user_ids {
+                separated.push_bind(*user_id);
+            }
+        }
+        builder.push(")");
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(internal_error)?;
+    }
+    Ok(())
 }
 
 async fn load_admin_email_for_ban_notice(
@@ -110,14 +155,15 @@ async fn batch_delete_user_tokens(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     user_ids: &[i64],
 ) -> Result<(), Response<Body>> {
-    let mut builder = QueryBuilder::<MySql>::new("DELETE FROM personal_access_tokens WHERE tokenable_id IN (");
+    let mut builder =
+        QueryBuilder::<MySql>::new("DELETE FROM personal_access_tokens WHERE tokenable_id IN (");
     {
         let mut separated = builder.separated(", ");
         for user_id in user_ids {
             separated.push_bind(*user_id as u64);
         }
     }
-    builder.push(")");
+    builder.push(") AND tokenable_type = 'App\\\\Models\\\\User'");
     builder
         .build()
         .execute(&mut **tx)
@@ -152,4 +198,26 @@ async fn batch_insert_ban_records(
         .await
         .map_err(internal_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_do_inactive_bans_have_a_distinct_non_admin_reason() {
+        assert!(!LINUX_DO_INACTIVE_BAN_REASON.trim().is_empty());
+        assert_ne!(LINUX_DO_INACTIVE_BAN_REASON, "manual");
+    }
+
+    #[test]
+    fn oauth_writers_can_lock_the_current_ban_state() {
+        let source = include_str!("ban_support.rs");
+        let section = source
+            .split_once("pub(crate) async fn lock_bannable_user_for_update")
+            .and_then(|(_, tail)| tail.split_once("pub(crate) async fn batch_ban_users").map(|(body, _)| body))
+            .expect("OAuth ban-state lock helper must remain present");
+        assert!(section.contains("WHERE id = ?"));
+        assert!(section.contains("FOR UPDATE"));
+    }
 }

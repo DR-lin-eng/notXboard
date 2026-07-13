@@ -74,6 +74,34 @@ async fn build_comm_config_response(
     let captcha_enable = get_setting_bool(state, "captcha_enable", false).await;
     let pow_difficulty = get_setting_int(state, "pow_difficulty", 4).await.clamp(1, 8);
 
+    let expose_public_metadata = state.exposure.public_metadata_enabled();
+    let (app_description, app_url, logo, windows_version, windows_download_url, macos_version, macos_download_url, android_version, android_download_url) =
+        if expose_public_metadata {
+            (
+                get_setting_value(state, "app_description").await,
+                get_setting_value(state, "app_url").await,
+                get_setting_value(state, "logo").await,
+                get_setting_value(state, "windows_version").await,
+                get_setting_value(state, "windows_download_url").await,
+                get_setting_value(state, "macos_version").await,
+                get_setting_value(state, "macos_download_url").await,
+                get_setting_value(state, "android_version").await,
+                get_setting_value(state, "android_download_url").await,
+            )
+        } else {
+            (
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            )
+        };
+
     let data = json!({
         "tos_url": get_setting_value(state, "tos_url").await,
         "is_email_verify": if telegram_only_mode { 0 } else if get_setting_bool(state, "email_verify", false).await { 1 } else { 0 },
@@ -99,15 +127,15 @@ async fn build_comm_config_response(
         "pow_effective_difficulty": resolve_pow_effective_difficulty(state, pow_difficulty).await,
         "pow_ttl": get_setting_int(state, "pow_ttl", 120).await.clamp(30, 600),
         "pow_algo": "sha256-prefix-zeros",
-        "app_description": get_setting_value(state, "app_description").await,
-        "app_url": get_setting_value(state, "app_url").await,
-        "logo": get_setting_value(state, "logo").await,
-        "windows_version": get_setting_value(state, "windows_version").await,
-        "windows_download_url": get_setting_value(state, "windows_download_url").await,
-        "macos_version": get_setting_value(state, "macos_version").await,
-        "macos_download_url": get_setting_value(state, "macos_download_url").await,
-        "android_version": get_setting_value(state, "android_version").await,
-        "android_download_url": get_setting_value(state, "android_download_url").await,
+        "app_description": app_description,
+        "app_url": app_url,
+        "logo": logo,
+        "windows_version": windows_version,
+        "windows_download_url": windows_download_url,
+        "macos_version": macos_version,
+        "macos_download_url": macos_download_url,
+        "android_version": android_version,
+        "android_download_url": android_download_url,
         "force_oauth2_login": if get_setting_bool(state, "force_oauth2_login", false).await { 1 } else { 0 },
         "oauth_linux_do_enable": if oauth_linux_do_available { 1 } else { 0 },
         "is_recaptcha": if captcha_enable { 1 } else { 0 },
@@ -121,6 +149,9 @@ async fn build_plan_fetch_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    if !state.exposure.public_catalog_enabled() {
+        return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
+    }
     let cache_key = build_cache_key(&uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
@@ -142,6 +173,9 @@ async fn build_overview_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    if !state.exposure.public_dashboard_enabled() {
+        return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
+    }
     let cache_key = build_cache_key(&uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
@@ -173,6 +207,9 @@ async fn build_leaderboards_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    if !state.exposure.public_dashboard_enabled() {
+        return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
+    }
     let cache_key = build_cache_key(&uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
@@ -204,6 +241,9 @@ async fn build_geo_response(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
+    if !state.exposure.public_dashboard_enabled() {
+        return Err(json_error(StatusCode::NOT_FOUND, "Not found"));
+    }
     let cache_key = build_cache_key(&uri);
     if let Some(response) = try_cached_response(state, &cache_key, &headers) {
         return Ok(response);
@@ -288,14 +328,14 @@ pub fn serialize_guest_plan(plan: &PlanRow, share_base: &str, system_reset_metho
     } else {
         None
     };
-    let content = format_plan_content(
+    let content = crate::html_safety_support::sanitize_rich_html(&format_plan_content(
         plan.content.as_deref().unwrap_or(""),
         plan.transfer_enable.unwrap_or(0),
         plan.speed_limit,
         plan.device_limit,
         plan.reset_traffic_method.unwrap_or(system_reset_method),
         system_reset_method,
-    );
+    ));
     let prices = plan.prices.as_ref().map(|json| json.0.clone()).unwrap_or(Value::Null);
     let price_map = prices.as_object().cloned().unwrap_or_default();
     let free_quota = plan

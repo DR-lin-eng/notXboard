@@ -1,5 +1,12 @@
 use crate::*;
+use hmac::{Hmac, Mac};
 use hyper_util::rt::TokioExecutor;
+use sha2::Sha256;
+
+const LINUX_DO_OAUTH_COOKIE: &str = "notxboard_linux_do_oauth";
+const LINUX_DO_OAUTH_CALLBACK_PATH: &str = "/api/v1/passport/oauth2/linux-do/callback";
+const LINUX_DO_OAUTH_STATE_TTL_SECONDS: i64 = 600;
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Deserialize)]
 pub(crate) struct LinuxDoTokenResponse {
@@ -42,10 +49,15 @@ pub async fn callback(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response<Body> {
-    match build_callback_response(&state, headers, uri).await {
+    let secure_cookie = oauth_callback_uses_https(&oauth_redirect_uri(&state).await);
+    let mut response = match build_callback_response(&state, headers, uri).await {
         Ok(response) => response,
         Err(response) => response,
+    };
+    if let Ok(value) = oauth_browser_cookie_clear_value(secure_cookie).parse() {
+        response.headers_mut().append(http::header::SET_COOKIE, value);
     }
+    response
 }
 
 pub async fn refresh(
@@ -77,7 +89,8 @@ async fn build_redirect_response(
 ) -> Result<Response<Body>, Response<Body>> {
     let oauth = resolve_linux_do_oauth_config(state).await?;
     let redirect_uri = oauth_redirect_uri(state).await;
-    let state_value = random_alnum(32);
+    let state_value = random_seed_hex("linux-do-oauth-state")?;
+    let browser_nonce = random_seed_hex("linux-do-oauth-browser")?;
     let invite_code = parse_query(&uri)
         .get("invite_code")
         .map(|value| value.trim().to_string())
@@ -86,11 +99,12 @@ async fn build_redirect_response(
     let payload = json!({
         "valid": true,
         "invite_code": invite_code,
+        "browser_nonce_mac": oauth_browser_binding_mac(&state.app_key, &state_value, &browser_nonce),
     });
     redis_setex_string(
         state,
         &oauth_state_cache_key(&state_value),
-        600,
+        LINUX_DO_OAUTH_STATE_TTL_SECONDS,
         &payload.to_string(),
     )
     .await
@@ -113,6 +127,10 @@ async fn build_redirect_response(
     Ok(Response::builder()
         .status(StatusCode::FOUND)
         .header("Location", location)
+        .header(
+            http::header::SET_COOKIE,
+            oauth_browser_cookie_value(&browser_nonce, oauth_callback_uses_https(&redirect_uri)),
+        )
         .body(Body::empty())
         .unwrap())
 }
@@ -145,6 +163,20 @@ async fn build_callback_response(
     if !state_payload.get("valid").and_then(Value::as_bool).unwrap_or(false) {
         return Err(oauth_json_or_html_error(&headers, StatusCode::UNAUTHORIZED, "Invalid state parameter"));
     }
+    let browser_nonce = oauth_browser_nonce_from_headers(&headers)
+        .ok_or_else(|| oauth_json_or_html_error(&headers, StatusCode::UNAUTHORIZED, "Invalid state parameter"))?;
+    let expected_nonce_mac = state_payload
+        .get("browser_nonce_mac")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !oauth_browser_binding_matches(
+        &state.app_key,
+        &state_value,
+        &browser_nonce,
+        expected_nonce_mac,
+    ) {
+        return Err(oauth_json_or_html_error(&headers, StatusCode::UNAUTHORIZED, "Invalid state parameter"));
+    }
 
     let oauth = resolve_linux_do_oauth_config(state).await?;
     let redirect_uri = oauth_redirect_uri(state).await;
@@ -156,17 +188,35 @@ async fn build_callback_response(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let login_user = sync_linux_do_user(state, &user_info, &token_data, invite_code.as_deref()).await?;
+    let login_user = sync_linux_do_user(
+        state,
+        &user_info,
+        &token_data,
+        invite_code.as_deref(),
+        &headers,
+    )
+    .await?;
     if login_user.banned != 0 {
         return Err(oauth_json_or_html_error(&headers, StatusCode::FORBIDDEN, &user_suspension_message(&login_user)));
     }
 
-    let auth_data = issue_personal_access_token(state, &login_user)
+    let auth_data = issue_linux_do_personal_access_token_if_unbanned(state, login_user.id)
         .await
         .map_err(|err| {
             error!("oauth issue auth failed: {}", err);
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "oauth issue auth failed")
         })?;
+    let Some(auth_data) = auth_data else {
+        let blocked_user = load_login_user_by_id(state, login_user.id)
+            .await
+            .map_err(internal_error)?
+            .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
+        return Err(oauth_json_or_html_error(
+            &headers,
+            StatusCode::FORBIDDEN,
+            &user_suspension_message(&blocked_user),
+        ));
+    };
     update_login_timestamp(state, login_user.id)
         .await
         .map_err(internal_error)?;
@@ -175,6 +225,13 @@ async fn build_callback_response(
         .await
         .map_err(internal_error)?
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
+    if user.banned != 0 {
+        return Err(oauth_json_or_html_error(
+            &headers,
+            StatusCode::FORBIDDEN,
+            &linux_do_oauth_suspension_message(user.ban_reason.as_deref()),
+        ));
+    }
 
     let payload = json!({
         "success": true,
@@ -248,6 +305,78 @@ async fn oauth_redirect_uri(state: &AppState) -> String {
 
 fn oauth_state_cache_key(state: &str) -> String {
     format!("oauth:linux_do:state:{}", state)
+}
+
+fn oauth_callback_uses_https(redirect_uri: &str) -> bool {
+    redirect_uri
+        .parse::<Uri>()
+        .ok()
+        .and_then(|uri| uri.scheme_str().map(str::to_string))
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+}
+
+fn oauth_browser_cookie_value(nonce: &str, secure: bool) -> String {
+    format!(
+        "{LINUX_DO_OAUTH_COOKIE}={nonce}; Max-Age={LINUX_DO_OAUTH_STATE_TTL_SECONDS}; Path={LINUX_DO_OAUTH_CALLBACK_PATH}; HttpOnly; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn oauth_browser_cookie_clear_value(secure: bool) -> String {
+    format!(
+        "{LINUX_DO_OAUTH_COOKIE}=; Max-Age=0; Path={LINUX_DO_OAUTH_CALLBACK_PATH}; HttpOnly; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn oauth_browser_nonce_from_headers(headers: &HeaderMap) -> Option<String> {
+    let mut nonce = None;
+    for header in headers.get_all(http::header::COOKIE) {
+        let raw = header.to_str().ok()?;
+        for cookie in raw.split(';') {
+            let Some((name, value)) = cookie.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim() != LINUX_DO_OAUTH_COOKIE {
+                continue;
+            }
+            let value = value.trim();
+            if nonce.is_some()
+                || value.len() != 64
+                || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            nonce = Some(value.to_ascii_lowercase());
+        }
+    }
+    nonce
+}
+
+fn oauth_browser_binding_mac(app_key: &str, state: &str, nonce: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(app_key.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(b"linux-do-oauth-browser-v1\0");
+    mac.update(state.as_bytes());
+    mac.update(b"\0");
+    mac.update(nonce.as_bytes());
+    hex_encode(mac.finalize().into_bytes().as_slice())
+}
+
+fn oauth_browser_binding_matches(
+    app_key: &str,
+    state: &str,
+    nonce: &str,
+    expected_mac: &str,
+) -> bool {
+    !state.is_empty()
+        && nonce.len() == 64
+        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && expected_mac.len() == 64
+        && crate::secure_compare_support::constant_time_eq_str(
+            expected_mac,
+            &oauth_browser_binding_mac(app_key, state, nonce),
+        )
 }
 
 async fn exchange_linux_do_code(
@@ -329,6 +458,7 @@ async fn sync_linux_do_user(
     user_info: &LinuxDoUserInfo,
     token_data: &LinuxDoTokenResponse,
     invite_code: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<LoginUserRow, Response<Body>> {
     let existing = load_login_user_by_linux_do_id(state, user_info.id).await.map_err(internal_error)?;
     if existing.is_none() && !allows_oauth_registration(state).await {
@@ -348,7 +478,27 @@ async fn sync_linux_do_user(
     let invite_user_id = invite.as_ref().map(|value| value.user_id);
 
     let user_id = if let Some(existing) = existing {
-        update_linux_do_existing_user(state, existing.id, user_info, token_data).await.map_err(internal_error)?;
+        if existing.banned != 0 {
+            return Err(oauth_json_or_html_error(
+                headers,
+                StatusCode::FORBIDDEN,
+                &user_suspension_message(&existing),
+            ));
+        }
+        let active = update_linux_do_existing_user(state, existing.id, user_info, token_data)
+            .await
+            .map_err(internal_error)?;
+        if !active {
+            let user = load_login_user_by_id(state, existing.id)
+                .await
+                .map_err(internal_error)?
+                .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
+            return Err(oauth_json_or_html_error(
+                headers,
+                StatusCode::FORBIDDEN,
+                &user_suspension_message(&user),
+            ));
+        }
         existing.id
     } else {
         let email = unique_linux_do_email(state, &user_info.username).await.map_err(internal_error)?;
@@ -423,14 +573,16 @@ async fn create_linux_do_user(
     let oauth_expires_at = chrono::DateTime::<Utc>::from_timestamp(now + token_data.expires_in.max(60), 0)
         .map(|dt| dt.naive_utc());
 
+    let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         "INSERT INTO v2_user (
             invite_user_id, email, password, uuid, token, subscribe_path, subscribe_key, subscribe_salt,
             remind_expire, remind_traffic, expired_at, concurrent_ip_limit, last_login_at,
             linux_do_id, linux_do_username, linux_do_name, linux_do_avatar, trust_level, is_silenced, external_ids,
-            oauth_provider, oauth_access_token, oauth_refresh_token, oauth_expires_at, banned, commission_rate, commission_type,
+            oauth_provider, oauth_access_token, oauth_refresh_token, oauth_expires_at, banned,
+            ban_reason, banned_at, banned_by_admin_id, commission_rate, commission_type,
             device_limit, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 3, ?, ?, ?, ?, ?, ?, ?, ?, 'linux_do', ?, ?, ?, ?, 0.1, 0, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 3, ?, ?, ?, ?, ?, ?, ?, ?, 'linux_do', ?, ?, ?, ?, ?, ?, NULL, 0.1, 0, ?, ?, ?)",
     )
     .bind(invite_user_id)
     .bind(email)
@@ -454,13 +606,31 @@ async fn create_linux_do_user(
     .bind(token_data.refresh_token.clone())
     .bind(oauth_expires_at)
     .bind(if user_info.active { 0 } else { 1 })
+    .bind((!user_info.active).then_some(crate::ban_support::LINUX_DO_INACTIVE_BAN_REASON))
+    .bind((!user_info.active).then_some(now))
     .bind(device_limit)
     .bind(now)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(result.last_insert_id() as i64)
+    let user_id = result.last_insert_id() as i64;
+    if !user_info.active {
+        sqlx::query(
+            "INSERT INTO user_ban_records
+                (user_id, admin_id, action, reason, source, context, created_at, updated_at)
+             VALUES (?, NULL, 'ban', ?, 'linux_do_oauth', ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(crate::ban_support::LINUX_DO_INACTIVE_BAN_REASON)
+        .bind(r#"{"source":"linux_do","upstream_active":false}"#)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(user_id)
 }
 
 async fn update_linux_do_existing_user(
@@ -468,16 +638,27 @@ async fn update_linux_do_existing_user(
     user_id: i64,
     user_info: &LinuxDoUserInfo,
     token_data: &LinuxDoTokenResponse,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let now = Utc::now().timestamp();
     let external_ids = serde_json::to_string(&user_info.external_ids).unwrap_or_else(|_| "null".to_string());
     let oauth_expires_at = chrono::DateTime::<Utc>::from_timestamp(now + token_data.expires_in.max(60), 0)
         .map(|dt| dt.naive_utc());
 
+    let mut tx = state.db.begin().await?;
+    let current = crate::ban_support::lock_bannable_user_for_update(&mut tx, user_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    if current.banned != 0 {
+        return Ok(false);
+    }
     sqlx::query(
         "UPDATE v2_user
          SET linux_do_username = ?, linux_do_name = ?, linux_do_avatar = ?, trust_level = ?, is_silenced = ?, external_ids = ?,
-             oauth_provider = 'linux_do', oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?, banned = ?, last_login_at = ?, updated_at = ?
+             oauth_provider = 'linux_do', oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?,
+             ban_reason = CASE WHEN ? <> 0 THEN ban_reason ELSE ? END,
+             banned_at = CASE WHEN ? <> 0 THEN banned_at ELSE ? END,
+             banned_by_admin_id = CASE WHEN ? <> 0 THEN banned_by_admin_id ELSE NULL END,
+             banned = ?, last_login_at = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(&user_info.username)
@@ -489,13 +670,46 @@ async fn update_linux_do_existing_user(
     .bind(&token_data.access_token)
     .bind(token_data.refresh_token.clone())
     .bind(oauth_expires_at)
+    .bind(if user_info.active { 1 } else { 0 })
+    .bind(crate::ban_support::LINUX_DO_INACTIVE_BAN_REASON)
+    .bind(if user_info.active { 1 } else { 0 })
+    .bind(now)
+    .bind(if user_info.active { 1 } else { 0 })
     .bind(if user_info.active { 0 } else { 1 })
     .bind(now)
     .bind(now)
     .bind(user_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    if !user_info.active {
+        sqlx::query(
+            "INSERT INTO user_ban_records
+                (user_id, admin_id, action, reason, source, context, created_at, updated_at)
+             VALUES (?, NULL, 'ban', ?, 'linux_do_oauth', ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(crate::ban_support::LINUX_DO_INACTIVE_BAN_REASON)
+        .bind(r#"{"source":"linux_do","upstream_active":false}"#)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM personal_access_tokens WHERE tokenable_id = ? AND tokenable_type = 'App\\\\Models\\\\User'")
+            .bind(user_id as u64)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE server_nodes SET status = 'inactive', updated_at = NOW() WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE tcping_agents SET is_enabled = 0, updated_at = UNIX_TIMESTAMP() WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    clear_all_authorization_caches(state);
+    Ok(user_info.active)
 }
 
 fn default_linux_do_device_limit(trust_level: i64) -> i64 {
@@ -604,6 +818,52 @@ fn default_oauth_expire() -> i64 {
     3600
 }
 
+fn linux_do_oauth_suspension_message(reason: Option<&str>) -> String {
+    let reason = reason.unwrap_or_default().trim();
+    if reason.is_empty() {
+        "Your account has been suspended".to_string()
+    } else {
+        format!("Your account has been suspended: {reason}")
+    }
+}
+
+async fn issue_linux_do_personal_access_token_if_unbanned(
+    state: &AppState,
+    user_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    let expire_days = get_setting_int(state, "login_token_expire_days", 365)
+        .await
+        .clamp(0, 3650);
+    let expires_at = if expire_days > 0 {
+        Some((Utc::now() + chrono::Duration::days(expire_days.max(1))).naive_utc())
+    } else {
+        None
+    };
+
+    let mut tx = state.db.begin().await?;
+    let user = crate::ban_support::lock_bannable_user_for_update(&mut tx, user_id).await?;
+    if user.as_ref().map(|user| user.banned != 0).unwrap_or(true) {
+        return Ok(None);
+    }
+
+    let name = random_alnum(20);
+    let plain = sanctum_plaintext_token();
+    let hashed = sha256_hex(&plain);
+    sqlx::query(
+        "INSERT INTO personal_access_tokens
+            (tokenable_type, tokenable_id, name, token, abilities, expires_at, created_at, updated_at)
+         VALUES ('App\\\\Models\\\\User', ?, ?, ?, '[\"*\"]', ?, NOW(), NOW())",
+    )
+    .bind(user_id as u64)
+    .bind(name)
+    .bind(hashed)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(format!("Bearer {plain}")))
+}
+
 async fn build_refresh_response(
     state: &AppState,
     headers: HeaderMap,
@@ -622,6 +882,12 @@ async fn build_refresh_response(
             json!({"success": false, "error": "User not authenticated with Linux DO"}),
         ));
     }
+    if oauth_user.banned != 0 {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &linux_do_oauth_suspension_message(oauth_user.ban_reason.as_deref()),
+        ));
+    }
     let refresh_token = oauth_user
         .oauth_refresh_token
         .clone()
@@ -633,24 +899,43 @@ async fn build_refresh_response(
 
     let oauth = resolve_linux_do_oauth_config(state).await?;
     let token_data = refresh_linux_do_token(&oauth, &refresh_token).await?;
-    persist_linux_do_tokens(state, oauth_user.id, &token_data)
+    let persisted = persist_linux_do_tokens(state, oauth_user.id, &token_data)
         .await
         .map_err(internal_error)?;
+    if !persisted {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "Your account has been suspended",
+        ));
+    }
 
     let login_user = load_login_user_by_id(state, oauth_user.id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
-    let auth_data = issue_personal_access_token(state, &login_user)
+    if login_user.banned != 0 {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &user_suspension_message(&login_user),
+        ));
+    }
+    let auth_data = issue_linux_do_personal_access_token_if_unbanned(state, login_user.id)
         .await
         .map_err(|err| {
             error!("oauth refresh issue auth failed: {}", err);
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "oauth refresh issue auth failed")
-        })?;
+        })?
+        .ok_or_else(|| json_error(StatusCode::FORBIDDEN, "Your account has been suspended"))?;
     let refreshed = load_oauth_linux_do_user_by_id(state, oauth_user.id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
+    if refreshed.banned != 0 {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &linux_do_oauth_suspension_message(refreshed.ban_reason.as_deref()),
+        ));
+    }
     let expires_at = refreshed
         .oauth_expires_at
         .map(|value| value.format("%Y-%m-%dT%H:%M:%SZ").to_string());
@@ -687,6 +972,12 @@ async fn build_sync_response(
             json!({"success": false, "error": "User not authenticated with Linux DO"}),
         ));
     }
+    if oauth_user.banned != 0 {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &linux_do_oauth_suspension_message(oauth_user.ban_reason.as_deref()),
+        ));
+    }
 
     let oauth = resolve_linux_do_oauth_config(state).await?;
     let mut access_token = oauth_user.oauth_access_token.clone().unwrap_or_default();
@@ -712,14 +1003,20 @@ async fn build_sync_response(
                 json!({"success": false, "error": "Failed to refresh token"}),
             ))?;
         let token_data = refresh_linux_do_token(&oauth, &refresh_token).await?;
-        persist_linux_do_tokens(state, oauth_user.id, &token_data)
+        let persisted = persist_linux_do_tokens(state, oauth_user.id, &token_data)
             .await
             .map_err(internal_error)?;
+        if !persisted {
+            return Err(json_error(
+                StatusCode::FORBIDDEN,
+                "Your account has been suspended",
+            ));
+        }
         access_token = token_data.access_token.clone();
     }
 
     let user_info = fetch_linux_do_user_info(&access_token).await?;
-    update_linux_do_existing_user(
+    let active = update_linux_do_existing_user(
         state,
         oauth_user.id,
         &user_info,
@@ -735,11 +1032,23 @@ async fn build_sync_response(
     )
     .await
     .map_err(internal_error)?;
+    if !active {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "Your account has been suspended",
+        ));
+    }
 
     let refreshed = load_oauth_linux_do_user_by_id(state, oauth_user.id)
         .await
         .map_err(internal_error)?
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "The user does not exist"))?;
+    if refreshed.banned != 0 {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            &linux_do_oauth_suspension_message(refreshed.ban_reason.as_deref()),
+        ));
+    }
     let updated_at = refreshed
         .updated_at
         .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
@@ -767,6 +1076,8 @@ struct LinuxDoOauthUserRow {
     id: i64,
     email: String,
     token: String,
+    banned: i8,
+    ban_reason: Option<String>,
     is_admin: i8,
     is_super_admin: i8,
     trust_level: i64,
@@ -787,7 +1098,7 @@ async fn load_oauth_linux_do_user_by_id(
     user_id: i64,
 ) -> Result<Option<LinuxDoOauthUserRow>, sqlx::Error> {
     sqlx::query_as::<_, LinuxDoOauthUserRow>(
-        "SELECT id, email, token, is_admin, is_super_admin, trust_level, is_silenced,
+        "SELECT id, email, token, banned, ban_reason, is_admin, is_super_admin, trust_level, is_silenced,
                 linux_do_id, linux_do_username, linux_do_name, linux_do_avatar,
                 oauth_provider, oauth_access_token, oauth_refresh_token, oauth_expires_at, updated_at
          FROM v2_user WHERE id = ? LIMIT 1",
@@ -841,14 +1152,14 @@ async fn persist_linux_do_tokens(
     state: &AppState,
     user_id: i64,
     token_data: &LinuxDoTokenResponse,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let now = Utc::now().timestamp();
     let oauth_expires_at = chrono::DateTime::<Utc>::from_timestamp(now + token_data.expires_in.max(60), 0)
         .map(|dt| dt.naive_utc());
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE v2_user
          SET oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?, updated_at = ?
-         WHERE id = ?",
+         WHERE id = ? AND banned = 0",
     )
     .bind(&token_data.access_token)
     .bind(token_data.refresh_token.clone())
@@ -857,5 +1168,175 @@ async fn persist_linux_do_tokens(
     .bind(user_id)
     .execute(&state.db)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_browser_cookie_is_callback_scoped_and_hardened() {
+        let http_cookie = oauth_browser_cookie_value(&"a".repeat(64), false);
+        assert!(http_cookie.contains("Max-Age=600"));
+        assert!(http_cookie.contains("Path=/api/v1/passport/oauth2/linux-do/callback"));
+        assert!(http_cookie.contains("HttpOnly"));
+        assert!(http_cookie.contains("SameSite=Lax"));
+        assert!(!http_cookie.contains("Domain="));
+        assert!(!http_cookie.contains("; Secure"));
+
+        let https_cookie = oauth_browser_cookie_value(&"b".repeat(64), true);
+        assert!(https_cookie.contains("; Secure"));
+        let clear_cookie = oauth_browser_cookie_clear_value(true);
+        assert!(clear_cookie.contains("Max-Age=0"));
+        assert!(clear_cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn oauth_cookie_secure_flag_follows_the_callback_scheme() {
+        assert!(oauth_callback_uses_https(
+            "https://panel.example/api/v1/passport/oauth2/linux-do/callback"
+        ));
+        assert!(!oauth_callback_uses_https(
+            "http://127.0.0.1:18087/api/v1/passport/oauth2/linux-do/callback"
+        ));
+        assert!(!oauth_callback_uses_https("not a uri"));
+    }
+
+    #[test]
+    fn oauth_browser_nonce_parser_rejects_missing_malformed_or_duplicate_cookies() {
+        let nonce = "a".repeat(64);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            format!("other=1; {LINUX_DO_OAUTH_COOKIE}={nonce}")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(oauth_browser_nonce_from_headers(&headers), Some(nonce.clone()));
+
+        for raw in [
+            format!("{LINUX_DO_OAUTH_COOKIE}=short"),
+            format!("{LINUX_DO_OAUTH_COOKIE}={}", "z".repeat(64)),
+            format!(
+                "{LINUX_DO_OAUTH_COOKIE}={nonce}; {LINUX_DO_OAUTH_COOKIE}={nonce}"
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::COOKIE, raw.parse().unwrap());
+            assert_eq!(oauth_browser_nonce_from_headers(&headers), None);
+        }
+    }
+
+    #[test]
+    fn oauth_browser_binding_is_state_and_browser_specific() {
+        let nonce = "1".repeat(64);
+        let mac = oauth_browser_binding_mac("test-app-key", "state-a", &nonce);
+        assert!(oauth_browser_binding_matches(
+            "test-app-key",
+            "state-a",
+            &nonce,
+            &mac
+        ));
+        assert!(!oauth_browser_binding_matches(
+            "test-app-key",
+            "state-b",
+            &nonce,
+            &mac
+        ));
+        assert!(!oauth_browser_binding_matches(
+            "test-app-key",
+            "state-a",
+            &"2".repeat(64),
+            &mac
+        ));
+    }
+
+    #[test]
+    fn callback_verifies_browser_binding_before_exchanging_the_code() {
+        let source = include_str!("linux_do.rs");
+        let callback = source
+            .split_once("async fn build_callback_response")
+            .and_then(|(_, tail)| tail.split_once("pub(crate) struct LinuxDoOauthConfig").map(|(body, _)| body))
+            .expect("OAuth callback must remain present");
+        let binding_check = callback
+            .find("oauth_browser_binding_matches")
+            .expect("callback must verify the browser nonce");
+        let token_exchange = callback
+            .find("exchange_linux_do_code")
+            .expect("callback must exchange the authorization code");
+        let pat_issue = callback
+            .find("issue_linux_do_personal_access_token_if_unbanned")
+            .expect("callback must issue a PAT through the guarded helper");
+        assert!(binding_check < token_exchange);
+        assert!(binding_check < pat_issue);
+    }
+
+    #[test]
+    fn callback_always_expires_the_browser_binding_cookie() {
+        let source = include_str!("linux_do.rs");
+        let wrapper = source
+            .split_once("pub async fn callback")
+            .and_then(|(_, tail)| tail.split_once("pub async fn refresh").map(|(body, _)| body))
+            .expect("OAuth callback wrapper must remain present");
+        assert!(wrapper.contains("oauth_browser_cookie_clear_value"));
+        assert!(wrapper.contains("response.headers_mut().append"));
+    }
+
+    #[test]
+    fn oauth_pat_issue_locks_and_checks_ban_state_before_insert() {
+        let source = include_str!("linux_do.rs");
+        let issue = source
+            .split_once("async fn issue_linux_do_personal_access_token_if_unbanned")
+            .and_then(|(_, tail)| tail.split_once("async fn build_refresh_response").map(|(body, _)| body))
+            .expect("guarded OAuth PAT issuer must remain present");
+        let lock = issue
+            .find("lock_bannable_user_for_update")
+            .expect("PAT issuer must lock current ban state");
+        let banned_check = issue
+            .find("user.banned != 0")
+            .expect("PAT issuer must reject banned users");
+        let insert = issue
+            .find("INSERT INTO personal_access_tokens")
+            .expect("PAT issuer must insert a token");
+        assert!(lock < banned_check && banned_check < insert);
+    }
+
+    #[test]
+    fn existing_oauth_updates_lock_and_reject_banned_users_before_writing() {
+        let source = include_str!("linux_do.rs");
+        let update = source
+            .split_once("async fn update_linux_do_existing_user")
+            .and_then(|(_, tail)| tail.split_once("fn default_linux_do_device_limit").map(|(body, _)| body))
+            .expect("existing Linux DO updater must remain present");
+        let lock = update
+            .find("lock_bannable_user_for_update")
+            .expect("existing user update must lock current ban state");
+        let banned_check = update
+            .find("current.banned != 0")
+            .expect("existing user update must reject banned users");
+        let write = update
+            .find("UPDATE v2_user")
+            .expect("existing user update must write profile data");
+        assert!(lock < banned_check && banned_check < write);
+    }
+
+    #[test]
+    fn refresh_rejects_banned_users_before_upstream_refresh_or_pat_issue() {
+        let source = include_str!("linux_do.rs");
+        let refresh = source
+            .split_once("async fn build_refresh_response")
+            .and_then(|(_, tail)| tail.split_once("async fn build_sync_response").map(|(body, _)| body))
+            .expect("OAuth refresh handler must remain present");
+        let banned_check = refresh
+            .find("oauth_user.banned != 0")
+            .expect("refresh must explicitly reject a banned account");
+        let upstream_refresh = refresh
+            .find("refresh_linux_do_token")
+            .expect("refresh must call the upstream provider");
+        let pat_issue = refresh
+            .find("issue_linux_do_personal_access_token_if_unbanned")
+            .expect("refresh must use the guarded PAT issuer");
+        assert!(banned_check < upstream_refresh && banned_check < pat_issue);
+    }
 }

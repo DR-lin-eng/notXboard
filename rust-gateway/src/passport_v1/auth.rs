@@ -150,7 +150,11 @@ async fn build_login_response(
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
     let password = payload.get("password").and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_default();
 
     if email.is_empty() {
@@ -318,7 +322,7 @@ async fn build_token2_login_response(
 
     if let Some(verify) = params.get("verify").map(|v| v.trim()).filter(|v| !v.is_empty()) {
         let cache_key = format!("TEMP_TOKEN_{}", verify);
-        let user_id = redis_get_string(state, &cache_key)
+        let user_id = redis_getdel_string(state, &cache_key)
             .await
             .map_err(|err| {
                 error!("token2Login cache read failed: {}", err);
@@ -330,7 +334,6 @@ async fn build_token2_login_response(
             return Ok(json_status_response(StatusCode::BAD_REQUEST, json!({ "message": "Token error" })));
         };
 
-        let _ = redis_del_key(state, &format!("{}{}{}", state.redis_prefix, state.cache_prefix, cache_key)).await;
         let user = load_login_user_by_id(state, user_id).await.map_err(internal_error)?;
         let Some(user) = user else {
             return Ok(json_status_response(StatusCode::BAD_REQUEST, json!({ "message": "User not found" })));
@@ -374,7 +377,11 @@ async fn build_login_with_mail_link_response(
     }
 
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
     if email.is_empty() {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "The email field is required."));
     }
@@ -387,17 +394,23 @@ async fn build_login_with_mail_link_response(
     if redis_get_string(state, &rate_key).await.ok().flatten().is_some() {
         return Ok(fail_json_response(StatusCode::TOO_MANY_REQUESTS, "Sending frequently, please try again later"));
     }
+    redis_setex_string(state, &rate_key, 60, &Utc::now().timestamp().to_string())
+        .await
+        .map_err(|err| {
+            error!("loginWithMailLink rate key write failed: {}", err);
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "mail link rate cache write failed")
+        })?;
 
     let user = load_login_user_by_email(state, &email).await.map_err(internal_error)?;
     let Some(user) = user else {
         return Ok(json_value_response(success_response_payload(Value::Bool(true))));
     };
 
-    if user.banned != 0 {
-        return Ok(fail_json_response(StatusCode::BAD_REQUEST, &user_suspension_message(&user)));
-    }
-    if !can_use_email_login(state, user.is_super_admin != 0).await {
-        return Ok(fail_json_response(StatusCode::FORBIDDEN, "Email login is disabled. Please use OAuth2 login"));
+    if user.banned != 0
+        || user.is_super_admin != 0
+        || !can_use_email_login(state, false).await
+    {
+        return Ok(json_value_response(success_response_payload(Value::Bool(true))));
     }
 
     let code = Uuid::new_v4().simple().to_string();
@@ -408,14 +421,11 @@ async fn build_login_with_mail_link_response(
             error!("loginWithMailLink TEMP_TOKEN write failed: {}", err);
             json_error(StatusCode::INTERNAL_SERVER_ERROR, "mail link cache write failed")
         })?;
-    redis_setex_string(state, &rate_key, 60, &Utc::now().timestamp().to_string())
-        .await
-        .map_err(|err| {
-            error!("loginWithMailLink rate key write failed: {}", err);
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "mail link rate cache write failed")
-        })?;
-
-    let redirect_url = format!("/app/#/login?verify={}&redirect={}", code, redirect);
+    let redirect_url = format!(
+        "/app/#/login?verify={}&redirect={}",
+        code,
+        urlencoding::encode(redirect),
+    );
     let app_url = get_setting_string(state, "app_url", "").await;
     let link = if !app_url.trim().is_empty() {
         format!("{}{}", app_url.trim_end_matches('/'), redirect_url)
@@ -437,16 +447,24 @@ async fn build_login_with_mail_link_response(
             }),
         },
     )
-    .await
-    .map_err(|err| {
-        error!("loginWithMailLink send failed: {}", err);
-        json_error(StatusCode::INTERNAL_SERVER_ERROR, "mail link send failed")
-    })?;
-    if result.error.is_some() {
-        return Ok(fail_json_response(StatusCode::INTERNAL_SERVER_ERROR, "mail link send failed"));
+    .await;
+    let send_failed = match &result {
+        Ok(result) => result.error.is_some(),
+        Err(_) => true,
+    };
+    if send_failed {
+        let _ = redis_del_key(
+            state,
+            &format!("{}{}{}", state.redis_prefix, state.cache_prefix, temp_token_key),
+        )
+        .await;
+        match result {
+            Ok(result) => error!("loginWithMailLink send failed: {:?}", result.error),
+            Err(err) => error!("loginWithMailLink send failed: {}", err),
+        }
     }
 
-    Ok(json_value_response(success_response_payload(Value::String(link))))
+    Ok(json_value_response(success_response_payload(Value::Bool(true))))
 }
 
 async fn build_forget_response(

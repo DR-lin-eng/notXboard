@@ -1,5 +1,19 @@
 use crate::*;
 
+fn node_not_found_response() -> Response<Body> {
+    json_status_response(
+        StatusCode::NOT_FOUND,
+        json!({"success": false, "error": "Server node not found"}),
+    )
+}
+
+fn audit_rule_not_found_response() -> Response<Body> {
+    json_status_response(
+        StatusCode::NOT_FOUND,
+        json!({"success": false, "error": "Audit rule not found"}),
+    )
+}
+
 pub async fn logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -100,10 +114,7 @@ async fn build_node_logs_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
 
     let params = parse_query(&uri);
@@ -131,10 +142,7 @@ async fn build_node_rules_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
     let rows = load_node_owner_audit_rules(state, node.id).await.map_err(internal_error)?;
     Ok(json_value_response(json!({
@@ -153,10 +161,7 @@ async fn build_store_node_rule_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
     let payload = parse_json_body(body).await?;
     let rule_type = payload.get("rule_type").and_then(|value| value.as_str()).map(|value| value.trim()).unwrap_or("");
@@ -173,19 +178,43 @@ async fn build_store_node_rule_response(
         return Ok(json_value_response(json!({"success": false, "error": "Invalid action"})));
     }
 
-    sqlx::query(
-        "INSERT INTO audit_rules (node_id, rule_type, rule_pattern, action, is_active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, NOW(), NOW())"
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
     )
-    .bind(node.id)
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO audit_rules (node_id, rule_type, rule_pattern, action, is_active, created_at, updated_at)
+         SELECT node_row.id, ?, ?, ?, ?, NOW(), NOW()
+         FROM server_nodes node_row
+         WHERE node_row.id = ? AND node_row.user_id = ?"
+    )
     .bind(rule_type)
     .bind(rule_pattern)
     .bind(action)
     .bind(if is_active { 1 } else { 0 })
-    .execute(&state.db)
+    .bind(node.id)
+    .bind(user.id)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
-    let row = load_latest_node_owner_audit_rule(state, node.id).await.map_err(internal_error)?;
+    if inserted.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+    tx.commit().await.map_err(internal_error)?;
+
+    let row = load_latest_node_owner_audit_rule(state, node.id)
+        .await
+        .map_err(internal_error)?;
     Ok(json_status_response(StatusCode::CREATED, json!({
         "success": true,
         "data": row.map(|value| serialize_audit_rule(&value)).unwrap_or(Value::Null)
@@ -203,17 +232,11 @@ async fn build_update_node_rule_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
     let existing = load_node_owner_audit_rule_by_id(state, node.id, rule_id).await.map_err(internal_error)?;
     let Some(existing) = existing else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Audit rule not found"
-        })));
+        return Ok(audit_rule_not_found_response());
     };
 
     let payload = parse_json_body(body).await?;
@@ -238,14 +261,30 @@ async fn build_update_node_rule_response(
         }
     }
 
-    sqlx::query(
-        "UPDATE audit_rules
-         SET rule_type = COALESCE(?, rule_type),
-             rule_pattern = COALESCE(?, rule_pattern),
-             action = COALESCE(?, action),
-             is_active = COALESCE(?, is_active),
-             updated_at = NOW()
-         WHERE id = ? AND node_id = ?"
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+
+    let updated = sqlx::query(
+        "UPDATE audit_rules audit_row
+         JOIN server_nodes node_row ON node_row.id = audit_row.node_id
+         SET audit_row.rule_type = COALESCE(?, audit_row.rule_type),
+             audit_row.rule_pattern = COALESCE(?, audit_row.rule_pattern),
+             audit_row.action = COALESCE(?, audit_row.action),
+             audit_row.is_active = COALESCE(?, audit_row.is_active),
+             audit_row.updated_at = NOW()
+         WHERE audit_row.id = ?
+           AND audit_row.node_id = ?
+           AND node_row.user_id = ?"
     )
     .bind(rule_type)
     .bind(rule_pattern)
@@ -253,9 +292,37 @@ async fn build_update_node_rule_response(
     .bind(is_active.map(|value| if value { 1 } else { 0 }))
     .bind(existing.id)
     .bind(node.id)
-    .execute(&state.db)
+    .bind(user.id)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() == 0 {
+        let still_owned = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM audit_rules audit_row
+             JOIN server_nodes node_row ON node_row.id = audit_row.node_id
+             WHERE audit_row.id = ?
+               AND audit_row.node_id = ?
+               AND node_row.user_id = ?",
+        )
+        .bind(existing.id)
+        .bind(node.id)
+        .bind(user.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+        if still_owned != 1 {
+            tx.rollback().await.ok();
+            return Ok(audit_rule_not_found_response());
+        }
+    } else if updated.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unexpected audit rule update result",
+        ));
+    }
+    tx.commit().await.map_err(internal_error)?;
 
     let refreshed = load_node_owner_audit_rule_by_id(state, node.id, existing.id).await.map_err(internal_error)?;
     Ok(json_value_response(json!({
@@ -274,23 +341,44 @@ async fn build_destroy_node_rule_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
     let existing = load_node_owner_audit_rule_by_id(state, node.id, rule_id).await.map_err(internal_error)?;
     if existing.is_none() {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Audit rule not found"
-        })));
+        return Ok(audit_rule_not_found_response());
     }
-    sqlx::query("DELETE FROM audit_rules WHERE id = ? AND node_id = ?")
-        .bind(rule_id)
-        .bind(node.id)
-        .execute(&state.db)
-        .await
-        .map_err(internal_error)?;
+
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+
+    let deleted = sqlx::query(
+        "DELETE audit_row
+         FROM audit_rules audit_row
+         JOIN server_nodes node_row ON node_row.id = audit_row.node_id
+         WHERE audit_row.id = ?
+           AND audit_row.node_id = ?
+           AND node_row.user_id = ?",
+    )
+    .bind(rule_id)
+    .bind(node.id)
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+    if deleted.rows_affected() != 1 {
+        tx.rollback().await.ok();
+        return Ok(audit_rule_not_found_response());
+    }
+    tx.commit().await.map_err(internal_error)?;
     Ok(json_value_response(json!({ "success": true })))
 }

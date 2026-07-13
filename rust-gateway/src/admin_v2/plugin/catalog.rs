@@ -20,8 +20,8 @@ pub fn load_single_plugin_directory_config(code: &str) -> Option<PluginDirectory
 fn scan_plugin_directories() -> Vec<PluginDirectoryConfig> {
     let mut plugins = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    scan_plugin_root(&crate::runtime_paths::state_plugins_path(""), &mut seen, &mut plugins);
     add_builtin_plugins(&mut seen, &mut plugins);
+    scan_plugin_root(&crate::runtime_paths::state_plugins_path(""), &mut seen, &mut plugins);
     scan_plugin_root(&crate::runtime_paths::plugins_path(""), &mut seen, &mut plugins);
 
     plugins
@@ -106,6 +106,9 @@ fn scan_plugin_root(
         let (Some(code), Some(name), Some(version)) = (code, name, version) else {
             continue;
         };
+        if super::PROTECTED_PLUGINS.contains(&code.as_str()) {
+            continue;
+        }
         if !seen.insert(code.clone()) {
             continue;
         }

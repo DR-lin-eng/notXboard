@@ -42,7 +42,8 @@ async fn build_config_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let agent = resolve_agent_by_token(state, &headers, &uri, body).await?;
+    let _ = (uri, body);
+    let agent = resolve_agent_by_token(state, &headers).await?;
     let targets = load_monitorable_targets_for_agent(state, &agent).await.map_err(internal_error)?;
 
     Ok(json_value_response(json!({
@@ -65,7 +66,8 @@ async fn build_heartbeat_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let agent = resolve_agent_by_token(state, &headers, &uri, body).await?;
+    let _ = (uri, body);
+    let agent = resolve_agent_by_token(state, &headers).await?;
     sqlx::query("UPDATE tcping_agents SET last_heartbeat_at = ?, updated_at = ? WHERE id = ?")
         .bind(Utc::now().timestamp())
         .bind(Utc::now().timestamp())
@@ -86,7 +88,8 @@ async fn build_samples_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let agent = resolve_agent_by_token(state, &headers, &uri, Body::empty()).await?;
+    let _ = uri;
+    let agent = resolve_agent_by_token(state, &headers).await?;
     let payload = parse_json_body(body).await?;
     let samples = payload
         .get("samples")
@@ -94,13 +97,18 @@ async fn build_samples_response(
         .cloned()
         .or_else(|| payload.as_array().cloned())
         .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Invalid samples payload"))?;
+    if samples.len() > 10_000 {
+        return Ok(fail_json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Too many TCPing samples",
+        ));
+    }
 
     let monitorable_nodes = load_monitorable_node_rows_for_agent(state, &agent).await.map_err(internal_error)?;
     let node_map = monitorable_nodes
         .into_iter()
         .map(|node| (node.id, node))
         .collect::<HashMap<_, _>>();
-
     let mut accepted = 0_i64;
     let now = Utc::now().timestamp();
     let mut tx = state.db.begin().await.map_err(internal_error)?;
@@ -120,13 +128,37 @@ async fn build_samples_response(
             continue;
         };
 
+        // Recheck ownership under a row lock so a stale config or ownership transfer
+        // cannot turn an old read grant into a write against the new owner.
+        let current_owner = sqlx::query_scalar::<_, i64>(
+            "SELECT user_id
+             FROM server_nodes
+             WHERE id = ? AND tcping_enabled = 1 AND status = 'active'
+             FOR UPDATE",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+        let Some(current_owner) = current_owner else {
+            continue;
+        };
+        if current_owner != agent.user_id {
+            continue;
+        }
+        let mut current_node = node.clone();
+        current_node.user_id = current_owner;
+
         let mut sampled_at = object.get("sampled_at").and_then(parse_i64_value).unwrap_or(now);
-        if sampled_at <= 0 {
+        if sampled_at < now - 86_400 || sampled_at > now + 300 {
             sampled_at = now;
         }
         let is_reachable = object.get("is_reachable").and_then(Value::as_bool).unwrap_or(false);
         let latency_ms = if is_reachable {
-            object.get("latency_ms").and_then(parse_i64_value).map(|value| value.max(0))
+            object
+                .get("latency_ms")
+                .and_then(parse_i64_value)
+                .map(|value| value.clamp(0, 60_000))
         } else {
             None
         };
@@ -136,7 +168,7 @@ async fn build_samples_response(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToString::to_string);
+            .map(|value| value.chars().take(255).collect::<String>());
 
         sqlx::query(
             "INSERT INTO tcping_samples
@@ -158,7 +190,7 @@ async fn build_samples_response(
 
         update_tcping_node_state_and_alerts_tx(
             &mut tx,
-            node,
+            &current_node,
             sampled_at,
             is_reachable,
             latency_ms,
@@ -193,15 +225,16 @@ async fn build_samples_response(
 async fn resolve_agent_by_token(
     state: &AppState,
     headers: &HeaderMap,
-    uri: &Uri,
-    body: Body,
 ) -> Result<TcpingAgentRow, Response<Body>> {
-    let token = resolve_agent_token(headers, uri, body).await?;
+    let token = resolve_agent_token(headers)?;
     let agent = sqlx::query_as::<_, TcpingAgentRow>(
-        "SELECT id, user_id, name, location_code, location_name, location_province, token,
-                is_enabled, last_heartbeat_at, last_sync_at, created_at, updated_at
-         FROM tcping_agents
-         WHERE token = ?
+        "SELECT a.id, a.user_id, a.name, a.location_code, a.location_name, a.location_province,
+                a.token, a.is_enabled, a.last_heartbeat_at, a.last_sync_at, a.created_at, a.updated_at
+         FROM tcping_agents a
+         JOIN v2_user u ON u.id = a.user_id
+         WHERE a.token = ?
+           AND a.is_enabled = 1
+           AND u.banned = 0
          LIMIT 1"
     )
     .bind(&token)
@@ -219,10 +252,8 @@ async fn resolve_agent_by_token(
     Ok(agent)
 }
 
-async fn resolve_agent_token(
+fn resolve_agent_token(
     headers: &HeaderMap,
-    uri: &Uri,
-    body: Body,
 ) -> Result<String, Response<Body>> {
     if let Some(token) = headers
         .get(AUTHORIZATION)
@@ -233,25 +264,10 @@ async fn resolve_agent_token(
     {
         return Ok(token.to_string());
     }
-
-    let params = parse_query(uri);
-    if let Some(token) = params.get("token").map(|value| value.trim()).filter(|value| !value.is_empty()) {
-        return Ok(token.to_string());
-    }
-
-    let payload = parse_json_body(body).await?;
-    let token = payload
-        .get("token")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            json_status_response(
-                StatusCode::UNAUTHORIZED,
-                json!({"success": false, "error": "Invalid TCPing agent token"}),
-            )
-        })?;
-    Ok(token.to_string())
+    Err(json_status_response(
+        StatusCode::UNAUTHORIZED,
+        json!({"success": false, "error": "Invalid TCPing agent token"}),
+    ))
 }
 
 async fn load_monitorable_targets_for_agent(
@@ -285,21 +301,9 @@ async fn load_monitorable_node_rows_for_agent(
         return Ok(Vec::new());
     };
 
-    let mut nodes = if user.is_super_admin == 1 {
-        sqlx::query_as::<_, TcpingNodeOverviewRow>(
-            "SELECT id, user_id, name, host, port, protocol, location_name, status,
-                    tcping_enabled, tcping_host, tcping_port, tcping_interval_seconds,
-                    tcping_timeout_ms, tcping_alert_after_seconds, tcping_recover_after_seconds,
-                    tcping_last_status, tcping_last_latency_ms, tcping_last_error, tcping_last_sampled_at
-             FROM server_nodes
-             ORDER BY id DESC"
-        )
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        let mut owned = load_owned_server_nodes(state, user.id).await?
-            .into_iter()
-            .map(|node| TcpingNodeOverviewRow {
+    let mut nodes = load_owned_server_nodes(state, user.id).await?
+        .into_iter()
+        .map(|node| TcpingNodeOverviewRow {
                 id: node.id,
                 user_id: node.user_id,
                 name: node.name,
@@ -320,39 +324,7 @@ async fn load_monitorable_node_rows_for_agent(
                 tcping_last_error: node.tcping_last_error,
                 tcping_last_sampled_at: node.tcping_last_sampled_at,
             })
-            .collect::<Vec<_>>();
-
-        let user_row = UserRow {
-            id: user.id,
-            token: None,
-            group_id: user.group_id,
-            subscribe_key: None,
-            subscribe_salt: None,
-            uuid: None,
-            u: None,
-            d: None,
-            transfer_enable: None,
-            expired_at: user.expired_at,
-            trust_level: Some(user.trust_level),
-            banned: Some(user.banned),
-            is_super_admin: Some(user.is_super_admin),
-            is_silenced: Some(user.is_silenced),
-            subscription_credential_version: None,
-        };
-        let accessible = load_accessible_nodes_for_user_rows(state, &user_row).await?;
-        let accessible_ids = accessible.into_iter().map(|node| node.id).collect::<Vec<_>>();
-        let mut extra = Vec::new();
-        for node_id in accessible_ids {
-            if owned.iter().any(|node| node.id == node_id) {
-                continue;
-            }
-            if let Some(node) = load_tcping_node_overview_row(state, node_id).await? {
-                extra.push(node);
-            }
-        }
-        owned.extend(extra);
-        owned
-    };
+        .collect::<Vec<_>>();
 
     nodes.sort_by(|a, b| b.id.cmp(&a.id));
     nodes.retain(|node| tcping_is_monitorable(node));
@@ -391,21 +363,23 @@ async fn update_tcping_node_state_and_alerts_tx(
                  tcping_recovered_since = COALESCE(tcping_recovered_since, ?),
                  tcping_outage_since = NULL,
                  updated_at = ?
-             WHERE id = ?"
+             WHERE id = ? AND user_id = ?"
         )
         .bind(latency_ms)
         .bind(sampled_at)
         .bind(sampled_at)
         .bind(now)
         .bind(node.id)
+        .bind(node.user_id)
         .execute(&mut **tx)
         .await?;
 
         if let Some(alert) = active_alert {
             let recovered_since: Option<i64> = sqlx::query_scalar(
-                "SELECT tcping_recovered_since FROM server_nodes WHERE id = ? LIMIT 1"
+                "SELECT tcping_recovered_since FROM server_nodes WHERE id = ? AND user_id = ? LIMIT 1"
             )
             .bind(node.id)
+            .bind(node.user_id)
             .fetch_optional(&mut **tx)
             .await?
             .flatten();
@@ -443,13 +417,14 @@ async fn update_tcping_node_state_and_alerts_tx(
                  tcping_recovered_since = NULL,
                  tcping_outage_since = COALESCE(tcping_outage_since, ?),
                  updated_at = ?
-             WHERE id = ?"
+             WHERE id = ? AND user_id = ?"
         )
         .bind(&last_error)
         .bind(sampled_at)
         .bind(sampled_at)
         .bind(now)
         .bind(node.id)
+        .bind(node.user_id)
         .execute(&mut **tx)
         .await?;
 
@@ -462,9 +437,10 @@ async fn update_tcping_node_state_and_alerts_tx(
                 .await?;
         } else {
             let outage_since: Option<i64> = sqlx::query_scalar(
-                "SELECT tcping_outage_since FROM server_nodes WHERE id = ? LIMIT 1"
+                "SELECT tcping_outage_since FROM server_nodes WHERE id = ? AND user_id = ? LIMIT 1"
             )
             .bind(node.id)
+            .bind(node.user_id)
             .fetch_optional(&mut **tx)
             .await?
             .flatten();

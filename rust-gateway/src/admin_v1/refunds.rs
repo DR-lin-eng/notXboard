@@ -141,7 +141,7 @@ async fn build_approve_response(
     let Some(_) = req else {
         return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
     };
-    approve_refund_request_as_admin(state, refund_id, admin.id as u64).await?;
+    approve_refund_request_as_admin(state, refund_id, admin.id as u64, None).await?;
     let _ = notify_refund_status_changed(state, refund_id).await;
     let req = load_refund_request_detail_any(state, refund_id)
         .await
@@ -178,7 +178,7 @@ async fn build_deny_response(
             return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "The reason field must not be greater than 2000 characters."));
         }
     }
-    deny_refund_request_as_admin(state, refund_id, admin.id as u64, reason).await?;
+    deny_refund_request_as_admin(state, refund_id, admin.id as u64, reason, None).await?;
     let _ = notify_refund_status_changed(state, refund_id).await;
     let req = load_refund_request_detail_any(state, refund_id)
         .await

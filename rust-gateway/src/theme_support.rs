@@ -267,11 +267,18 @@ pub(crate) async fn load_theme_config(
     state: &AppState,
     theme: &ThemeDefinition,
 ) -> Map<String, Value> {
+    let setting_key = theme_setting_key(theme.name());
+    let mut setting_names = vec![setting_key.as_str()];
+    if theme.name().eq_ignore_ascii_case(PORTAL_THEME_NAME) {
+        setting_names.extend(PORTAL_LEGACY_KEYS.iter().map(|(key, _)| *key));
+    }
+    let _ = warm_setting_cache(state, &setting_names).await;
+
     let mut merged = theme.default_config_map();
     if theme.name().eq_ignore_ascii_case(PORTAL_THEME_NAME) {
         overlay_portal_legacy_settings(state, &mut merged).await;
     }
-    if let Some(saved) = load_setting_object(state, &theme_setting_key(theme.name())).await {
+    if let Some(saved) = load_setting_object(state, &setting_key).await {
         merge_values(&mut merged, saved);
     }
     merged
@@ -464,17 +471,38 @@ fn theme_source_path(name: &str) -> Option<std::path::PathBuf> {
     if !is_valid_theme_name(name) {
         return None;
     }
+    let system_root = crate::runtime_paths::themes_path("");
     let system_path = crate::runtime_paths::themes_path(name);
-    if system_path.is_dir() {
+    if is_safe_direct_theme_directory(&system_root, &system_path) {
         return Some(system_path);
     }
 
-    let user_path = crate::runtime_paths::state_path(std::path::Path::new("theme").join(name));
-    if user_path.is_dir() {
+    let user_root = crate::runtime_paths::state_path("theme");
+    let user_path = user_root.join(name);
+    if is_safe_direct_theme_directory(&user_root, &user_path) {
         return Some(user_path);
     }
 
     None
+}
+
+fn is_safe_direct_theme_directory(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(candidate) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || candidate.parent() != Some(root) {
+        return false;
+    }
+    let (Ok(root), Ok(candidate)) = (
+        std::fs::canonicalize(root),
+        std::fs::canonicalize(candidate),
+    ) else {
+        return false;
+    };
+    candidate.starts_with(root)
 }
 
 fn theme_asset_path(name: &str, relative_path: &str) -> Option<std::path::PathBuf> {
@@ -577,14 +605,9 @@ async fn load_setting_object(
 }
 
 async fn load_setting_value(state: &AppState, key: &str) -> Option<Value> {
-    let raw = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT value FROM v2_settings WHERE name = ? ORDER BY id DESC LIMIT 1",
-    )
-    .bind(key.to_ascii_lowercase())
-    .fetch_optional(&state.db)
+    let raw = load_cached_setting_value(state, key)
     .await
     .ok()
-    .flatten()
     .flatten();
 
     raw.and_then(|value| parse_setting_value(&value))
@@ -617,6 +640,7 @@ async fn save_setting_value(
         .map_err(internal_error)?;
     }
 
+    invalidate_setting_cache(state, &normalized_key);
     Ok(())
 }
 

@@ -115,7 +115,8 @@ async fn build_redeem_response(
         return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "兑换码长度不能超过32位"));
     }
 
-    let locked = load_gift_card_code_lookup_for_update(state, code).await.map_err(internal_error)?;
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    let locked = load_gift_card_code_lookup_for_update(&mut tx, code).await.map_err(internal_error)?;
     let Some(code_row) = locked else {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "兑换码不存在"));
     };
@@ -135,23 +136,27 @@ async fn build_redeem_response(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
     let now = Utc::now().timestamp();
-    let mut tx = state.db.begin().await.map_err(internal_error)?;
-    let updated_user = apply_gift_card_rewards_tx(&mut tx, state, user.id, &code_row, &actual_rewards, now).await?;
+    let updated_user =
+        apply_gift_card_rewards_tx(&mut tx, state, user.id, &actual_rewards, now).await?;
     let invite_rewards = apply_gift_card_invite_rewards_tx(&mut tx, state, &updated_user, &actual_rewards, now).await?;
 
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE v2_gift_card_code
          SET status = 1, user_id = ?, used_at = ?, usage_count = usage_count + 1, actual_rewards = ?, updated_at = ?
-         WHERE id = ?"
+         WHERE id = ? AND usage_count = ?"
     )
     .bind(user.id)
     .bind(now)
     .bind(actual_rewards.to_string())
     .bind(now)
     .bind(code_row.id)
+    .bind(code_row.usage_count)
     .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        return Ok(fail_json_response(StatusCode::CONFLICT, "兑换码状态已变化，请重试"));
+    }
 
     sqlx::query(
         "INSERT INTO v2_gift_card_usage
@@ -175,6 +180,7 @@ async fn build_redeem_response(
     .await
     .map_err(internal_error)?;
     tx.commit().await.map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     Ok(json_value_response(success_response_payload(json!({
         "message": "兑换成功！",

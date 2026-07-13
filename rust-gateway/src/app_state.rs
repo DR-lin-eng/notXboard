@@ -1,4 +1,5 @@
 use crate::{
+    ExposureConfig,
     legacy_traffic_support::QueuedLegacySubmitJob,
     uniproxy_support::{QueuedAliveSessionJob, QueuedPushTrafficJob},
     uniproxy_user_support::CachedUniProxyUserSnapshot,
@@ -43,6 +44,7 @@ pub(crate) struct AppState {
     pub(crate) redis_cache_db: i64,
     pub(crate) redis_prefix: String,
     pub(crate) cache_prefix: String,
+    pub(crate) exposure: ExposureConfig,
 }
 
 #[derive(Clone)]

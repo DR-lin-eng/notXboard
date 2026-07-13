@@ -30,6 +30,9 @@ pub(crate) struct TicketNodeRow {
     pub(crate) id: u64,
     pub(crate) user_id: i64,
     pub(crate) access_control: Option<SqlxJson<Value>>,
+    pub(crate) status: String,
+    pub(crate) owner_banned: i8,
+    pub(crate) owner_is_super_admin: i8,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -224,9 +227,12 @@ pub(crate) async fn load_ticket_node_by_id(
     node_id: u64,
 ) -> Result<Option<TicketNodeRow>, sqlx::Error> {
     sqlx::query_as::<_, TicketNodeRow>(
-        "SELECT id, user_id, access_control
-         FROM server_nodes
-         WHERE id = ?
+        "SELECT node.id, node.user_id, node.access_control, node.status,
+                owner.banned AS owner_banned,
+                owner.is_super_admin AS owner_is_super_admin
+         FROM server_nodes node
+         JOIN v2_user owner ON owner.id = node.user_id
+         WHERE node.id = ?
          LIMIT 1"
     )
     .bind(node_id)
@@ -239,6 +245,9 @@ pub(crate) async fn user_can_access_ticket_node(
     user: &BearerUserRow,
     node: &TicketNodeRow,
 ) -> Result<bool, sqlx::Error> {
+    if node.status != "active" || node.owner_banned != 0 {
+        return Ok(false);
+    }
     if user.is_super_admin != 0 || node.user_id == user.id {
         return Ok(true);
     }
@@ -267,19 +276,21 @@ pub(crate) async fn user_can_access_ticket_node(
     .bind(user.id)
     .fetch_one(&state.db)
     .await?;
-    if has_individual_access > 0 {
+    if node.owner_is_super_admin != 0 && has_individual_access > 0 {
         return Ok(true);
     }
 
-    if let Some(min_trust_level) = node
+    if node.owner_is_super_admin != 0 {
+        if let Some(min_trust_level) = node
         .access_control
         .as_ref()
         .and_then(|value| value.0.as_object())
         .and_then(|object| object.get("min_trust_level"))
         .and_then(|value| value.as_i64())
-    {
-        if user.trust_level >= min_trust_level {
-            return Ok(true);
+        {
+            if user.trust_level >= min_trust_level {
+                return Ok(true);
+            }
         }
     }
 
@@ -287,12 +298,15 @@ pub(crate) async fn user_can_access_ticket_node(
     let unlimited_allowance = 8_000_000_000_000_000_i64;
     let has_plan_access = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)
-         FROM user_node_plan_access upa
-         JOIN user_plan_subscriptions ups
-           ON ups.user_id = upa.user_id
-          AND ups.plan_id = upa.plan_id
-         WHERE upa.user_id = ?
-           AND upa.node_id = ?
+         FROM user_plan_subscriptions ups
+         JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
+         WHERE ups.user_id = ?
+           AND plan.owner_user_id = ?
+           AND JSON_CONTAINS(
+               COALESCE(plan.node_ids, JSON_ARRAY()),
+               CAST(? AS JSON),
+               '$'
+           )
            AND ups.status = 1
            AND (ups.expired_at IS NULL OR ups.expired_at > ?)
            AND (
@@ -301,6 +315,7 @@ pub(crate) async fn user_can_access_ticket_node(
            )"
     )
     .bind(user.id)
+    .bind(node.user_id)
     .bind(node.id)
     .bind(now)
     .bind(unlimited_allowance)

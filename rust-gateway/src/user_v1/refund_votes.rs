@@ -64,7 +64,7 @@ async fn build_index_response(
     let items = load_voting_refund_requests(state).await.map_err(internal_error)?;
     let data = items
         .iter()
-        .map(serialize_refund_request_summary)
+        .map(serialize_public_refund_vote_summary)
         .collect::<Vec<_>>();
     Ok(success_cached_response(
         state,
@@ -87,7 +87,7 @@ async fn build_detail_response(
         return Ok(response);
     }
 
-    let req = load_refund_request_detail_any(state, refund_id)
+    let req = load_open_voting_refund_request_detail(state, refund_id)
         .await
         .map_err(internal_error)?;
     let Some(req) = req else {
@@ -96,7 +96,12 @@ async fn build_detail_response(
 
     let evidences = load_refund_evidences(state, refund_id).await.map_err(internal_error)?;
     let votes = load_refund_votes(state, refund_id).await.map_err(internal_error)?;
-    let data = serialize_refund_request_detail(&req, &evidences, &votes, Some(user.id as u64));
+    let data = serialize_public_refund_vote_detail(
+        &req,
+        &evidences,
+        &votes,
+        user.id as u64,
+    );
     Ok(success_cached_response(state, cache_key, data, Duration::from_secs(5)))
 }
 
@@ -122,27 +127,12 @@ async fn build_cast_response(
         ));
     }
 
-    let req = load_refund_request_detail_any(state, refund_id)
-        .await
-        .map_err(internal_error)?;
-    let Some(req) = req else {
-        return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
-    };
-    if req.status != "voting" {
-        return Ok(fail_json_response(
-            StatusCode::BAD_REQUEST,
-            "Refund request is not open for voting",
-        ));
-    }
-    if let Some(voting_ends_at) = req.voting_ends_at {
-        if chrono::Utc::now() > voting_ends_at {
-            return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Voting has ended"));
-        }
-    }
     if user.banned != 0 {
         return Ok(fail_json_response(StatusCode::FORBIDDEN, "Permission denied"));
     }
 
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    lock_refund_for_voting(&mut tx, refund_id).await?;
     sqlx::query(
         "INSERT INTO order_refund_votes (refund_request_id, user_id, vote, created_at, updated_at)
          VALUES (?, ?, ?, NOW(), NOW())
@@ -151,9 +141,10 @@ async fn build_cast_response(
     .bind(refund_id)
     .bind(user.id as u64)
     .bind(vote)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    tx.commit().await.map_err(internal_error)?;
 
     if let Err(err) = notify_refund_vote_cast(state, refund_id, user.id as u64, vote).await {
         tracing::warn!(
@@ -196,27 +187,12 @@ async fn build_evidence_response(
         ));
     }
 
-    let req = load_refund_request_detail_any(state, refund_id)
-        .await
-        .map_err(internal_error)?;
-    let Some(req) = req else {
-        return Ok(fail_json_response(StatusCode::NOT_FOUND, "Refund request not found"));
-    };
-    if req.status != "voting" {
-        return Ok(fail_json_response(
-            StatusCode::BAD_REQUEST,
-            "Refund request is not open for voting",
-        ));
-    }
-    if let Some(voting_ends_at) = req.voting_ends_at {
-        if chrono::Utc::now() > voting_ends_at {
-            return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Voting has ended"));
-        }
-    }
     if user.banned != 0 {
         return Ok(fail_json_response(StatusCode::FORBIDDEN, "Permission denied"));
     }
 
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    lock_refund_for_voting(&mut tx, refund_id).await?;
     sqlx::query(
         "INSERT INTO order_refund_evidences
             (refund_request_id, user_id, role, content, created_at, updated_at)
@@ -225,11 +201,49 @@ async fn build_evidence_response(
     .bind(refund_id)
     .bind(user.id as u64)
     .bind(content)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    tx.commit().await.map_err(internal_error)?;
 
     Ok(json_value_response(success_response_payload(Value::Bool(true))))
+}
+
+async fn lock_refund_for_voting(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    refund_id: u64,
+) -> Result<(), Response<Body>> {
+    let row = sqlx::query(
+        "SELECT status, voting_ends_at
+         FROM order_refund_requests
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(refund_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal_error)?;
+    let Some(row) = row else {
+        return Err(fail_json_response(
+            StatusCode::NOT_FOUND,
+            "Refund request not found",
+        ));
+    };
+    let status = row.try_get::<String, _>("status").unwrap_or_default();
+    if status != "voting" {
+        return Err(fail_json_response(
+            StatusCode::BAD_REQUEST,
+            "Refund request is not open for voting",
+        ));
+    }
+    let voting_ends_at = row
+        .try_get::<Option<chrono::DateTime<Utc>>, _>("voting_ends_at")
+        .unwrap_or(None);
+    if voting_ends_at.is_some_and(|deadline| deadline <= Utc::now()) {
+        return Err(fail_json_response(StatusCode::BAD_REQUEST, "Voting has ended"));
+    }
+    Ok(())
 }
 
 async fn ensure_refund_dispute_enabled(state: &AppState) -> Result<(), Response<Body>> {

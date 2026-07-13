@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'EOF'
@@ -105,9 +106,18 @@ if [ "${#ADMIN_PASSWORD}" -lt 8 ]; then
   exit 1
 fi
 
-if [ ! -f "$ENV_FILE" ] && [ -f ".env.example" ]; then
-  cp .env.example "$ENV_FILE"
+if [ -L "$ENV_FILE" ]; then
+  echo "env file must not be a symbolic link: $ENV_FILE"
+  exit 1
 fi
+if [ -e "$ENV_FILE" ] && [ ! -f "$ENV_FILE" ]; then
+  echo "env file path must be a regular file: $ENV_FILE"
+  exit 1
+fi
+if [ ! -f "$ENV_FILE" ] && [ -f ".env.example" ]; then
+  cp -- .env.example "$ENV_FILE"
+fi
+chmod 0600 "$ENV_FILE"
 
 if [ -z "$APP_URL" ]; then
   APP_URL="http://127.0.0.1:${APP_PORT}"

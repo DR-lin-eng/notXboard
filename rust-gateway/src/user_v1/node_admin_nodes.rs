@@ -1,5 +1,12 @@
 use crate::*;
 
+fn node_not_found_response() -> Response<Body> {
+    json_status_response(
+        StatusCode::NOT_FOUND,
+        json!({"success": false, "error": "Server node not found"}),
+    )
+}
+
 pub async fn users_traffic(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<u64>,
@@ -47,10 +54,7 @@ async fn build_users_traffic_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
 
     let params = parse_query(&uri);
@@ -115,10 +119,7 @@ async fn build_blacklist_user_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
 
     let payload = parse_json_body(body).await?;
@@ -145,17 +146,54 @@ async fn build_blacklist_user_response(
         })));
     }
 
-    sqlx::query(
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+
+    let inserted = sqlx::query(
         "INSERT INTO user_node_blacklist (node_id, user_id, reason, created_at)
-         VALUES (?, ?, ?, NOW())
+         SELECT node_row.id, ?, ?, NOW()
+         FROM server_nodes node_row
+         WHERE node_row.id = ? AND node_row.user_id = ?
          ON DUPLICATE KEY UPDATE reason = VALUES(reason)"
     )
-    .bind(node.id)
     .bind(target_user_id)
     .bind(reason)
-    .execute(&state.db)
+    .bind(node.id)
+    .bind(user.id)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if inserted.rows_affected() == 0 {
+        let persisted = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM user_node_blacklist blacklist_row
+             JOIN server_nodes node_row ON node_row.id = blacklist_row.node_id
+             WHERE blacklist_row.node_id = ?
+               AND blacklist_row.user_id = ?
+               AND node_row.user_id = ?",
+        )
+        .bind(node.id)
+        .bind(target_user_id)
+        .bind(user.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+        if persisted != 1 {
+            tx.rollback().await.ok();
+            return Ok(node_not_found_response());
+        }
+    }
+    tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node.id);
 
     Ok(json_value_response(json!({ "success": true })))
@@ -171,10 +209,7 @@ async fn build_unblacklist_user_response(
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_node_admin_node(state, node_id, user.id).await.map_err(internal_error)?;
     let Some(node) = node else {
-        return Ok(json_value_response(json!({
-            "success": false,
-            "error": "Server node not found"
-        })));
+        return Ok(node_not_found_response());
     };
 
     let payload = parse_json_body(body).await?;
@@ -184,12 +219,41 @@ async fn build_unblacklist_user_response(
         .filter(|value| *value > 0)
         .ok_or_else(|| fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "The user_id field is required."))?;
 
-    sqlx::query("DELETE FROM user_node_blacklist WHERE node_id = ? AND user_id = ?")
-        .bind(node.id)
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !crate::user_v1::server_nodes::lock_owned_server_node_for_update(
+        &mut tx,
+        node.id,
+        user.id,
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(node_not_found_response());
+    }
+
+    let deleted = sqlx::query(
+        "DELETE blacklist_row
+         FROM user_node_blacklist blacklist_row
+         JOIN server_nodes node_row ON node_row.id = blacklist_row.node_id
+         WHERE blacklist_row.node_id = ?
+           AND blacklist_row.user_id = ?
+           AND node_row.user_id = ?",
+    )
+    .bind(node.id)
     .bind(target_user_id)
-    .execute(&state.db)
+    .bind(user.id)
+    .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if deleted.rows_affected() > 1 {
+        tx.rollback().await.ok();
+        return Err(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unexpected blacklist delete result",
+        ));
+    }
+    tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node.id);
 
     Ok(json_value_response(json!({ "success": true })))

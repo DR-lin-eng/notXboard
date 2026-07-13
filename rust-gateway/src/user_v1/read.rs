@@ -189,7 +189,7 @@ async fn build_me_response(
     Ok(success_cached_response(state, cache_key, json!({
         "id": user.id,
         "email": user.email,
-        "is_admin": user.is_admin != 0,
+        "is_admin": account_has_role(user.is_admin, user.is_super_admin, RequiredAccountRole::Admin),
         "is_super_admin": user.is_super_admin != 0,
         "trust_level": user.trust_level,
         "is_silenced": user.is_silenced != 0,
@@ -200,7 +200,7 @@ async fn build_me_response(
         "api_key": user.api_key,
         "concurrent_ip_limit": if user.concurrent_ip_limit > 0 { user.concurrent_ip_limit } else { 3 },
         "refund_dispute_enable": get_setting_bool(state, "refund_dispute_enable", false).await,
-        "secure_path": if user.is_admin != 0 {
+        "secure_path": if account_has_role(user.is_admin, user.is_super_admin, RequiredAccountRole::Admin) {
             Some(get_setting_string(state, "secure_path", &get_setting_string(state, "frontend_admin_path", "").await).await)
         } else {
             None
@@ -284,12 +284,16 @@ async fn build_telegram_get_bot_info_response(
     headers: HeaderMap,
     _uri: Uri,
 ) -> Result<Response<Body>, Response<Body>> {
-    let _user = authenticate_bearer_user(state, &headers).await?;
-    let _ = state;
-    let bot_token = env::var("TELEGRAM_BOT_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_default();
+    let user = authenticate_bearer_user(state, &headers).await?;
+    let configured_bot_token = get_setting_string(state, "telegram_bot_token", "").await;
+    let bot_token = if configured_bot_token.trim().is_empty() {
+        env::var("TELEGRAM_BOT_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_default()
+    } else {
+        configured_bot_token
+    };
     if bot_token.trim().is_empty() {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "telegram bot is not configured"));
     }
@@ -330,7 +334,24 @@ async fn build_telegram_get_bot_info_response(
         .map(|value| value.to_string())
         .ok_or_else(|| fail_json_response(StatusCode::BAD_GATEWAY, "telegram response invalid"))?;
 
-    Ok(json_value_response(success_response_payload(json!({ "username": username }))))
+    let bind_code = Uuid::new_v4().simple().to_string();
+    let cache_key = format!("TELEGRAM_BIND_{}", sha256_hex(&bind_code));
+    redis_setex_string(state, &cache_key, 600, &user.id.to_string())
+        .await
+        .map_err(|err| {
+            error!("telegram bind code cache write failed: {err}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "telegram bind code unavailable",
+            )
+        })?;
+
+    Ok(json_value_response(success_response_payload(json!({
+        "username": username,
+        "bind_code": bind_code,
+        "bind_command": format!("/bind {bind_code}"),
+        "bind_expires_in": 600,
+    }))))
 }
 
 async fn build_knowledge_fetch_response(
@@ -427,6 +448,7 @@ async fn build_knowledge_get_category_response(
     let rows = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT category
          FROM v2_knowledge
+         WHERE `show` = 1
          ORDER BY category ASC"
     )
     .fetch_all(&state.db)
@@ -527,7 +549,7 @@ async fn build_check_login_response(
         return Ok(response);
     }
     let mut data = json!({ "is_login": true });
-    if user.is_admin != 0 {
+    if account_has_role(user.is_admin, user.is_super_admin, RequiredAccountRole::Admin) {
         data["is_admin"] = Value::Bool(true);
     }
     Ok(success_cached_response(state, cache_key, data, Duration::from_secs(5)))

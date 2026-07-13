@@ -1,11 +1,5 @@
 use crate::*;
 
-pub(crate) fn ensure_http_checkout_url(value: &str) -> Result<(), Response<Body>> {
-    crate::url_security_support::normalize_http_url(value, false)
-        .map(|_| ())
-        .map_err(|_| fail_json_response(StatusCode::BAD_REQUEST, "Invalid payment gateway URL"))
-}
-
 pub(crate) fn build_epay_auto_post_form(
     submit_url: &str,
     params: &serde_json::Map<String, Value>,

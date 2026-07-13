@@ -254,8 +254,24 @@ async fn build_save_response(
                 return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
             }
         }
+        if key == "secure_path" {
+            let path = value.as_str().unwrap_or_default();
+            if !is_valid_secure_admin_path(path) {
+                return Ok(fail_json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "secure_path must be an 8-64 character URL-safe segment",
+                ));
+            }
+        }
         let serialized = serialize_setting_value(value);
         updates.push((key.clone(), serialized));
+    }
+
+    if let Some(path) = obj.get("secure_path").and_then(Value::as_str) {
+        updates.push((
+            "frontend_admin_path".to_string(),
+            serialize_setting_value(&Value::String(path.to_string())),
+        ));
     }
 
     if !obj.contains_key("register_mode") && obj.contains_key("stop_register") {
@@ -313,6 +329,7 @@ async fn build_save_response(
 }
 
 async fn load_config_mappings(state: &AppState) -> Map<String, Value> {
+    let _ = warm_all_settings_cache(state).await;
     let register_mode = config_value_string(state, "register_mode", "email_password").await;
     let app_url = first_non_empty(&[
         config_value_string(state, "app_url", &std::env::var("APP_URL").unwrap_or_default()).await,
@@ -478,12 +495,9 @@ async fn load_config_mappings(state: &AppState) -> Map<String, Value> {
 }
 
 async fn config_optional_value(state: &AppState, key: &str) -> Value {
-    sqlx::query_scalar::<_, Option<String>>("SELECT value FROM v2_settings WHERE name = ? LIMIT 1")
-        .bind(key)
-        .fetch_optional(&state.db)
+    load_cached_setting_value(state, key)
         .await
         .ok()
-        .flatten()
         .flatten()
         .and_then(|value| parse_setting_json_value(&value))
         .unwrap_or(Value::Null)

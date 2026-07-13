@@ -1,5 +1,4 @@
 use crate::*;
-use sqlx::{MySql, QueryBuilder};
 
 #[derive(Clone, sqlx::FromRow)]
 struct AccessUserRow {
@@ -56,65 +55,6 @@ where
         }
     }
     normalized
-}
-
-pub(crate) async fn replace_individual_node_access_with_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
-    node_id: u64,
-    user_ids: &[i64],
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM user_node_access WHERE node_id = ?")
-        .bind(node_id)
-        .execute(&mut **tx)
-        .await?;
-
-    let user_ids = distinct_positive_user_ids(user_ids.iter().copied());
-    if user_ids.is_empty() {
-        return Ok(());
-    }
-
-    let mut builder = QueryBuilder::<MySql>::new(
-        "INSERT INTO user_node_access (user_id, node_id, access_type) ",
-    );
-    builder.push_values(user_ids, |mut row, user_id| {
-        row.push_bind(user_id)
-            .push_bind(node_id)
-            .push_bind("individual");
-    });
-    builder.build().execute(&mut **tx).await?;
-    Ok(())
-}
-
-pub(crate) async fn upsert_individual_node_access(
-    state: &AppState,
-    node_id: u64,
-    user_id: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO user_node_access (user_id, node_id, access_type)
-         VALUES (?, ?, 'individual')
-         ON DUPLICATE KEY UPDATE
-           access_type = VALUES(access_type),
-           granted_at = CURRENT_TIMESTAMP",
-    )
-    .bind(user_id)
-    .bind(node_id)
-    .execute(&state.db)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn revoke_individual_node_access(
-    state: &AppState,
-    node_id: u64,
-    user_id: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM user_node_access WHERE node_id = ? AND user_id = ?")
-        .bind(node_id)
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
-    Ok(())
 }
 
 async fn load_access_user_row(
@@ -221,27 +161,33 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
     sqlx::query_as::<_, AccessibleNodeRow>(
-        "SELECT DISTINCT sn.id, sn.user_id, sn.name, sn.protocol, sn.location_name, sn.status,
+        "SELECT DISTINCT sn.id, CAST(sn.user_id AS SIGNED) AS user_id, sn.name, sn.protocol, sn.location_name, sn.status,
                 sn.traffic_limit, sn.traffic_used, CAST(sn.traffic_multiplier AS CHAR) AS traffic_multiplier,
                 sn.tcping_enabled, sn.tcping_last_status, sn.tcping_last_latency_ms, sn.tcping_last_sampled_at,
                 owner.email AS owner_email
          FROM server_nodes sn
-         LEFT JOIN v2_user owner ON owner.id = sn.user_id
+         JOIN v2_user owner ON owner.id = sn.user_id
          WHERE sn.status = 'active'
+           AND owner.banned = 0
            AND (
              sn.user_id = ?
              OR EXISTS (
                SELECT 1 FROM user_node_access ua
-               WHERE ua.node_id = sn.id AND ua.user_id = ?
+               WHERE ua.node_id = sn.id
+                 AND ua.user_id = ?
+                 AND owner.is_super_admin = 1
              )
              OR EXISTS (
                SELECT 1
-               FROM user_node_plan_access upa
-               JOIN user_plan_subscriptions ups
-                 ON ups.user_id = upa.user_id
-                AND ups.plan_id = upa.plan_id
-               WHERE upa.user_id = ?
-                 AND upa.node_id = sn.id
+               FROM user_plan_subscriptions ups
+               JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
+               WHERE ups.user_id = ?
+                 AND plan.owner_user_id = sn.user_id
+                 AND JSON_CONTAINS(
+                     COALESCE(plan.node_ids, JSON_ARRAY()),
+                     CAST(sn.id AS JSON),
+                     '$'
+                 )
                  AND ups.status = 1
                  AND (ups.expired_at IS NULL OR ups.expired_at > ?)
                  AND (
@@ -250,7 +196,8 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
                  )
              )
              OR (
-               JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
+               owner.is_super_admin = 1
+               AND JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(sn.access_control, '$.min_trust_level')) AS SIGNED) <= ?
              )
            )
@@ -295,31 +242,44 @@ async fn query_accessible_user_ids_for_node(
     limit: Option<i64>,
     candidate_user_ids: Option<&[i64]>,
 ) -> Result<Vec<i64>, sqlx::Error> {
-    let min_trust_level = node
-        .access_control
-        .as_ref()
-        .and_then(|json| json.0.get("min_trust_level"))
-        .and_then(|v| v.as_i64());
+    let owner_can_publish_by_trust = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM v2_user WHERE id = ? AND is_super_admin = 1 AND banned = 0",
+    )
+    .bind(node.user_id)
+    .fetch_one(&state.db)
+    .await?
+        == 1;
+    let min_trust_level = owner_can_publish_by_trust
+        .then(|| {
+            node.access_control
+                .as_ref()
+                .and_then(|json| json.0.get("min_trust_level"))
+                .and_then(Value::as_i64)
+        })
+        .flatten();
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
 
-    let mut candidate_sql = String::from(
-        "SELECT ? AS user_id
-         UNION
-         SELECT id AS user_id
-         FROM v2_user
-         WHERE is_super_admin = 1
-         UNION
-         SELECT user_id
-         FROM user_node_access
-         WHERE node_id = ?
-         UNION
-         SELECT upa.user_id
-         FROM user_node_plan_access upa
-         JOIN user_plan_subscriptions ups
-           ON ups.user_id = upa.user_id
-          AND ups.plan_id = upa.plan_id
-         WHERE upa.node_id = ?
+    let mut candidate_sql = String::from("SELECT ? AS user_id");
+    if owner_can_publish_by_trust {
+        candidate_sql.push_str(
+            " UNION
+              SELECT user_id
+              FROM user_node_access
+              WHERE node_id = ?",
+        );
+    }
+    candidate_sql.push_str(
+        " UNION
+         SELECT ups.user_id
+         FROM user_plan_subscriptions ups
+         JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
+         WHERE plan.owner_user_id = ?
+           AND JSON_CONTAINS(
+                   COALESCE(plan.node_ids, JSON_ARRAY()),
+                   CAST(? AS JSON),
+                   '$'
+               )
            AND ups.status = 1
            AND (ups.expired_at IS NULL OR ups.expired_at > ?)
            AND (
@@ -348,12 +308,10 @@ async fn query_accessible_user_ids_for_node(
          WHERE u.banned = 0
            AND (
              u.id = ?
-             OR COALESCE(u.is_super_admin, 0) = 1
              OR (u.expired_at IS NULL OR u.expired_at >= ?)
            )
            AND (
              u.id = ?
-             OR COALESCE(u.is_super_admin, 0) = 1
              OR NOT EXISTS (
                SELECT 1 FROM user_node_blacklist ub
                WHERE ub.node_id = ? AND ub.user_id = u.id
@@ -374,9 +332,12 @@ async fn query_accessible_user_ids_for_node(
         sql.push_str(" LIMIT ?");
     }
 
-    let mut query = sqlx::query_scalar::<_, i64>(&sql)
+    let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(node.user_id);
+    if owner_can_publish_by_trust {
+        query = query.bind(node.id);
+    }
+    query = query
         .bind(node.user_id)
-        .bind(node.id)
         .bind(node.id)
         .bind(now)
         .bind(unlimited_allowance);
@@ -499,6 +460,14 @@ pub(crate) async fn user_can_access_tcping_node(
 
 pub(crate) fn clear_accessible_user_ids_cache(state: &AppState, node_id: u64) {
     state.node_accessible_user_ids_cache.write().remove(&node_id);
+    state.uniproxy_user_snapshot_cache.write().clear();
+    state.response_cache.write().clear();
+}
+
+pub(crate) fn clear_all_authorization_caches(state: &AppState) {
+    state.node_accessible_user_ids_cache.write().clear();
+    state.uniproxy_user_snapshot_cache.write().clear();
+    state.response_cache.write().clear();
 }
 
 fn cached_accessible_user_ids_for_node(state: &AppState, node_id: u64) -> Option<Vec<i64>> {
@@ -540,4 +509,21 @@ fn node_access_cache_ttl() -> Duration {
         .map(|value| value.clamp(1, 30))
         .unwrap_or(3);
     Duration::from_secs(seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_node_plan_authorization_path_binds_plan_owner_to_node_owner() {
+        let access = include_str!("access_control_support.rs");
+        assert!(access.contains("CAST(sn.user_id AS SIGNED) AS user_id"));
+        assert!(access.contains("plan.owner_user_id = sn.user_id"));
+        assert!(access.contains("WHERE plan.owner_user_id = ?"));
+        assert!(include_str!("main.rs").contains("plan.owner_user_id = sn.user_id"));
+        assert!(include_str!("tickets_support.rs").contains("AND plan.owner_user_id = ?"));
+        assert!(
+            include_str!("traffic_ingest_support.rs")
+                .contains("node.user_id = plan.owner_user_id")
+        );
+    }
 }

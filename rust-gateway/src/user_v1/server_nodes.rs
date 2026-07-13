@@ -112,7 +112,19 @@ pub async fn deploy_command(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response<Body> {
-    match build_deploy_command_response(&state, id, headers, uri).await {
+    match build_deploy_command_response(&state, id, headers, uri, false).await {
+        Ok(response) => response,
+        Err(response) => response,
+    }
+}
+
+pub async fn rotate_deploy_token(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response<Body> {
+    match build_deploy_command_response(&state, id, headers, uri, true).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -190,7 +202,12 @@ async fn build_store_response(
 ) -> Result<Response<Body>, Response<Body>> {
     let user = authenticate_bearer_user(state, &headers).await?;
     let payload = parse_json_body(body).await?;
-    let mut input = parse_server_node_mutation_input(&payload, None, user.is_super_admin == 1)?;
+    let mut input = parse_server_node_mutation_input(
+        &payload,
+        None,
+        user.is_super_admin == 1,
+        user.is_super_admin == 1,
+    )?;
     input.user_id = Some(user.id);
     input.status = Some("inactive".to_string());
     input.traffic_used = Some(0);
@@ -251,9 +268,21 @@ async fn build_store_response(
 
     let node_id = result.last_insert_id();
     if let Some(access) = input.access_control {
-        apply_server_node_access_control_with_tx(&mut tx, node_id, &access)
-            .await
-            .map_err(internal_error)?;
+        if !apply_owned_server_node_access_control_with_tx(
+            &mut tx,
+            node_id,
+            user.id,
+            &access,
+        )
+        .await
+        .map_err(internal_error)?
+        {
+            tx.rollback().await.ok();
+            return Ok(json_status_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "message": "Server node could not be created" }),
+            ));
+        }
     }
     tx.commit().await.map_err(internal_error)?;
     clear_accessible_user_ids_cache(state, node_id);
@@ -326,10 +355,26 @@ async fn build_update_response(
     };
 
     let payload = parse_json_body(body).await?;
-    let input = parse_server_node_mutation_input(&payload, Some(&existing), user.is_super_admin == 1)?;
+    let input = parse_server_node_mutation_input(
+        &payload,
+        Some(&existing),
+        user.is_super_admin == 1,
+        user.is_super_admin == 1,
+    )?;
 
     let mut tx = state.db.begin().await.map_err(internal_error)?;
-    sqlx::query(
+    if !lock_owned_server_node_for_update(&mut tx, existing.id, user.id)
+        .await
+        .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({ "message": "Server node not found" }),
+        ));
+    }
+
+    let updated = sqlx::query(
         "UPDATE server_nodes
          SET name = ?, host = ?, port = ?, service_port = ?, protocol = ?, location_code = ?, location_name = ?,
              settings = ?, traffic_limit = ?, traffic_multiplier = ?, device_limit = ?, connection_limit = ?,
@@ -365,18 +410,64 @@ async fn build_update_response(
     .execute(&mut *tx)
     .await
     .map_err(internal_error)?;
+    if !owner_scoped_server_node_write_matched(
+        &mut tx,
+        existing.id,
+        user.id,
+        updated.rows_affected(),
+    )
+    .await
+    .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({ "message": "Server node not found" }),
+        ));
+    }
 
     if let Some(access) = input.access_control {
-        sqlx::query("UPDATE server_nodes SET access_control = ?, updated_at = NOW() WHERE id = ? AND user_id = ?")
-            .bind(Value::Object(access.clone()).to_string())
-            .bind(existing.id)
-            .bind(user.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal_error)?;
-        apply_server_node_access_control_with_tx(&mut tx, existing.id, &access)
-            .await
-            .map_err(internal_error)?;
+        let access_updated = sqlx::query(
+            "UPDATE server_nodes
+             SET access_control = ?, updated_at = NOW()
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(Value::Object(access.clone()).to_string())
+        .bind(existing.id)
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal_error)?;
+        if !owner_scoped_server_node_write_matched(
+            &mut tx,
+            existing.id,
+            user.id,
+            access_updated.rows_affected(),
+        )
+        .await
+        .map_err(internal_error)?
+        {
+            tx.rollback().await.ok();
+            return Ok(json_status_response(
+                StatusCode::NOT_FOUND,
+                json!({ "message": "Server node not found" }),
+            ));
+        }
+        if !apply_owned_server_node_access_control_with_tx(
+            &mut tx,
+            existing.id,
+            user.id,
+            &access,
+        )
+        .await
+        .map_err(internal_error)?
+        {
+            tx.rollback().await.ok();
+            return Ok(json_status_response(
+                StatusCode::NOT_FOUND,
+                json!({ "message": "Server node not found" }),
+            ));
+        }
     }
 
     tx.commit().await.map_err(internal_error)?;
@@ -514,6 +605,7 @@ async fn build_deploy_command_response(
     node_id: u64,
     headers: HeaderMap,
     _uri: Uri,
+    rotate_token: bool,
 ) -> Result<Response<Body>, Response<Body>> {
     let user = authenticate_bearer_user(state, &headers).await?;
     let node = load_owned_server_node(state, node_id, user.id)
@@ -537,19 +629,95 @@ async fn build_deploy_command_response(
         ));
     }
 
-    let token = ensure_user_api_key(state, &user).await.map_err(internal_error)?;
-    if node.v2bx_token.as_deref() != Some(token.as_str()) {
-        sqlx::query("UPDATE server_nodes SET v2bx_token = ?, updated_at = NOW() WHERE id = ? AND user_id = ?")
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    if !lock_owned_server_node_for_update(&mut tx, node.id, user.id)
+        .await
+        .map_err(internal_error)?
+    {
+        tx.rollback().await.ok();
+        return Ok(json_status_response(
+            StatusCode::NOT_FOUND,
+            json!({ "message": "Server node not found" }),
+        ));
+    }
+    let current_token = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT v2bx_token FROM server_nodes WHERE id = ? AND user_id = ? LIMIT 1",
+    )
+    .bind(node.id)
+    .bind(user.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+
+    let token_is_reused = if let Some(existing_token) = current_token.as_deref() {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM server_nodes WHERE v2bx_token = ?",
+        )
+        .bind(existing_token)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal_error)?
+            > 1
+    } else {
+        false
+    };
+    let user_api_key = user.api_key.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let token_uses_user_credential = current_token
+        .as_deref()
+        .is_some_and(|token| user_api_key == Some(token));
+    let token = if rotate_token
+        || current_token.as_deref().map_or(true, str::is_empty)
+        || !current_token
+            .as_deref()
+            .is_some_and(crate::machine_bootstrap_support::is_strong_machine_token)
+        || token_is_reused
+        || token_uses_user_credential
+    {
+        format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+    } else {
+        current_token.clone().unwrap_or_default()
+    };
+    let token_changed = current_token.as_deref() != Some(token.as_str());
+    if token_changed {
+        let updated = sqlx::query(
+            "UPDATE server_nodes
+             SET v2bx_token = ?, updated_at = NOW()
+             WHERE id = ? AND user_id = ?",
+        )
             .bind(&token)
             .bind(node.id)
             .bind(user.id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await
             .map_err(internal_error)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.ok();
+            return Ok(json_status_response(
+                StatusCode::NOT_FOUND,
+                json!({ "message": "Server node not found" }),
+            ));
+        }
     }
+    tx.commit().await.map_err(internal_error)?;
 
-    let panel_url = resolve_panel_base_url(state).await;
-    let script_url = format!("{}/v2bx-install.sh?v=rust", panel_url.trim_end_matches('/'));
+    let bootstrap = crate::machine_bootstrap_support::issue_machine_bootstrap_ticket(
+        state,
+        "v2bx",
+        user.id,
+        node.id,
+        &token,
+    )
+    .await
+    .map_err(|err| {
+        error!("v2bx bootstrap ticket creation failed: {err}");
+        json_error(StatusCode::SERVICE_UNAVAILABLE, "Installer bootstrap unavailable")
+    })?;
+    let panel_url = resolve_installer_panel_base_url(state).await?;
+    let script_url = format!(
+        "{}/v2bx-install.sh?{}",
+        panel_url.trim_end_matches('/'),
+        bootstrap.query,
+    );
     let node_id_value = node.v2bx_node_id.unwrap_or(node.id as i64);
     let cert_domain = node.host.trim().to_string();
     let auto_cert_mode = server_node_prefers_auto_cert(&node_type);
@@ -561,16 +729,22 @@ async fn build_deploy_command_response(
         .map(ToString::to_string);
 
     let mut command = format!(
-        "curl -fsSL '{}' | bash -s -- --panel '{}' --node-id '{}' --node-type '{}' --token '{}'",
-        script_url, panel_url, node_id_value, node_type, token
+        "{} {} | bash -s -- --panel {} --node-id {} --node-type {} --bootstrap-token {} --bootstrap-query {}",
+        installer_curl_command_prefix(&panel_url),
+        posix_shell_arg(&script_url),
+        posix_shell_arg(&panel_url),
+        posix_shell_arg(&node_id_value.to_string()),
+        posix_shell_arg(&node_type),
+        posix_shell_arg(&bootstrap.ticket),
+        posix_shell_arg(&bootstrap.query),
     );
     if let Some(core) = &core {
-        command.push_str(&format!(" --core '{}'", core));
+        command.push_str(&format!(" --core {}", posix_shell_arg(core)));
     }
     if auto_cert_mode {
         command.push_str(" --cert-mode self");
         if !cert_domain.is_empty() {
-            command.push_str(&format!(" --cert-domain '{}'", cert_domain));
+            command.push_str(&format!(" --cert-domain {}", posix_shell_arg(&cert_domain)));
         }
     }
 
@@ -581,10 +755,131 @@ async fn build_deploy_command_response(
             "panel_url": panel_url,
             "node_id": node_id_value,
             "node_type": node_type,
-            "token": token,
+            "bootstrap_expires_in": bootstrap.expires_in,
+            "token_rotated": token_changed,
             "core": core,
             "cert_mode": if auto_cert_mode { Value::String("self".to_string()) } else { Value::Null },
             "cert_domain": if auto_cert_mode && !cert_domain.is_empty() { Value::String(cert_domain) } else { Value::Null },
         }
     })))
+}
+
+pub(crate) async fn lock_owned_server_node_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let locked = sqlx::query_scalar::<_, u64>(
+        "SELECT id
+         FROM server_nodes
+         WHERE id = ? AND user_id = ?
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(node_id)
+    .bind(owner_user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(locked.is_some())
+}
+
+pub(crate) async fn owner_scoped_server_node_write_matched(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+    rows_affected: u64,
+) -> Result<bool, sqlx::Error> {
+    if rows_affected == 1 {
+        return Ok(true);
+    }
+    if rows_affected > 1 {
+        return Ok(false);
+    }
+
+    let matched = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM server_nodes
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(node_id)
+    .bind(owner_user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(matched == 1)
+}
+
+pub(crate) async fn replace_owned_individual_node_access_with_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+    user_ids: &[i64],
+) -> Result<bool, sqlx::Error> {
+    if !lock_owned_server_node_for_update(tx, node_id, owner_user_id).await? {
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "DELETE grant_row
+         FROM user_node_access grant_row
+         JOIN server_nodes node_row ON node_row.id = grant_row.node_id
+         WHERE grant_row.node_id = ? AND node_row.user_id = ?",
+    )
+    .bind(node_id)
+    .bind(owner_user_id)
+    .execute(&mut **tx)
+    .await?;
+
+    for user_id in distinct_positive_user_ids(user_ids.iter().copied()) {
+        let inserted = sqlx::query(
+            "INSERT INTO user_node_access (user_id, node_id, access_type, granted_at)
+             SELECT ?, node_row.id, 'individual', CURRENT_TIMESTAMP
+             FROM server_nodes node_row
+             WHERE node_row.id = ? AND node_row.user_id = ?
+             ON DUPLICATE KEY UPDATE
+               access_type = VALUES(access_type),
+               granted_at = CURRENT_TIMESTAMP",
+        )
+        .bind(user_id)
+        .bind(node_id)
+        .bind(owner_user_id)
+        .execute(&mut **tx)
+        .await?;
+        // MySQL reports 2 for an existing row whose duplicate-key update changed data.
+        if inserted.rows_affected() > 2 {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+async fn apply_owned_server_node_access_control_with_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    node_id: u64,
+    owner_user_id: i64,
+    access: &Map<String, Value>,
+) -> Result<bool, sqlx::Error> {
+    let Some(authorized_users) = access.get("authorized_users").and_then(Value::as_array) else {
+        return Ok(true);
+    };
+    let user_ids = distinct_positive_user_ids(authorized_users.iter().filter_map(parse_i64_value));
+    replace_owned_individual_node_access_with_tx(tx, node_id, owner_user_id, &user_ids).await
+}
+
+pub(crate) fn posix_shell_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod deploy_command_tests {
+    use super::posix_shell_arg;
+
+    #[test]
+    fn posix_shell_argument_keeps_single_quotes_inside_one_argument() {
+        assert_eq!(posix_shell_arg("plain"), "'plain'");
+        assert_eq!(
+            posix_shell_arg("host'; touch /tmp/injected; echo '"),
+            "'host'\"'\"'; touch /tmp/injected; echo '\"'\"''",
+        );
+    }
 }

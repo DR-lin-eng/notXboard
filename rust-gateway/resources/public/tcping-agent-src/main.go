@@ -22,6 +22,33 @@ import (
 
 var agentVersion = "dev"
 
+var blockedProbeNetworks = mustParseProbeNetworks([]string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.88.99.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"64:ff9b::/96",
+	"64:ff9b:1::/48",
+	"2001::/23",
+	"2001:db8::/32",
+	"2002::/16",
+	"fc00::/7",
+	"fe80::/10",
+	"fec0::/10",
+	"ff00::/8",
+})
+
 type configResponse struct {
 	Success bool        `json:"success"`
 	Data    agentConfig `json:"data"`
@@ -222,8 +249,8 @@ type runner struct {
 	heartbeatGap time.Duration
 	configGap    time.Duration
 
-	mu        sync.Mutex
-	queue     []sample
+	mu         sync.Mutex
+	queue      []sample
 	targets    map[int64]target
 	nextProbe  map[int64]time.Time
 	isRunning  map[int64]bool
@@ -427,11 +454,19 @@ func (r *runner) requeue(items []sample) {
 
 func probeTarget(ctx context.Context, item target) sample {
 	timeout := time.Duration(normalizeInt(item.TimeoutMS, 3000, 500, 60000)) * time.Millisecond
-	address := net.JoinHostPort(strings.TrimSpace(item.Host), fmt.Sprintf("%d", item.Port))
 	started := time.Now()
 
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	address, err := resolvePublicProbeAddress(dialCtx, item.Host, item.Port)
+	if err != nil {
+		return sample{
+			NodeID:      item.NodeID,
+			IsReachable: false,
+			Error:       truncateError(err),
+			SampledAt:   time.Now().Unix(),
+		}
+	}
 
 	dialer := &net.Dialer{}
 	conn, err := dialer.DialContext(dialCtx, "tcp", address)
@@ -458,6 +493,61 @@ func probeTarget(ctx context.Context, item target) sample {
 		LatencyMS:   latency,
 		SampledAt:   time.Now().Unix(),
 	}
+}
+
+func resolvePublicProbeAddress(ctx context.Context, rawHost string, port int) (string, error) {
+	host := strings.Trim(strings.TrimSpace(rawHost), "[]")
+	if host == "" || port < 1 || port > 65535 || strings.Contains(host, "%") {
+		return "", errors.New("invalid probe target")
+	}
+
+	var addresses []net.IP
+	if literal := net.ParseIP(host); literal != nil {
+		addresses = []net.IP{literal}
+	} else {
+		resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return "", fmt.Errorf("resolve probe target: %w", err)
+		}
+		for _, item := range resolved {
+			addresses = append(addresses, item.IP)
+		}
+	}
+
+	if len(addresses) == 0 {
+		return "", errors.New("probe target resolved to no addresses")
+	}
+	for _, ip := range addresses {
+		if !isPublicProbeIP(ip) {
+			return "", errors.New("probe target resolves to a private or reserved address")
+		}
+	}
+	return net.JoinHostPort(addresses[0].String(), fmt.Sprintf("%d", port)), nil
+}
+
+func isPublicProbeIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() ||
+		ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	for _, network := range blockedProbeNetworks {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func mustParseProbeNetworks(values []string) []*net.IPNet {
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			panic(err)
+		}
+		networks = append(networks, network)
+	}
+	return networks
 }
 
 func truncateError(err error) string {

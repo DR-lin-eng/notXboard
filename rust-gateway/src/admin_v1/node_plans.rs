@@ -59,6 +59,26 @@ pub async fn destroy(
     }
 }
 
+async fn node_ids_belong_to_owner(
+    state: &AppState,
+    owner_user_id: i64,
+    node_ids: &[i64],
+) -> Result<bool, sqlx::Error> {
+    if owner_user_id <= 0 || node_ids.is_empty() {
+        return Ok(false);
+    }
+    let placeholders = vec!["?"; node_ids.len()].join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM server_nodes WHERE user_id = ? AND id IN ({})",
+        placeholders
+    );
+    let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(owner_user_id);
+    for node_id in node_ids {
+        query = query.bind(*node_id);
+    }
+    Ok(query.fetch_one(&state.db).await? == node_ids.len() as i64)
+}
+
 async fn build_index_response(
     state: &AppState,
     headers: HeaderMap,
@@ -133,27 +153,25 @@ async fn build_store_response(
     let Some(renew) = parsed.renew else {
         return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
     };
-    let owner_user_id = parsed.owner_user_id.flatten();
-    if let Some(owner_user_id) = owner_user_id {
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM v2_user WHERE id = ?")
-            .bind(owner_user_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(internal_error)?;
-        if exists == 0 {
-            return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
-        }
+    let Some(owner_user_id) = parsed.owner_user_id.flatten() else {
+        return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "owner_user_id is required"));
+    };
+    let owner_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM v2_user WHERE id = ?")
+        .bind(owner_user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_error)?;
+    if owner_exists != 1 {
+        return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
     }
-
-    let placeholders = vec!["?"; node_ids.len()].join(",");
-    let sql = format!("SELECT COUNT(*) FROM server_nodes WHERE id IN ({})", placeholders);
-    let mut query = sqlx::query_scalar::<_, i64>(&sql);
-    for node_id in &node_ids {
-        query = query.bind(*node_id);
-    }
-    let count = query.fetch_one(&state.db).await.map_err(internal_error)?;
-    if count != node_ids.len() as i64 {
-        return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "node_ids contains invalid nodes"));
+    if !node_ids_belong_to_owner(state, owner_user_id, &node_ids)
+        .await
+        .map_err(internal_error)?
+    {
+        return Ok(fail_json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "node_ids contains nodes not owned by owner_user_id",
+        ));
     }
 
     let visibility_scope = parsed.visibility_scope.unwrap_or_else(|| "public".to_string());
@@ -219,6 +237,7 @@ async fn build_store_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let plan_id = result.last_insert_id() as i64;
     let plan = load_node_plan_by_id_any(state, plan_id)
@@ -247,39 +266,54 @@ async fn build_update_response(
 
     let payload = parse_json_body(body).await?;
     let parsed = parse_node_plan_mutation_input(&payload, false)?;
-    let owner_user_id = parsed.owner_user_id.flatten().or(existing.owner_user_id.map(|v| v as i64));
-    if let Some(owner_user_id) = owner_user_id {
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM v2_user WHERE id = ?")
-            .bind(owner_user_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(internal_error)?;
-        if exists == 0 {
-            return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
-        }
+    let Some(owner_user_id) = parsed
+        .owner_user_id
+        .flatten()
+        .or(existing.owner_user_id.map(|v| v as i64))
+    else {
+        return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "owner_user_id is required"));
+    };
+    let owner_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM v2_user WHERE id = ?")
+        .bind(owner_user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_error)?;
+    if owner_exists != 1 {
+        return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
     }
 
     let visibility_scope = parsed
         .visibility_scope
         .unwrap_or_else(|| normalize_visibility_scope(existing.visibility_scope.as_str()).to_string());
-    let node_ids = if let Some(ids) = parsed.node_ids {
+    let existing_node_ids = existing
+        .node_ids
+        .as_ref()
+        .and_then(|json| json.0.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(parse_i64_value)
+                .filter(|node_id| *node_id > 0)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (node_ids, effective_node_ids) = if let Some(ids) = parsed.node_ids {
         if ids.is_empty() {
             return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Validation failed"));
         }
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let sql = format!("SELECT COUNT(*) FROM server_nodes WHERE id IN ({})", placeholders);
-        let mut query = sqlx::query_scalar::<_, i64>(&sql);
-        for node_id in &ids {
-            query = query.bind(*node_id);
-        }
-        let count = query.fetch_one(&state.db).await.map_err(internal_error)?;
-        if count != ids.len() as i64 {
-            return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "node_ids contains invalid nodes"));
-        }
-        Some(Value::Array(ids.into_iter().map(Value::from).collect::<Vec<_>>()).to_string())
+        let serialized = Value::Array(ids.iter().copied().map(Value::from).collect::<Vec<_>>()).to_string();
+        (Some(serialized), ids)
     } else {
-        None
+        (None, existing_node_ids)
     };
+    if !node_ids_belong_to_owner(state, owner_user_id, &effective_node_ids)
+        .await
+        .map_err(internal_error)?
+    {
+        return Ok(fail_json_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "node_ids contains nodes not owned by owner_user_id",
+        ));
+    }
 
     let access_user_ids = if visibility_scope == "assigned_only" {
         let ids = if let Some(ids) = parsed.access_user_ids {
@@ -368,6 +402,7 @@ async fn build_update_response(
     .execute(&state.db)
     .await
     .map_err(internal_error)?;
+    clear_all_authorization_caches(state);
 
     let refreshed = load_node_plan_by_id_any(state, plan_id)
         .await
@@ -395,5 +430,6 @@ async fn build_destroy_response(
     if deleted.rows_affected() == 0 {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Subscription plan does not exist"));
     }
+    clear_all_authorization_caches(state);
     Ok(json_value_response(success_response_payload(Value::Bool(true))))
 }

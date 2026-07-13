@@ -55,6 +55,17 @@ struct TelegramUser {
     id: i64,
 }
 
+const ACTIVE_BOUND_TELEGRAM_USER_SQL: &str =
+    "SELECT id, invite_user_id, email, transfer_enable, last_login_at, created_at, banned, ban_reason,
+            remind_expire, remind_traffic, expired_at, balance, commission_balance, plan_id, group_id,
+            discount, commission_rate, telegram_id, uuid, is_admin, is_super_admin, trust_level,
+            is_silenced, linux_do_id, linux_do_username, linux_do_name, linux_do_avatar, api_key,
+            concurrent_ip_limit, token, subscribe_path, subscribe_key, subscribe_salt, u, d,
+            device_limit, speed_limit, next_reset_at
+     FROM v2_user
+     WHERE telegram_id = ? AND banned = 0
+     LIMIT 1";
+
 pub async fn webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -158,39 +169,82 @@ async fn handle_bind_command(
         return Ok(());
     }
 
-    let subscribe_url = args.first().map(|value| value.trim()).filter(|value| !value.is_empty());
-    let Some(subscribe_url) = subscribe_url else {
-        send_plain_message(token, message.chat.id, "参数有误，请携带订阅地址发送。").await?;
+    let bind_code = args.first().map(|value| value.trim()).filter(|value| {
+        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    });
+    let Some(bind_code) = bind_code else {
+        send_plain_message(token, message.chat.id, "绑定码无效，请登录站点重新获取。").await?;
         return Ok(());
     };
 
-    let Some(user_token) = extract_subscribe_token(state, subscribe_url).await? else {
-        send_plain_message(token, message.chat.id, "订阅地址无效。").await?;
+    let cache_key = format!("TELEGRAM_BIND_{}", sha256_hex(bind_code));
+    let user_id = redis_getdel_string(state, &cache_key)
+        .await
+        .map_err(|err| {
+            error!("telegram bind code cache read failed: {err}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "telegram bind unavailable")
+        })?
+        .and_then(|value| value.parse::<i64>().ok());
+    let Some(user_id) = user_id else {
+        send_plain_message(token, message.chat.id, "绑定码已失效或已使用，请重新获取。").await?;
         return Ok(());
     };
 
-    let user = load_bearer_user_by_token(state, &user_token)
+    let user = load_bearer_user_by_id(state, user_id)
         .await
         .map_err(internal_error)?;
     let Some(user) = user else {
         send_plain_message(token, message.chat.id, "用户不存在。").await?;
         return Ok(());
     };
-
-    if let Some(bound) = user.telegram_id {
-        if bound != message.chat.id {
-            send_plain_message(token, message.chat.id, "该账号已经绑定了其他 Telegram 账号。").await?;
-            return Ok(());
-        }
+    if user.banned != 0 {
+        send_plain_message(token, message.chat.id, "账号已被停用，无法绑定。").await?;
+        return Ok(());
     }
 
-    sqlx::query("UPDATE v2_user SET telegram_id = ?, updated_at = ? WHERE id = ?")
+    ensure_telegram_binding_lock(state, message.chat.id).await?;
+    let mut tx = state.db.begin().await.map_err(internal_error)?;
+    sqlx::query(
+        "SELECT telegram_id
+         FROM rust_telegram_binding_locks
+         WHERE telegram_id = ?
+         FOR UPDATE",
+    )
+    .bind(message.chat.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+    let existing_user_id = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM v2_user WHERE telegram_id = ? FOR UPDATE",
+    )
+    .bind(message.chat.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal_error)?;
+    if existing_user_id.is_some_and(|existing_id| existing_id != user.id) {
+        tx.rollback().await.map_err(internal_error)?;
+        send_plain_message(token, message.chat.id, "该 Telegram 账号已绑定其他站点账号。").await?;
+        return Ok(());
+    }
+
+    let updated = sqlx::query(
+        "UPDATE v2_user
+         SET telegram_id = ?, updated_at = ?
+         WHERE id = ? AND banned = 0 AND (telegram_id IS NULL OR telegram_id = ?)",
+    )
         .bind(message.chat.id)
         .bind(Utc::now().timestamp())
         .bind(user.id)
-        .execute(&state.db)
+        .bind(message.chat.id)
+        .execute(&mut *tx)
         .await
         .map_err(internal_error)?;
+    if updated.rows_affected() != 1 {
+        tx.rollback().await.map_err(internal_error)?;
+        send_plain_message(token, message.chat.id, "该账号已绑定其他 Telegram 账号。").await?;
+        return Ok(());
+    }
+    tx.commit().await.map_err(internal_error)?;
 
     send_plain_message(
         token,
@@ -198,6 +252,29 @@ async fn handle_bind_command(
         &format!("绑定成功。\n账号：{}\n可用命令：/traffic /getlatesturl /start", user.email),
     )
     .await?;
+    Ok(())
+}
+
+async fn ensure_telegram_binding_lock(
+    state: &AppState,
+    telegram_id: i64,
+) -> Result<(), Response<Body>> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rust_telegram_binding_locks (
+            telegram_id BIGINT NOT NULL PRIMARY KEY,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+    )
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
+    sqlx::query(
+        "INSERT IGNORE INTO rust_telegram_binding_locks (telegram_id) VALUES (?)",
+    )
+    .bind(telegram_id)
+    .execute(&state.db)
+    .await
+    .map_err(internal_error)?;
     Ok(())
 }
 
@@ -580,11 +657,11 @@ async fn send_start_message(
         let bind_guide = telegram_plugin_string(
             state,
             "start_bind_guide",
-            "请先绑定您的 XBoard 账号：\n1. 登录站点\n2. 复制订阅链接\n3. 发送 /bind + 订阅链接",
+            "请先绑定您的站点账号：\n1. 登录站点\n2. 在 Telegram 绑定页获取一次性绑定码\n3. 发送 /bind + 绑定码",
         )
         .await;
         text.push_str(&bind_guide);
-        text.push_str("\n\n/bind [订阅链接] - 绑定账号");
+        text.push_str("\n\n/bind [一次性绑定码] - 绑定账号");
     }
     text.push_str("\n\n");
     text.push_str(&footer);
@@ -601,7 +678,7 @@ async fn send_help_message(
     let help_text = telegram_plugin_string(
         state,
         "help_text",
-        "未知命令，可用命令：\n/start\n/bind 订阅链接\n/traffic\n/getlatesturl\n/tickets\n/ticket 工单ID\n/close 工单ID\n/unbind",
+        "未知命令，可用命令：\n/start\n/bind 一次性绑定码\n/traffic\n/getlatesturl\n/tickets\n/ticket 工单ID\n/close 工单ID\n/unbind",
     )
     .await;
     send_plain_message(token, chat_id, &help_text).await
@@ -716,37 +793,11 @@ async fn load_bound_telegram_user(
     state: &AppState,
     telegram_id: i64,
 ) -> Result<Option<BearerUserRow>, Response<Body>> {
-    sqlx::query_as::<_, BearerUserRow>(
-        "SELECT id, invite_user_id, email, transfer_enable, last_login_at, created_at, banned, ban_reason,
-                remind_expire, remind_traffic, expired_at, balance, commission_balance, plan_id,
-                discount, commission_rate, telegram_id, uuid, is_admin, is_super_admin, trust_level,
-                is_silenced, linux_do_id, linux_do_username, linux_do_name, linux_do_avatar, api_key,
-                concurrent_ip_limit, token, subscribe_path, subscribe_key, subscribe_salt, u, d,
-                device_limit, speed_limit, next_reset_at
-         FROM v2_user WHERE telegram_id = ? LIMIT 1",
-    )
-    .bind(telegram_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(internal_error)
-}
-
-async fn load_bearer_user_by_token(
-    state: &AppState,
-    token: &str,
-) -> Result<Option<BearerUserRow>, sqlx::Error> {
-    sqlx::query_as::<_, BearerUserRow>(
-        "SELECT id, invite_user_id, email, transfer_enable, last_login_at, created_at, banned, ban_reason,
-                remind_expire, remind_traffic, expired_at, balance, commission_balance, plan_id,
-                discount, commission_rate, telegram_id, uuid, is_admin, is_super_admin, trust_level,
-                is_silenced, linux_do_id, linux_do_username, linux_do_name, linux_do_avatar, api_key,
-                concurrent_ip_limit, token, subscribe_path, subscribe_key, subscribe_salt, u, d,
-                device_limit, speed_limit, next_reset_at
-         FROM v2_user WHERE token = ? LIMIT 1",
-    )
-    .bind(token)
-    .fetch_optional(&state.db)
-    .await
+    sqlx::query_as::<_, BearerUserRow>(ACTIVE_BOUND_TELEGRAM_USER_SQL)
+        .bind(telegram_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_error)
 }
 
 async fn resolve_telegram_bot_token(state: &AppState) -> String {
@@ -964,38 +1015,6 @@ fn normalize_command(raw: &str) -> String {
     }
 }
 
-async fn extract_subscribe_token(
-    state: &AppState,
-    url: &str,
-) -> Result<Option<String>, Response<Body>> {
-    let parsed = http::Uri::try_from(url).ok();
-    if let Some(parsed) = parsed {
-        if let Some(query) = parsed.query() {
-            let params = parse_query_string(query);
-            if let Some(token) = params.get("token").cloned() {
-                return Ok(Some(token));
-            }
-            if let Some(path_key) = parsed.path().rsplit('/').next().filter(|value| !value.is_empty()) {
-                if let Some(token) = load_token_from_subscribe_parts(state, path_key, &params).await? {
-                    return Ok(Some(token));
-                }
-            }
-        }
-        if let Some(path) = parsed.path().rsplit('/').next() {
-            if !path.is_empty() {
-                return Ok(Some(path.to_string()));
-            }
-        }
-    }
-
-    let query_part = url.split('?').nth(1).unwrap_or_default();
-    let params = parse_query_string(query_part);
-    if let Some(token) = params.get("token").cloned() {
-        return Ok(Some(token));
-    }
-    Ok(url.trim_matches('/').rsplit('/').next().map(|value| value.to_string()))
-}
-
 fn transfer_to_gb_string(value: f64) -> String {
     format!("{:.2}", value / 1024.0 / 1024.0 / 1024.0)
 }
@@ -1211,57 +1230,38 @@ fn extract_ticket_id(text: &str) -> Option<i64> {
     digits.parse::<i64>().ok().filter(|value| *value > 0)
 }
 
-fn parse_query_string(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let key = parts.next()?;
-            let value = parts.next().unwrap_or_default();
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
-}
+#[cfg(test)]
+mod tests {
+    use super::ACTIVE_BOUND_TELEGRAM_USER_SQL;
 
-async fn load_token_from_subscribe_parts(
-    state: &AppState,
-    subscribe_path: &str,
-    params: &HashMap<String, String>,
-) -> Result<Option<String>, Response<Body>> {
-    let row = sqlx::query(
-        "SELECT token, subscribe_key, subscribe_salt
-         FROM v2_user
-         WHERE subscribe_path = ?
-         LIMIT 1",
-    )
-    .bind(subscribe_path)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(internal_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
+    fn normalized_active_user_query() -> String {
+        ACTIVE_BOUND_TELEGRAM_USER_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 
-    let token = row.try_get::<String, _>("token").ok().unwrap_or_default();
-    let subscribe_key = row
-        .try_get::<Option<String>, _>("subscribe_key")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let subscribe_salt = row
-        .try_get::<Option<String>, _>("subscribe_salt")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    #[test]
+    fn bound_telegram_identity_fails_closed_for_banned_accounts() {
+        let query = normalized_active_user_query();
+        assert!(
+            query.contains("FROM v2_user WHERE telegram_id = ? AND banned = 0 LIMIT 1")
+        );
+    }
 
-    if subscribe_key.is_empty() || subscribe_salt.is_empty() {
-        return Ok(None);
+    #[test]
+    fn silenced_accounts_keep_existing_telegram_access_semantics() {
+        let query = normalized_active_user_query();
+        let predicate = query
+            .split_once(" WHERE ")
+            .map(|(_, predicate)| predicate)
+            .expect("active Telegram user query must have an authorization predicate");
+        assert!(!predicate.contains("is_silenced"));
     }
-    if params.get(&subscribe_key).map(|value| value.as_str()) != Some(token.as_str()) {
-        return Ok(None);
+
+    #[test]
+    fn bound_telegram_identity_selects_the_complete_bearer_shape() {
+        let query = normalized_active_user_query();
+        assert!(query.contains("plan_id, group_id, discount"));
     }
-    if !params.contains_key(&subscribe_salt) {
-        return Ok(None);
-    }
-    Ok(Some(token))
 }

@@ -33,7 +33,7 @@ pub(crate) async fn reset_single_user_security(
     user_id: i64,
 ) -> Result<UserSecurityResetData, sqlx::Error> {
     let data = generate_user_security_reset_data();
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE v2_user
          SET uuid = ?, token = ?, subscribe_path = ?, subscribe_key = ?, subscribe_salt = ?, updated_at = ?
          WHERE id = ?",
@@ -47,6 +47,9 @@ pub(crate) async fn reset_single_user_security(
     .bind(user_id)
     .execute(&state.db)
     .await?;
+    if updated.rows_affected() > 0 {
+        clear_all_authorization_caches(state);
+    }
     Ok(data)
 }
 
@@ -93,5 +96,8 @@ pub(crate) async fn reset_many_user_security(
         updated += result.rows_affected();
     }
 
+    if updated > 0 {
+        clear_all_authorization_caches(state);
+    }
     Ok(updated)
 }

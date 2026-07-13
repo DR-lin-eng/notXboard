@@ -3,7 +3,6 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode, Uri},
 };
 use http::header::{CONTENT_TYPE, ETAG};
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -14,11 +13,10 @@ use tracing::error;
 use crate::{AppState, CachedResponse};
 
 pub(crate) async fn parse_json_body(body: Body) -> Result<Value, Response<Body>> {
-    let bytes = body
-        .collect()
+    const MAX_JSON_BODY_BYTES: usize = 2 * 1024 * 1024;
+    let bytes = axum::body::to_bytes(body, MAX_JSON_BODY_BYTES)
         .await
-        .map_err(|err| json_error(StatusCode::BAD_REQUEST, &format!("read body failed: {err}")))?
-        .to_bytes();
+        .map_err(|_| json_error(StatusCode::PAYLOAD_TOO_LARGE, "JSON body is too large"))?;
 
     serde_json::from_slice::<Value>(&bytes)
         .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
@@ -257,6 +255,7 @@ pub(crate) fn json_error(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
+        .header("Cache-Control", "no-store")
         .body(Body::from(payload))
         .unwrap()
 }

@@ -1,60 +1,95 @@
 use crate::{
-    admin_v1, admin_v2, bootstrap_support, client_v1, fallback_support, guest_v1, healthz, passport_v1, static_files,
-    subscribe_entry, tcping_agent_v1, uniproxy_alive, uniproxy_alivelist, uniproxy_audit,
-    uniproxy_config, uniproxy_push, uniproxy_status, uniproxy_user, user_v1, web_pages, AppState,
+    admin_v1, admin_v2, authenticate_route_account, bootstrap_support, client_v1, exposure_control,
+    fallback_support, first_non_empty, get_setting_string, guest_v1, healthz, json_error,
+    passport_v1, secure_admin_path_matches, static_files, subscribe_entry, tcping_agent_v1,
+    uniproxy_alive, uniproxy_alivelist, uniproxy_audit, uniproxy_config, uniproxy_push,
+    uniproxy_status, uniproxy_user, user_v1, web_pages, AppState, RequiredAccountRole,
 };
 use axum::{
+    extract::{Request, State},
+    middleware::{self, Next},
+    response::Response,
     routing::{any, get, post, put},
     Router,
 };
 use std::sync::Arc;
+use tower_http::compression::CompressionLayer;
 
 pub(crate) fn build_router(state: AppState) -> Router {
     let state = Arc::new(state);
     Router::new()
-        .merge(web_routes())
-        .merge(guest_routes())
+        .merge(web_routes(state.clone()))
+        .merge(guest_routes(state.clone()))
         .merge(passport_routes())
-        .merge(monitor_routes())
+        .merge(monitor_routes(state.clone()))
         .merge(payment_notify_routes())
-        .merge(user_routes())
+        .merge(user_routes(state.clone()))
         .merge(admin_routes(state.clone()))
         .merge(client_routes())
         .merge(server_routes())
         .merge(agent_routes())
         .fallback(fallback_support::rust_fallback)
         .with_state(state)
+        .layer(middleware::from_fn(exposure_control::add_privacy_headers))
+        .layer(CompressionLayer::new())
 }
 
-fn web_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/bootstrap/status", get(bootstrap_support::bootstrap_status))
-        .route("/bootstrap/minimal", post(bootstrap_support::bootstrap_minimal))
-        .route("/bootstrap/full", post(bootstrap_support::bootstrap_full))
+fn web_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let browser_routes = Router::new()
         .route("/", get(web_pages::public_dashboard_page))
         .route("/app", get(web_pages::app_page))
         .route("/app/", get(web_pages::app_page))
         .route("/login/linux-do", get(web_pages::login_linux_do_page))
         .route("/assets/{*path}", get(static_files::assets_file))
-        .route("/tcping-agent-src/{*path}", get(static_files::public_file))
-        .route("/tcping-agent-install.sh", get(static_files::public_file))
-        .route("/v2bx-install.sh", get(static_files::public_file))
         .route("/theme/{*path}", get(static_files::theme_file))
+        .route(
+            "/{admin_path}/assets/admin-console.css",
+            get(web_pages::admin_console_stylesheet),
+        )
+        .route(
+            "/{admin_path}/assets/admin-console.js",
+            get(web_pages::admin_console_script),
+        )
         .route("/{admin_path}/command-center", get(web_pages::admin_command_center_page))
         .route("/{admin_path}/leaderboards", get(web_pages::admin_leaderboards_redirect))
         .route("/{admin_path}", get(web_pages::admin_page))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            exposure_control::require_web_access,
+        ));
+    let subscribe_routes = Router::new()
         .route("/{subscribe_key}/{token_or_path}", get(subscribe_entry))
+        .route_layer(middleware::from_fn(exposure_control::mark_private_response));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/robots.txt", get(web_pages::robots_txt))
+        .route("/v2bx-install.sh", get(static_files::installer_file))
+        .route("/tcping-agent-install.sh", get(static_files::installer_file))
+        .route("/tcping-agent-src/go.mod", get(static_files::installer_file))
+        .route("/tcping-agent-src/main.go", get(static_files::installer_file))
+        .route("/bootstrap/status", get(bootstrap_support::bootstrap_status))
+        .route("/bootstrap/minimal", post(bootstrap_support::bootstrap_minimal))
+        .route("/bootstrap/full", post(bootstrap_support::bootstrap_full))
+        .merge(browser_routes)
+        .merge(subscribe_routes)
 }
 
-fn guest_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/guest/comm/config", get(guest_v1::public::comm_config))
+fn guest_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let public_content_routes = Router::new()
         .route("/api/v1/guest/plan/fetch", get(guest_v1::public::plan_fetch))
-        .route("/api/v1/guest/telegram/webhook", post(guest_v1::telegram::webhook))
         .route("/api/v1/guest/public/overview", get(guest_v1::public::overview))
         .route("/api/v1/guest/public/leaderboards", get(guest_v1::public::leaderboards))
         .route("/api/v1/guest/public/geo", get(guest_v1::public::geo))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            exposure_control::require_web_access,
+        ));
+
+    Router::new()
+        .route("/api/v1/guest/comm/config", get(guest_v1::public::comm_config))
+        .route("/api/v1/guest/telegram/webhook", post(guest_v1::telegram::webhook))
+        .merge(public_content_routes)
 }
 
 fn passport_routes() -> Router<Arc<AppState>> {
@@ -83,7 +118,7 @@ fn passport_routes() -> Router<Arc<AppState>> {
         .route("/api/v2/passport/comm/pv", post(passport_v1::comm::pv))
 }
 
-fn monitor_routes() -> Router<Arc<AppState>> {
+fn monitor_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/monitor/api/stats", get(admin_v2::system::monitor_stats))
         .route("/monitor/api/workload", get(admin_v2::system::monitor_workload))
@@ -104,13 +139,21 @@ fn monitor_routes() -> Router<Arc<AppState>> {
         .route("/monitor/api/monitoring", get(admin_v2::system::monitor_monitoring))
         .route("/monitor/api/monitoring/{tag}", get(admin_v2::system::monitor_monitoring_tag))
         .route("/monitor/api/jobs/retry/{id}", post(admin_v2::system::monitor_job_retry))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_super_admin_api_access,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            require_fixed_admin_path,
+        ))
 }
 
 fn payment_notify_routes() -> Router<Arc<AppState>> {
     Router::new().route("/api/v1/guest/payment/notify/{method}/{uuid}", any(guest_v1::payment::notify))
 }
 
-fn user_routes() -> Router<Arc<AppState>> {
+fn user_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/user/info", get(user_v1::read::info))
         .route("/api/v1/user/me", get(user_v1::read::me))
@@ -139,7 +182,7 @@ fn user_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/user/api-key/generate", post(user_v1::account::api_key_generate))
         .route("/api/v1/user/api-key/reset", post(user_v1::account::api_key_reset))
         .route("/api/v1/user/api-key/validate", post(user_v1::account::api_key_validate))
-        .route("/api/v1/user/limits", get(admin_v1::users_limits::self_limits_show).post(admin_v1::users_limits::self_limits_store).delete(admin_v1::users_limits::self_limits_destroy))
+        .route("/api/v1/user/limits", get(admin_v1::users_limits::self_limits_show))
         .route("/api/v1/user/notice/fetch", get(user_v1::notices::fetch))
         .route("/api/v1/user/notice", post(user_v1::notices::save))
         .route("/api/v1/user/notice/{id}/toggle", post(user_v1::notices::toggle))
@@ -169,7 +212,8 @@ fn user_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/user/traffic-usage-logs", get(user_v1::traffic::usage_logs))
         .route("/api/v1/user/server-nodes/{id}/status", get(user_v1::server_nodes::status))
         .route("/api/v1/user/server-nodes/{id}/deploy", post(user_v1::server_nodes::deploy))
-        .route("/api/v1/user/server-nodes/{id}/deploy-command", get(user_v1::server_nodes::deploy_command))
+        .route("/api/v1/user/server-nodes/{id}/deploy-command", post(user_v1::server_nodes::deploy_command))
+        .route("/api/v1/user/server-nodes/{id}/deploy-command/rotate-token", post(user_v1::server_nodes::rotate_deploy_token))
         .route("/api/v1/user/server-nodes/{id}/access", post(user_v1::access::configure_node))
         .route("/api/v1/user/server-nodes/{id}/tcping", get(user_v1::tcping::node_overview))
         .route("/api/v1/user/server-nodes/{id}/share/user", post(user_v1::access::share_with_user))
@@ -216,9 +260,14 @@ fn user_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/user/sponsor", post(user_v1::sponsors::create))
         .route("/api/v1/user/sponsor/{tradeNo}", get(user_v1::sponsors::detail))
         .route("/api/v1/user/sponsor/checkout", post(user_v1::sponsors::checkout))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            require_user_api_access,
+        ))
 }
 
 fn admin_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let secure_v2_state = state.clone();
     Router::new()
         .route("/api/v1/admin/refunds/finalize", post(admin_v1::refunds::finalize))
         .route("/api/v1/admin/refunds", get(admin_v1::refunds::index))
@@ -251,7 +300,112 @@ fn admin_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/v1/admin/users/{userId}/api-key/generate", post(admin_v1::api_keys::user_generate))
         .route("/api/v1/admin/users/{userId}/api-key/reset", post(admin_v1::api_keys::user_reset))
         .nest("/api/v2/admin", admin_v2::router::routes())
-        .nest("/api/v2/{admin_path}", admin_v2::router::secure_routes(state))
+        .nest("/api/v2/{admin_path}", admin_v2::router::secure_routes(secure_v2_state))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_admin_api_access,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            require_admin_api_path,
+        ))
+}
+
+async fn require_user_api_access(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    require_account_role(&state, request, next, RequiredAccountRole::User).await
+}
+
+async fn require_admin_api_access(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    require_account_role(&state, request, next, RequiredAccountRole::Admin).await
+}
+
+async fn require_super_admin_api_access(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    require_account_role(
+        &state,
+        request,
+        next,
+        RequiredAccountRole::SuperAdmin,
+    )
+    .await
+}
+
+async fn require_admin_api_path(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let candidate = request
+        .uri()
+        .path()
+        .strip_prefix("/api/v2/")
+        .and_then(|tail| tail.split('/').next())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| admin_path_header(request.headers()).map(str::to_owned));
+    require_configured_admin_path(&state, candidate.as_deref(), request, next).await
+}
+
+async fn require_fixed_admin_path(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let candidate = admin_path_header(request.headers()).map(str::to_owned);
+    require_configured_admin_path(&state, candidate.as_deref(), request, next).await
+}
+
+fn admin_path_header(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-admin-path")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+}
+
+async fn require_configured_admin_path(
+    state: &AppState,
+    candidate: Option<&str>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let expected = first_non_empty(&[
+        get_setting_string(state, "secure_path", "").await,
+        get_setting_string(state, "frontend_admin_path", "").await,
+        String::new(),
+    ]);
+    if candidate.is_some_and(|candidate| secure_admin_path_matches(&expected, candidate)) {
+        next.run(request).await
+    } else {
+        json_error(axum::http::StatusCode::NOT_FOUND, "Not found")
+    }
+}
+
+async fn require_account_role(
+    state: &AppState,
+    mut request: Request,
+    next: Next,
+    required: RequiredAccountRole,
+) -> Response {
+    match authenticate_route_account(state, request.headers(), required).await {
+        Ok(account) => {
+            request.extensions_mut().insert(account);
+            let mut response = next.run(request).await;
+            exposure_control::insert_authenticated_cache_headers(response.headers_mut());
+            response
+        }
+        Err(response) => response,
+    }
 }
 
 fn client_routes() -> Router<Arc<AppState>> {
@@ -259,6 +413,7 @@ fn client_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/client/app/getConfig", get(client_v1::app_get_config))
         .route("/api/v1/client/app/getVersion", get(client_v1::app_get_version))
         .route("/api/v1/client/{path}", get(client_v1::subscribe_legacy))
+        .route_layer(middleware::from_fn(exposure_control::mark_private_response))
 }
 
 fn server_routes() -> Router<Arc<AppState>> {
@@ -284,11 +439,14 @@ fn server_routes() -> Router<Arc<AppState>> {
         .route("/api/v2/server/alive", post(uniproxy_alive))
         .route("/api/v2/server/status", post(uniproxy_status))
         .route("/api/v2/server/audit", post(uniproxy_audit))
+        .route_layer(middleware::from_fn(exposure_control::mark_private_response))
 }
 
 fn agent_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/v1/agent/bootstrap/{kind}", post(crate::machine_bootstrap_support::exchange))
         .route("/api/v1/tcping/agent/config", get(tcping_agent_v1::config).post(tcping_agent_v1::config))
         .route("/api/v1/tcping/agent/heartbeat", post(tcping_agent_v1::heartbeat))
         .route("/api/v1/tcping/agent/samples", post(tcping_agent_v1::samples))
+        .route_layer(middleware::from_fn(exposure_control::mark_private_response))
 }
