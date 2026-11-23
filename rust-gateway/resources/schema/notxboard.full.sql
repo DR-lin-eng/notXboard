@@ -240,6 +240,45 @@ CREATE TABLE `server_nodes` (
   CONSTRAINT `server_nodes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `server_machines`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `server_machines` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `token` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `notes` text COLLATE utf8mb4_unicode_ci,
+  `is_active` tinyint(1) NOT NULL DEFAULT '1',
+  `last_seen_at` int unsigned DEFAULT NULL,
+  `load_status` json DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `server_machines_token_unique` (`token`),
+  KEY `server_machines_user_id_index` (`user_id`),
+  CONSTRAINT `server_machines_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `server_machine_load_history`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `server_machine_load_history` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `machine_id` bigint unsigned NOT NULL,
+  `cpu` double NOT NULL DEFAULT '0',
+  `mem_total` bigint unsigned NOT NULL DEFAULT '0',
+  `mem_used` bigint unsigned NOT NULL DEFAULT '0',
+  `disk_total` bigint unsigned NOT NULL DEFAULT '0',
+  `disk_used` bigint unsigned NOT NULL DEFAULT '0',
+  `net_in_speed` double DEFAULT NULL,
+  `net_out_speed` double DEFAULT NULL,
+  `recorded_at` int unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `server_machine_load_history_machine_recorded_index` (`machine_id`,`recorded_at`),
+  CONSTRAINT `server_machine_load_history_machine_id_foreign` FOREIGN KEY (`machine_id`) REFERENCES `server_machines` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `sponsor_donations`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;

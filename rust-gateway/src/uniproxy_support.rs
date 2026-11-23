@@ -586,6 +586,12 @@ async fn build_server_report_response(
     if let Some(status) = payload.get("status").filter(|value| value.is_object()) {
         process_node_status(state, &node, status)?;
     }
+    if let Some(online) = payload.get("online").filter(|value| value.is_object()) {
+        process_node_online(state, &node, online);
+    }
+    if let Some(metrics) = payload.get("metrics").filter(|value| value.is_object()) {
+        process_node_metrics(state, &node, metrics);
+    }
     Ok(json_value_response(json!({ "data": true })))
 }
 
@@ -834,18 +840,78 @@ pub(crate) fn process_node_status(
     let disk_used = nested_i64(&object, &["disk", "used"])
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Invalid disk.used"))?;
 
-    state.load_status_cache.write().insert(
+    let mut cache = state.load_status_cache.write();
+    let previous = cache.get(&node.id);
+    let mut entry = json!({
+        "cpu": cpu,
+        "mem": { "total": mem_total, "used": mem_used },
+        "swap": { "total": swap_total, "used": swap_used },
+        "disk": { "total": disk_total, "used": disk_used },
+        "updated_at": Utc::now().timestamp(),
+    });
+    for key in ["metrics", "online"] {
+        if let Some(value) = previous.and_then(|previous| previous.get(key)).cloned() {
+            entry[key] = value;
+        }
+    }
+    cache.insert(node.id, entry);
+
+    Ok(())
+}
+
+fn merge_node_status_field(state: &AppState, node_id: u64, key: &str, value: Value) {
+    let mut cache = state.load_status_cache.write();
+    let entry = cache.entry(node_id).or_insert_with(|| json!({}));
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(key.to_string(), value);
+        object.insert("updated_at".to_string(), json!(Utc::now().timestamp()));
+    }
+}
+
+pub(crate) fn process_node_metrics(state: &AppState, node: &ServerNodeRow, metrics: &Value) {
+    let Some(object) = metrics.as_object() else {
+        return;
+    };
+    let int = |key: &str| object.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let raw = |key: &str| object.get(key).cloned().unwrap_or_else(|| json!({}));
+    merge_node_status_field(
+        state,
         node.id,
+        "metrics",
         json!({
-            "cpu": cpu,
-            "mem": { "total": mem_total, "used": mem_used },
-            "swap": { "total": swap_total, "used": swap_used },
-            "disk": { "total": disk_total, "used": disk_used },
+            "uptime": int("uptime"),
+            "goroutines": int("goroutines"),
+            "active_connections": int("active_connections"),
+            "total_connections": int("total_connections"),
+            "total_users": int("total_users"),
+            "active_users": int("active_users"),
+            "inbound_speed": int("inbound_speed"),
+            "outbound_speed": int("outbound_speed"),
+            "cpu_per_core": object.get("cpu_per_core").cloned().unwrap_or_else(|| json!([])),
+            "load": raw("load"),
+            "speed_limiter": raw("speed_limiter"),
+            "gc": raw("gc"),
+            "api": raw("api"),
+            "ws": raw("ws"),
+            "limits": raw("limits"),
+            "kernel_status": object.get("kernel_status").and_then(Value::as_bool).unwrap_or(false),
             "updated_at": Utc::now().timestamp(),
         }),
     );
+}
 
-    Ok(())
+pub(crate) fn process_node_online(state: &AppState, node: &ServerNodeRow, online: &Value) {
+    let Some(object) = online.as_object() else {
+        return;
+    };
+    let users = object.len();
+    let connections = object.values().filter_map(Value::as_i64).filter(|v| *v > 0).sum::<i64>();
+    merge_node_status_field(
+        state,
+        node.id,
+        "online",
+        json!({ "users": users, "connections": connections }),
+    );
 }
 
 async fn build_uniproxy_audit_response(

@@ -1,7 +1,7 @@
 use crate::*;
 use crate::uniproxy_support::{
     authenticate_node_credentials, build_node_config_payload, load_uniproxy_device_ips, node_credentials,
-    process_node_alive, process_node_status,
+    process_node_alive, process_node_metrics, process_node_status,
     NodeCredentials,
 };
 use crate::uniproxy_user_support::load_or_build_uniproxy_user_snapshot;
@@ -273,8 +273,12 @@ async fn handle_incoming(state: &AppState, sync: &SyncState, text: &str) {
         let _ = process_node_alive(state, node, &alive).await;
         return;
     }
-    let status = data.get("status").cloned().unwrap_or(data);
-    let _ = process_node_status(state, node, &status);
+    if let Some(status) = data.get("status").filter(|value| value.is_object()) {
+        let _ = process_node_status(state, node, status);
+    } else if data.get("mem").is_some() {
+        let _ = process_node_status(state, node, &data);
+    }
+    process_node_metrics(state, node, &data);
 }
 
 #[cfg(test)]
