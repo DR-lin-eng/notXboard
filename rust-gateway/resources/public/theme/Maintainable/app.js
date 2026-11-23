@@ -4232,6 +4232,8 @@ async function renderNodes() {
 
   let agents = [];
   let agentErr = '';
+  let machines = [];
+  let machineErr = '';
   const [owned, accessible, protocolOptions] = await Promise.all([
     apiFetch('/api/v1/user/server-nodes'),
     apiFetch('/api/v1/user/accessible-nodes'),
@@ -4241,6 +4243,12 @@ async function renderNodes() {
       .catch((e) => {
         agentErr = e.message || '加载 TCPing Agent 失败';
         agents = [];
+      }),
+    apiFetch('/api/v1/user/server-machines')
+      .then((res) => { machines = asArray(res?.data); })
+      .catch((e) => {
+        machineErr = e.message || '加载 Xboard-Node 机器失败';
+        machines = [];
       }),
   ]);
 
@@ -4284,6 +4292,43 @@ async function renderNodes() {
           </tbody>
         </table>
       ` : '<div class="notice" style="margin-top:10px;">还没有 TCPing Agent。建议至少部署 1 个，节点监控和被墙提醒才会开始工作。</div>'}
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <h2>Xboard-Node 机器</h2>
+          <div class="muted">机器模式：一台服务器运行一个 Xboard-Node，同时承载绑定到它的多个自有节点，节点增减会实时推送。</div>
+        </div>
+        <button class="btn primary" id="newMachineBtn">新增机器</button>
+      </div>
+      ${machineErr ? `<div class="notice error" style="margin-top:10px;">${escapeHtml(machineErr)}</div>` : ''}
+      ${machines.length ? html`
+        <table class="table" style="margin-top:10px;">
+          <thead>
+            <tr><th>ID</th><th>名称</th><th>绑定节点</th><th>状态</th><th>负载</th><th>最后上报</th><th></th></tr>
+          </thead>
+          <tbody>
+            ${machines.map((machine) => `
+              <tr>
+                <td>${machine.id}</td>
+                <td>${escapeHtml(machine.name || '-')}</td>
+                <td class="muted">${escapeHtml(asArray(machine.node_ids).join(', ') || '未绑定')}</td>
+                <td>${machine.is_active ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
+                <td class="muted">${machine.load_status ? escapeHtml(`CPU ${Number(machine.load_status.cpu || 0).toFixed(1)}%`) : '-'}</td>
+                <td class="muted">${escapeHtml(formatTs(machine.last_seen_at))}</td>
+                <td class="row end">
+                  <button class="btn small" data-machine-action="bind" data-id="${machine.id}">绑定节点</button>
+                  <button class="btn small" data-machine-action="install" data-id="${machine.id}">复制部署命令</button>
+                  <button class="btn small" data-machine-action="rotate" data-id="${machine.id}">轮换凭据</button>
+                  <button class="btn small" data-machine-action="toggle" data-id="${machine.id}">${machine.is_active ? '停用' : '启用'}</button>
+                  <button class="btn small danger" data-machine-action="delete" data-id="${machine.id}">删除</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : '<div class="notice" style="margin-top:10px;">还没有机器。单节点部署可直接使用下方节点的一键部署。</div>'}
     </div>
 
     <div class="card" style="margin-top: 12px;">
@@ -4392,6 +4437,60 @@ async function renderNodes() {
       });
     });
   }
+
+  qs('#newMachineBtn').addEventListener('click', async () => {
+    const name = String(prompt('机器名称', `machine-${Date.now()}`) || '').trim();
+    if (!name) return;
+    try {
+      await apiFetch('/api/v1/user/server-machines', { method: 'POST', body: { name } });
+      await renderNodes();
+    } catch (e) {
+      alert(e.message || '创建失败');
+    }
+  });
+
+  qsa('button[data-machine-action]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const action = String(btn.getAttribute('data-machine-action') || '');
+      const id = btn.getAttribute('data-id');
+      const machine = machines.find((m) => String(m.id) === String(id));
+      if (!id || !machine) return;
+      try {
+        if (action === 'bind') {
+          const deployable = ownedNodes.filter((n) => isXboardNodeDeployableProtocol(n.protocol)).map((n) => `${n.id}:${n.name || ''}`).join('  ');
+          const input = prompt(`输入要绑定到该机器的节点 ID（逗号分隔，留空表示解绑全部）\n可选：${deployable}`, asArray(machine.node_ids).join(','));
+          if (input === null) return;
+          const nodeIds = String(input).split(/[\s,，]+/).filter(Boolean).map((v) => Number(v));
+          if (nodeIds.some((v) => !Number.isInteger(v) || v <= 0)) throw new Error('节点 ID 格式错误');
+          await apiFetch(`/api/v1/user/server-machines/${id}/nodes`, { method: 'POST', body: { node_ids: nodeIds } });
+          await renderNodes();
+          return;
+        }
+        if (action === 'install' || action === 'rotate') {
+          if (action === 'rotate' && !confirm('确认轮换这台机器的凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
+          const path = action === 'rotate' ? 'deploy-command/rotate-token' : 'deploy-command';
+          const res = await apiFetch(`/api/v1/user/server-machines/${id}/${path}`, { method: 'POST', body: {} });
+          const command = String(res?.data?.command || '').trim();
+          if (!command) throw new Error('未生成部署命令');
+          await copyText(command);
+          alert('机器模式部署命令已复制，请在目标服务器上以 root 执行。');
+          return;
+        }
+        if (action === 'toggle') {
+          await apiFetch(`/api/v1/user/server-machines/${id}`, { method: 'PUT', body: { is_active: !machine.is_active } });
+          await renderNodes();
+          return;
+        }
+        if (action === 'delete') {
+          if (!confirm('确认删除这台机器？已绑定的节点会解绑，节点本身不会删除。')) return;
+          await apiFetch(`/api/v1/user/server-machines/${id}`, { method: 'DELETE' });
+          await renderNodes();
+        }
+      } catch (e) {
+        alert(e.message || '操作失败');
+      }
+    });
+  });
 
   qsa('button[data-agent-action]').forEach((btn) => {
     btn.addEventListener('click', async () => {
