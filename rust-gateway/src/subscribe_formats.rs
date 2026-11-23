@@ -229,7 +229,10 @@ pub(crate) async fn build_stash_yaml_payload(
             _ => None,
         };
 
-        if let Some(proxy) = proxy {
+        if let Some(mut proxy) = proxy {
+            if matches!(normalized_type.as_str(), "vmess" | "vless" | "trojan") {
+                normalize_stash_tcp_network(&mut proxy, &settings);
+            }
             proxies.push(proxy);
             proxy_names.push(server.name.clone());
         }
@@ -1387,4 +1390,24 @@ fn stash_regex_matches(pattern: &str, candidate: &str) -> bool {
         .ok()
         .map(|compiled| compiled.is_match(candidate))
         .unwrap_or(false)
+}
+
+fn normalize_stash_tcp_network(proxy: &mut Value, settings: &Map<String, Value>) {
+    if json_string(settings, "network", "tcp") != "tcp" {
+        return;
+    }
+    let header_type = settings
+        .get("network_settings")
+        .and_then(|network| network.get("header"))
+        .and_then(|header| header.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("tcp");
+    if header_type == "http" {
+        proxy["network"] = Value::String("http".to_string());
+        return;
+    }
+    if let Some(object) = proxy.as_object_mut() {
+        object.insert("network".to_string(), Value::String("tcp".to_string()));
+        object.remove("http-opts");
+    }
 }
