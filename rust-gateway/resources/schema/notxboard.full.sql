@@ -219,6 +219,7 @@ CREATE TABLE `server_nodes` (
   `v2bx_node_id` int DEFAULT NULL COMMENT 'V2bX 节点 ID',
   `v2bx_config` json DEFAULT NULL COMMENT 'V2bX 配置',
   `v2bx_token` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'V2bX 认证令牌',
+  `machine_id` bigint unsigned DEFAULT NULL,
   `device_limit` int NOT NULL DEFAULT '0' COMMENT '设备数限制',
   `connection_limit` int NOT NULL DEFAULT '0' COMMENT '连接数限制',
   `speed_limit_up` int NOT NULL DEFAULT '0' COMMENT '上传限速 (Mbps)',
@@ -235,6 +236,7 @@ CREATE TABLE `server_nodes` (
   UNIQUE KEY `server_nodes_v2bx_token_unique` (`v2bx_token`),
   KEY `idx_server_nodes_v2bx_node_token` (`v2bx_node_id`,`v2bx_token`),
   KEY `idx_server_nodes_status_user` (`status`,`user_id`),
+  KEY `server_nodes_machine_id_index` (`machine_id`),
   CONSTRAINT `server_nodes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;

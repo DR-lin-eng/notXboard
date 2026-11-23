@@ -336,3 +336,312 @@ mod tests {
         assert_eq!(status["swap"]["total"], json!(0));
     }
 }
+
+fn new_machine_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn machine_not_found() -> Response<Body> {
+    json_status_response(StatusCode::NOT_FOUND, json!({ "message": "Machine not found" }))
+}
+
+async fn owned_machine_exists(state: &AppState, machine_id: u64, user_id: i64) -> Result<bool, Response<Body>> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_machines WHERE id = ? AND user_id = ?")
+        .bind(machine_id)
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal_error)?;
+    Ok(count == 1)
+}
+
+fn machine_text_field(payload: &Value, key: &str, max_chars: usize) -> Result<Option<String>, Response<Body>> {
+    match payload.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().chars().count() <= max_chars => Ok(Some(value.trim().to_string())),
+        _ => Err(json_error(StatusCode::UNPROCESSABLE_ENTITY, &format!("Invalid {key}"))),
+    }
+}
+
+pub(crate) async fn user_machines_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        let rows = sqlx::query(
+            "SELECT machine.id, machine.name, machine.notes, machine.is_active, machine.last_seen_at,
+                    machine.load_status,
+                    (SELECT GROUP_CONCAT(node.id ORDER BY node.id) FROM server_nodes node
+                     WHERE node.machine_id = machine.id AND node.user_id = machine.user_id) AS node_ids
+             FROM server_machines machine
+             WHERE machine.user_id = ?
+             ORDER BY machine.id DESC",
+        )
+        .bind(user.id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal_error)?;
+        let data = rows
+            .iter()
+            .map(|row| {
+                let node_ids = row
+                    .try_get::<Option<String>, _>("node_ids")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .collect::<Vec<_>>();
+                json!({
+                    "id": row.try_get::<u64, _>("id").unwrap_or_default(),
+                    "name": row.try_get::<String, _>("name").unwrap_or_default(),
+                    "notes": row.try_get::<Option<String>, _>("notes").ok().flatten(),
+                    "is_active": row.try_get::<i8, _>("is_active").unwrap_or(0) == 1,
+                    "last_seen_at": row.try_get::<Option<u32>, _>("last_seen_at").ok().flatten(),
+                    "load_status": row.try_get::<Option<SqlxJson<Value>>, _>("load_status").ok().flatten().map(|v| v.0),
+                    "node_ids": node_ids,
+                    "token_configured": true,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, Response<Body>>(json_value_response(json!({ "data": data })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn user_machines_store(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        let payload = parse_json_body(body).await?;
+        let name = machine_text_field(&payload, "name", 255)?
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| json_error(StatusCode::UNPROCESSABLE_ENTITY, "Machine name is required"))?;
+        let notes = machine_text_field(&payload, "notes", 2000)?;
+        let inserted = sqlx::query(
+            "INSERT INTO server_machines (user_id, name, token, notes, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 1, NOW(), NOW())",
+        )
+        .bind(user.id)
+        .bind(&name)
+        .bind(new_machine_token())
+        .bind(notes)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+        Ok::<_, Response<Body>>(json_value_response(json!({
+            "data": { "id": inserted.last_insert_id(), "name": name }
+        })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn user_machines_update(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(machine_id): axum::extract::Path<u64>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        let payload = parse_json_body(body).await?;
+        if !owned_machine_exists(&state, machine_id, user.id).await? {
+            return Ok(machine_not_found());
+        }
+        let name = machine_text_field(&payload, "name", 255)?.filter(|name| !name.is_empty());
+        let notes = machine_text_field(&payload, "notes", 2000)?;
+        let is_active = match payload.get("is_active") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(value)) => Some(*value),
+            Some(Value::Number(value)) => Some(value.as_i64() == Some(1)),
+            _ => return Err(json_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid is_active")),
+        };
+        sqlx::query(
+            "UPDATE server_machines
+             SET name = COALESCE(?, name), notes = COALESCE(?, notes),
+                 is_active = COALESCE(?, is_active), updated_at = NOW()
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(name)
+        .bind(notes)
+        .bind(is_active.map(i8::from))
+        .bind(machine_id)
+        .bind(user.id)
+        .execute(&state.db)
+        .await
+        .map_err(internal_error)?;
+        Ok(json_value_response(json!({ "data": true })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn user_machines_destroy(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(machine_id): axum::extract::Path<u64>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        let mut tx = state.db.begin().await.map_err(internal_error)?;
+        sqlx::query("UPDATE server_nodes SET machine_id = NULL, updated_at = NOW() WHERE machine_id = ? AND user_id = ?")
+            .bind(machine_id)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        let deleted = sqlx::query("DELETE FROM server_machines WHERE id = ? AND user_id = ?")
+            .bind(machine_id)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        if deleted.rows_affected() != 1 {
+            tx.rollback().await.ok();
+            return Ok(machine_not_found());
+        }
+        tx.commit().await.map_err(internal_error)?;
+        Ok::<_, Response<Body>>(json_value_response(json!({ "data": true })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn user_machines_bind_nodes(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(machine_id): axum::extract::Path<u64>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        let payload = parse_json_body(body).await?;
+        let node_ids = payload
+            .get("node_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| json_error(StatusCode::UNPROCESSABLE_ENTITY, "node_ids must be an array"))?
+            .iter()
+            .map(|value| value.as_u64().filter(|id| *id > 0))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| json_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid node id"))?;
+        if node_ids.len() > 500 {
+            return Err(json_error(StatusCode::UNPROCESSABLE_ENTITY, "Too many nodes"));
+        }
+        let mut tx = state.db.begin().await.map_err(internal_error)?;
+        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_machines WHERE id = ? AND user_id = ? FOR UPDATE")
+            .bind(machine_id)
+            .bind(user.id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        if owned != 1 {
+            tx.rollback().await.ok();
+            return Ok(machine_not_found());
+        }
+        sqlx::query("UPDATE server_nodes SET machine_id = NULL, updated_at = NOW() WHERE machine_id = ? AND user_id = ?")
+            .bind(machine_id)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal_error)?;
+        if !node_ids.is_empty() {
+            let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+                "UPDATE server_nodes SET machine_id = ",
+            );
+            query.push_bind(machine_id);
+            query.push(", updated_at = NOW() WHERE user_id = ");
+            query.push_bind(user.id);
+            query.push(" AND id IN (");
+            let mut separated = query.separated(", ");
+            for node_id in &node_ids {
+                separated.push_bind(*node_id);
+            }
+            separated.push_unseparated(")");
+            let updated = query.build().execute(&mut *tx).await.map_err(internal_error)?;
+            if updated.rows_affected() != node_ids.len() as u64 {
+                tx.rollback().await.ok();
+                return Err(json_error(StatusCode::FORBIDDEN, "Only your own nodes can be bound to a machine"));
+            }
+        }
+        tx.commit().await.map_err(internal_error)?;
+        Ok::<_, Response<Body>>(json_value_response(json!({ "data": { "node_ids": node_ids } })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
+
+pub(crate) async fn user_machines_deploy_command(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(machine_id): axum::extract::Path<u64>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response<Body> {
+    let rotate = uri.path().ends_with("/rotate-token");
+    let result = async {
+        let user = authenticate_bearer_user(&state, &headers).await?;
+        if rotate {
+            sqlx::query("UPDATE server_machines SET token = ?, updated_at = NOW() WHERE id = ? AND user_id = ?")
+                .bind(new_machine_token())
+                .bind(machine_id)
+                .bind(user.id)
+                .execute(&state.db)
+                .await
+                .map_err(internal_error)?;
+        }
+        let token: Option<String> = sqlx::query_scalar(
+            "SELECT token FROM server_machines WHERE id = ? AND user_id = ? AND is_active = 1 LIMIT 1",
+        )
+        .bind(machine_id)
+        .bind(user.id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal_error)?;
+        let Some(token) = token else {
+            return Ok(machine_not_found());
+        };
+        let bootstrap = crate::machine_bootstrap_support::issue_machine_bootstrap_ticket(
+            &state,
+            "xboard-machine",
+            user.id,
+            machine_id,
+            &token,
+        )
+        .await
+        .map_err(|err| {
+            error!("xboard-machine bootstrap ticket creation failed: {err}");
+            json_error(StatusCode::SERVICE_UNAVAILABLE, "Installer bootstrap unavailable")
+        })?;
+        let panel_url = resolve_installer_panel_base_url(&state).await?;
+        let script_url = format!("{}/xboard-node-install.sh?{}", panel_url.trim_end_matches('/'), bootstrap.query);
+        let shell_arg = crate::user_v1::server_nodes::posix_shell_arg;
+        let command = format!(
+            "{} {} | bash -s -- --panel {} --machine-id {} --bootstrap-token {} --bootstrap-query {}",
+            installer_curl_command_prefix(&panel_url),
+            shell_arg(&script_url),
+            shell_arg(&panel_url),
+            shell_arg(&machine_id.to_string()),
+            shell_arg(&bootstrap.ticket),
+            shell_arg(&bootstrap.query),
+        );
+        Ok::<_, Response<Body>>(json_value_response(json!({
+            "data": {
+                "script_url": script_url,
+                "command": command,
+                "panel_url": panel_url,
+                "machine_id": machine_id,
+                "backend": "xboard-node",
+                "mode": "machine",
+                "bootstrap_expires_in": bootstrap.expires_in,
+                "token_rotated": rotate,
+            }
+        })))
+    }
+    .await;
+    result.unwrap_or_else(|response| response)
+}
