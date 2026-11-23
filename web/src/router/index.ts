@@ -39,6 +39,11 @@ const routes: RouteRecordRaw[] = [
       { path: 'node-plans', component: () => import('@/pages/NodePlans.vue'), meta: { title: '节点套餐' } },
       { path: 'node-plans/new', component: () => import('@/pages/NodePlanForm.vue'), meta: { title: '新建节点套餐' } },
       { path: 'node-plans/edit/:id', component: () => import('@/pages/NodePlanForm.vue'), meta: { title: '编辑节点套餐' } },
+      { path: 'node-admin', component: () => import('@/pages/nodeadmin/NodeAdmin.vue'), meta: { title: '节点用户' } },
+      { path: 'node-admin/refunds', component: () => import('@/pages/nodeadmin/NodeAdminRefunds.vue'), meta: { title: '节点退款' } },
+      { path: 'node-admin/refund/:id', component: () => import('@/pages/nodeadmin/NodeAdminRefundDetail.vue'), meta: { title: '处理退款' } },
+      { path: 'node-admin/node/:id', component: () => import('@/pages/nodeadmin/NodeAdminUsers.vue'), meta: { title: '节点用户流量' } },
+      { path: 'node-admin/ticket/:id', component: () => import('@/pages/nodeadmin/NodeAdminTicket.vue'), meta: { title: '处理工单' } },
       // user-routes
     ],
   },
