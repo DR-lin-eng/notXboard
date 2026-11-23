@@ -116,3 +116,16 @@ export const TICKET_LEVELS = [
   { value: '1', label: '中' },
   { value: '2', label: '高' },
 ] as const
+
+export type PlanVisibility = 'public' | 'link_only' | 'assigned_only'
+export function planVisibility(scope: unknown): PlanVisibility {
+  const raw = String(scope || '').trim().toLowerCase()
+  return raw === 'link_only' || raw === 'assigned_only' ? raw : 'public'
+}
+export function planShareLink(token: unknown): string {
+  const text = String(token || '').trim()
+  return text ? `${location.origin}/app/#/plan-link/${encodeURIComponent(text)}` : ''
+}
+export function hasTrialQuota(raw: unknown): boolean {
+  return Boolean(raw) && typeof raw === 'object' && Object.values(raw as object).some((value) => Number(value || 0) > 0)
+}

@@ -36,6 +36,9 @@ const routes: RouteRecordRaw[] = [
       { path: 'nodes/:id/audit-rules', component: () => import('@/pages/nodes/NodeAuditRules.vue'), meta: { title: '审计规则' } },
       { path: 'tickets', component: () => import('@/pages/Tickets.vue'), meta: { title: '工单' } },
       { path: 'ticket/:id', component: () => import('@/pages/TicketDetail.vue'), meta: { title: '工单详情' } },
+      { path: 'node-plans', component: () => import('@/pages/NodePlans.vue'), meta: { title: '节点套餐' } },
+      { path: 'node-plans/new', component: () => import('@/pages/NodePlanForm.vue'), meta: { title: '新建节点套餐' } },
+      { path: 'node-plans/edit/:id', component: () => import('@/pages/NodePlanForm.vue'), meta: { title: '编辑节点套餐' } },
       // user-routes
     ],
   },
