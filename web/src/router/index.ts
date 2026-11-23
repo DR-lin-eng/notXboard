@@ -20,6 +20,15 @@ const routes: RouteRecordRaw[] = [
     children: [
       { path: '', redirect: '/dashboard' },
       { path: 'dashboard', component: () => import('@/pages/Dashboard.vue'), meta: { title: '概览' } },
+      { path: 'plans', component: () => import('@/pages/Plans.vue'), meta: { title: '套餐' } },
+      { path: 'plan-link/:token', component: () => import('@/pages/Plans.vue'), meta: { title: '专属套餐' } },
+      { path: 'orders', component: () => import('@/pages/Orders.vue'), meta: { title: '订单' } },
+      { path: 'order/:tradeNo', component: () => import('@/pages/OrderDetail.vue'), meta: { title: '订单详情' } },
+      { path: 'refunds', component: () => import('@/pages/Refunds.vue'), meta: { title: '退款' } },
+      { path: 'refund/:id', component: () => import('@/pages/RefundDetail.vue'), meta: { title: '退款详情' } },
+      { path: 'refund-votes', component: () => import('@/pages/RefundVotes.vue'), meta: { title: '争议投票', flag: 'dispute' } },
+      { path: 'refund-vote/:id', component: () => import('@/pages/RefundVoteDetail.vue'), meta: { title: '争议投票', flag: 'dispute' } },
+      // user-routes
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
