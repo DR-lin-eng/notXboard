@@ -16,7 +16,7 @@ V2bX 已不再使用，节点后端统一为 [cedar2025/Xboard-Node](https://git
 | `GET /api/v1/server/UniProxy/config`、`/user` | 节点配置和用户列表，支持 ETag |
 | `POST /api/v2/server/report` | 合并上报 traffic/alive/online/status |
 | `POST /api/v2/server/machine/nodes`、`/status` | Machine 模式节点列表和机器负载 |
-| `GET /api/v2/server/ws` | WebSocket：`auth.success`、`ping`、`sync.config`、`sync.users`、`sync.nodes`，接收 `node.status` |
+| `GET /api/v2/server/ws` | WebSocket：下发 `auth.success`、`ping`、`sync.config`、`sync.users`、`sync.user.delta`（增量 add/remove）、`sync.devices`、`sync.nodes`（Machine）；接收 `node.status`、`report.devices` |
 
 鉴权：节点用 `token` + `node_id`，机器用 `token` + `machine_id`；GET 走查询参数，POST 走 JSON body。token 必须是 64 位十六进制。Machine token 只能访问绑定到该机器且属于同一 owner 的节点，共享节点授权逻辑不变。
 
