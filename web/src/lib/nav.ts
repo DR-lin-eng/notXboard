@@ -1,7 +1,7 @@
 import type { Component } from 'vue'
 import {
   Activity, Bell, BookOpen, Box, CreditCard, Download, Gauge, Gift, Globe, HeartHandshake, Home, KeyRound, Layers, LifeBuoy,
-  Megaphone, MessageSquare, Package, Puzzle, Receipt, RotateCcw, Scale, Send, Server, ShieldAlert, ShieldCheck, Terminal,
+  Megaphone, MessageSquare, Package, Puzzle, Radar, Receipt, RotateCcw, Scale, Send, Server, ShieldAlert, ShieldCheck, Terminal,
   TicketPercent, Undo2, UserCog, UserRound, Users, Wallet, Wrench,
 } from 'lucide-vue-next'
 
@@ -68,6 +68,7 @@ export const NAV: NavGroup[] = [
     role: 'admin',
     items: [
       { to: '/admin', label: '工作台', icon: Gauge, role: 'admin' },
+      { to: '/admin/command-center', label: '指挥中心', icon: Radar, role: 'super' },
       { to: '/admin/users', label: '用户', icon: UserCog, role: 'super' },
       { to: '/admin/tickets', label: '工单处理', icon: LifeBuoy, role: 'admin' },
       { to: '/admin/plans', label: '平台套餐', icon: Package, role: 'admin' },

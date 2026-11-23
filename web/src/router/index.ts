@@ -55,6 +55,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'sponsor/:tradeNo', component: () => import('@/pages/SponsorDetail.vue'), meta: { title: '赞助订单' } },
       { path: 'audit', component: () => import('@/pages/AuditLogs.vue'), meta: { title: '审计日志' } },
       { path: 'admin', component: () => import('@/pages/admin/Home.vue'), meta: { title: '工作台', role: 'admin' } },
+      { path: 'admin/command-center', component: () => import('@/pages/admin/CommandCenter.vue'), meta: { title: '指挥中心', role: 'super' } },
       { path: 'admin/users', component: () => import('@/pages/admin/Users.vue'), meta: { title: '用户', role: 'super' } },
       { path: 'admin/tickets', component: () => import('@/pages/admin/Tickets.vue'), meta: { title: '工单处理', role: 'admin' } },
       { path: 'admin/plans', component: () => import('@/pages/admin/Plans.vue'), meta: { title: '平台套餐', role: 'admin' } },
