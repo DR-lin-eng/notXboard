@@ -13,7 +13,6 @@ import {
 } from '@/lib/nodeProtocol'
 import { fieldErrors, locationInputValue, nodeLocations, nodeStatus, parseLocation, serializeLocation } from '@/lib/nodes'
 import { useAsync } from '@/lib/useAsync'
-import { asArray } from '@/lib/format'
 import { useSession } from '@/stores/session'
 import { useUi } from '@/stores/ui'
 
@@ -105,8 +104,6 @@ async function save() {
   const servicePort = Number(form.service_port)
   const tcpingPort = Number(form.tcping_port)
   const limitGb = Number(form.traffic_limit_gb) || 0
-  const savedAccess = node.value?.access_control
-  const existingAccess = savedAccess && typeof savedAccess === 'object' && !Array.isArray(savedAccess) ? savedAccess : {}
   const payload: Record<string, unknown> = {
     name: form.name.trim(),
     ...location,
@@ -129,17 +126,24 @@ async function save() {
     tcping_recover_after_seconds: Number(form.tcping_recover_after_seconds) || 120,
   }
   if (!editing.value) payload.protocol = form.protocol
+  const minTrust = Number(form.min_trust) || 0
   // Only the site owner may open a node to other users; the API rejects the field from anyone else.
   if (session.isSuperAdmin) {
-    // The grant list is resent from the users that still exist, not from the ids saved with the node.
-    const grantedIds = asArray(node.value?.authorized_users).map((item: any) => Number(item?.id)).filter((id: number) => id > 0)
-    payload.access_control = { ...existingAccess, authorized_users: grantedIds, min_trust_level: Number(form.min_trust) || 0 }
     payload.concurrent_ip_limit = Number(form.concurrent_ip_limit) || 0
+    if (!editing.value) payload.access_control = { min_trust_level: minTrust }
   }
+  const trustChanged = session.isSuperAdmin && editing.value && minTrust !== Number(node.value?.access_control?.min_trust_level ?? 0)
 
   saving.value = true
   try {
     if (editing.value) {
+      if (trustChanged) {
+        // Quotas and grants belong to the sharing page: merge onto the node as it is now and leave the grants alone.
+        const current = await api<any>(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}`)
+        const access = current?.access_control && typeof current.access_control === 'object' && !Array.isArray(current.access_control) ? { ...current.access_control } : {}
+        delete access.authorized_users
+        payload.access_control = { ...access, min_trust_level: minTrust }
+      }
       await api(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}`, { method: 'PUT', body: payload })
       ui.ok('节点已保存')
     } else {
