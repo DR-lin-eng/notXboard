@@ -183,10 +183,6 @@ else
   SUBJECT_ARGS=(--node-id "$NODE_ID")
   SUBJECT_LABEL="node ${NODE_ID}"
 fi
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files V2bX.service >/dev/null 2>&1; then
-  echo "[xboard-node-install] stopping legacy V2bX.service to free node ports"
-  systemctl disable --now V2bX.service >/dev/null 2>&1 || true
-fi
 echo "[xboard-node-install] ${SCRIPT_VERSION}: installing Xboard-Node ${RELEASE_VERSION} (${KERNEL}) for ${SUBJECT_LABEL}"
 bash "$INSTALLER" install \
   --mode "$MODE" \
