@@ -176,7 +176,7 @@ async fn run_socket(state: Arc<AppState>, mut socket: WebSocket, subject: WsSubj
             }
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(text))) => handle_incoming(&state, &sync, text.as_str()).await,
+                    Some(Ok(Message::Text(text))) => handle_incoming(&state, &subject, &sync, text.as_str()).await,
                     Some(Ok(Message::Ping(payload))) => {
                         if socket.send(Message::Pong(payload)).await.is_err() {
                             return;
@@ -266,7 +266,7 @@ async fn collect_sync_messages(
     Ok(messages)
 }
 
-async fn handle_incoming(state: &AppState, sync: &SyncState, text: &str) {
+async fn handle_incoming(state: &AppState, subject: &WsSubject, sync: &SyncState, text: &str) {
     let Ok(message) = serde_json::from_str::<Value>(text) else {
         return;
     };
@@ -279,7 +279,13 @@ async fn handle_incoming(state: &AppState, sync: &SyncState, text: &str) {
         .get("node_id")
         .and_then(Value::as_u64)
         .or_else(|| (sync.nodes.len() == 1).then(|| sync.nodes[0].id));
-    let Some(node) = node_id.and_then(|id| sync.nodes.iter().find(|node| node.id == id)) else {
+    let Some(node_id) = node_id else {
+        return;
+    };
+    let Ok((_, nodes)) = resolve_nodes(state, subject).await else {
+        return;
+    };
+    let Some(node) = nodes.iter().find(|node| node.id == node_id) else {
         return;
     };
     if event == "report.devices" {
@@ -331,6 +337,9 @@ fn compute_user_delta(
         .filter(|user| previous_by_id.get(&user.id).is_none_or(|old| *old != *user))
         .cloned()
         .collect::<Vec<_>>();
+    if next.is_empty() {
+        return (!removed.is_empty()).then_some((removed, Vec::new()));
+    }
     let changes = removed.len() + added.len();
     if changes == 0 || changes > (next.len() / 2).max(DELTA_MIN_THRESHOLD) {
         return None;
@@ -364,5 +373,8 @@ mod delta_tests {
         assert_eq!(removed.iter().map(|u| u.id).collect::<Vec<_>>(), vec![3]);
         assert_eq!(added.iter().map(|u| u.id).collect::<Vec<_>>(), vec![2, 4]);
         assert!(compute_user_delta(&next, &next).is_none());
+        let many = (0..80).map(|id| user(id, "x", 0)).collect::<Vec<_>>();
+        let (removed, added) = compute_user_delta(&many, &[]).unwrap();
+        assert_eq!((removed.len(), added.len()), (80, 0));
     }
 }
