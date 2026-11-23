@@ -13,6 +13,7 @@ import {
 } from '@/lib/nodeProtocol'
 import { fieldErrors, locationInputValue, nodeLocations, nodeStatus, parseLocation, serializeLocation } from '@/lib/nodes'
 import { useAsync } from '@/lib/useAsync'
+import { asArray } from '@/lib/format'
 import { useSession } from '@/stores/session'
 import { useUi } from '@/stores/ui'
 
@@ -130,7 +131,9 @@ async function save() {
   if (!editing.value) payload.protocol = form.protocol
   // Only the site owner may open a node to other users; the API rejects the field from anyone else.
   if (session.isSuperAdmin) {
-    payload.access_control = { ...existingAccess, min_trust_level: Number(form.min_trust) || 0 }
+    // The grant list is resent from the users that still exist, not from the ids saved with the node.
+    const grantedIds = asArray(node.value?.authorized_users).map((item: any) => Number(item?.id)).filter((id: number) => id > 0)
+    payload.access_control = { ...existingAccess, authorized_users: grantedIds, min_trust_level: Number(form.min_trust) || 0 }
     payload.concurrent_ip_limit = Number(form.concurrent_ip_limit) || 0
   }
 

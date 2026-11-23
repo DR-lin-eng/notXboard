@@ -24,7 +24,8 @@ const { data: node, loading, error, reload } = useAsync(async () => {
   const data = await api<any>(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}`)
   const quota = data?.access_control?.free_quota_gb_by_trust_level || {}
   form.min_trust = Number(data?.access_control?.min_trust_level ?? 0)
-  form.user_ids = asArray(data?.access_control?.authorized_users).join(',')
+  // `authorized_users` holds the current grants; ids saved in `access_control` can name deleted accounts.
+  form.user_ids = asArray(data?.authorized_users).map((item: any) => Number(item?.id)).filter((id: number) => id > 0).join(',')
   for (const level of TRUST_LEVEL_OPTIONS) form.quota[level] = Number(quota[String(level)] ?? 0) || 0
   return data || {}
 })
