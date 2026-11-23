@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { formatTs } from '@/lib/format'
-defineProps<{ messages: any[] }>()
+// `labels` overrides the author names: [is_me, other].
+const props = defineProps<{ messages: any[]; labels?: [string, string] }>()
+const author = (m: any) => (props.labels ? props.labels[m.is_me ? 0 : 1] : m.is_me ? '我' : `用户 #${m.user_id}`)
 const when = (value: unknown) => (typeof value === 'number' || /^\d+$/.test(String(value)) ? formatTs(value) : String(value || ''))
 </script>
 
@@ -8,7 +10,7 @@ const when = (value: unknown) => (typeof value === 'number' || /^\d+$/.test(Stri
   <div v-if="!messages.length" class="empty">还没有消息。</div>
   <div v-else class="thread">
     <div v-for="(m, index) in messages" :key="index" class="msg" :class="{ me: m.is_me }">
-      <div class="muted small">{{ m.is_me ? '我' : `用户 #${m.user_id}` }} · {{ when(m.created_at) }}</div>
+      <div class="muted small">{{ author(m) }} · {{ when(m.created_at) }}</div>
       <div class="bubble">{{ m.message }}</div>
     </div>
   </div>
