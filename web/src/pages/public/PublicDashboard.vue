@@ -181,7 +181,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => stops.forEach((stop) => stop()))
 
-const rankName = (item: RankItem) => String(item.name || item.code || '未命名')
+const rankName = (item: RankItem) => String(item.name || (item.code && item.code !== 'ZZ' ? item.code : '') || '未知地区')
 const rankValue = (item: RankItem) => String(item.value_text ?? (item.count != null ? count.format(Number(item.count)) : '--'))
 const metric = (value: unknown, format: (v: unknown) => string) =>
   overview.phase === 'error' && !overview.data ? '--' : format(value)
@@ -200,7 +200,7 @@ const metric = (value: unknown, format: (v: unknown) => string) =>
       </div>
     </header>
 
-    <main class="pub-inner">
+    <main class="pub-inner pub-main">
       <section class="hero" aria-labelledby="pub-title">
         <div>
           <h1 id="pub-title">{{ site.name }} 运行概览</h1>
@@ -266,7 +266,7 @@ const metric = (value: unknown, format: (v: unknown) => string) =>
 .pub-bar { display: flex; align-items: center; gap: 8px; height: 56px; }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 650; color: var(--text); text-decoration: none; }
 .mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--accent); color: var(--on-accent); font-size: 11.5px; font-weight: 700; }
-main { flex: 1; padding-top: 28px; padding-bottom: 40px; }
+.pub-main { flex: 1; padding-top: 28px; padding-bottom: 40px; }
 .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .hero h1 { margin: 0 0 6px; font-size: 24px; line-height: 1.25; }
 .hero p { margin: 0; }

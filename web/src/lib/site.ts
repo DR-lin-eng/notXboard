@@ -15,7 +15,10 @@ export const site = {
 export function brandMark(name: string): string {
   const letters = name.replace(/[^A-Za-z0-9\u4e00-\u9fa5]/g, '')
   const caps = letters.replace(/[^A-Z]/g, '')
-  return (caps.length >= 2 ? caps.slice(0, 2) : letters.slice(0, 2)).toUpperCase() || 'NX'
+  if (caps.length >= 2) return caps.slice(0, 2)
+  // One inner capital, as in "notXboard", reads better as initial + capital than as the first two letters.
+  const inner = letters.slice(1).match(/[A-Z]/)?.[0]
+  return (inner ? letters[0] + inner : letters.slice(0, 2)).toUpperCase() || 'NX'
 }
 
 export function setTitle(page?: string): void {
