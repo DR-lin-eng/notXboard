@@ -481,10 +481,11 @@ pub(crate) async fn uniproxy_audit(
 pub(crate) async fn server_handshake(
     State(state): State<Arc<AppState>>,
     method: Method,
+    headers: HeaderMap,
     uri: Uri,
     body: Body,
 ) -> Response<Body> {
-    match build_server_handshake_response(&state, method, uri, body).await {
+    match build_server_handshake_response(&state, method, headers, uri, body).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -501,16 +502,10 @@ pub(crate) async fn server_report(
     }
 }
 
-pub(crate) async fn server_machine_unsupported() -> Response<Body> {
-    json_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "Machine mode is not supported; run Xboard-Node in node mode",
-    )
-}
-
 async fn build_server_handshake_response(
     state: &AppState,
     method: Method,
+    headers: HeaderMap,
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
@@ -519,11 +514,22 @@ async fn build_server_handshake_response(
     } else {
         json!({})
     };
-    authenticate_node_request(state, &uri, &mut payload).await?;
+    let credentials = node_credentials(&uri, &payload);
+    if !credentials.machine_id.trim().is_empty() && credentials.node_id.trim().is_empty() {
+        crate::xboard_node_machine_support::authenticate_machine(
+            state,
+            &credentials.machine_id,
+            &credentials.token,
+        )
+        .await?;
+    } else {
+        authenticate_node_request(state, &uri, &mut payload).await?;
+    }
     let push_interval = get_setting_int(state, "server_push_interval", 60).await;
     let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
+    let websocket = crate::xboard_node_ws_support::handshake_websocket_settings(state, &headers).await;
     Ok(json_value_response(json!({
-        "websocket": { "enabled": false },
+        "websocket": websocket,
         "settings": {
             "push_interval": push_interval,
             "pull_interval": pull_interval,
@@ -548,6 +554,26 @@ async fn build_server_report_response(
         process_node_status(state, &node, status)?;
     }
     Ok(json_value_response(json!({ "data": true })))
+}
+
+pub(crate) async fn build_node_config_payload(
+    state: &AppState,
+    node: &ServerNodeRow,
+) -> Result<Value, Response<Body>> {
+    let push_interval = get_setting_int(state, "server_push_interval", 60).await;
+    let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
+    let mut payload = build_server_node_panel_config(state, node)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("node_id".to_string(), json!(node.id));
+        object.insert(
+            "base_config".to_string(),
+            json!({
+                "push_interval": push_interval,
+                "pull_interval": pull_interval,
+            }),
+        );
+    }
+    Ok(payload)
 }
 
 pub(crate) fn build_uniproxy_read_cache_key(kind: &str, uri: &Uri) -> String {
@@ -596,19 +622,7 @@ async fn build_uniproxy_config_response(
         return Ok(response);
     }
 
-    let push_interval = get_setting_int(state, "server_push_interval", 60).await;
-    let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
-
-    let mut payload = build_server_node_panel_config(state, &node)?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "base_config".to_string(),
-            json!({
-                "push_interval": push_interval,
-                "pull_interval": pull_interval,
-            }),
-        );
-    }
+    let payload = build_node_config_payload(state, &node).await?;
 
     Ok(json_cached_response(
         state,
@@ -760,7 +774,7 @@ async fn build_uniproxy_status_response(
     })))
 }
 
-fn process_node_status(
+pub(crate) fn process_node_status(
     state: &AppState,
     node: &ServerNodeRow,
     payload: &Value,
@@ -884,10 +898,32 @@ pub(crate) async fn authenticate_node(
     state: &AppState,
     uri: &Uri,
 ) -> Result<ServerNodeRow, Response<Body>> {
+    let credentials = node_credentials(uri, &Value::Null);
+    authenticate_node_credentials(state, credentials).await
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NodeCredentials {
+    pub(crate) token: String,
+    pub(crate) node_id: String,
+    pub(crate) machine_id: String,
+}
+
+pub(crate) fn node_credentials(uri: &Uri, payload: &Value) -> NodeCredentials {
     let params = parse_query(uri);
-    let token = params.get("token").cloned().unwrap_or_default();
-    let node_id = params.get("node_id").cloned().unwrap_or_default();
-    authenticate_node_credentials(state, token, node_id).await
+    if params.get("token").is_some_and(|value| !value.is_empty()) {
+        let read = |key: &str| params.get(key).cloned().unwrap_or_default();
+        return NodeCredentials {
+            token: read("token"),
+            node_id: read("node_id"),
+            machine_id: read("machine_id"),
+        };
+    }
+    NodeCredentials {
+        token: node_auth_body_value(payload, "token"),
+        node_id: node_auth_body_value(payload, "node_id"),
+        machine_id: node_auth_body_value(payload, "machine_id"),
+    }
 }
 
 fn node_auth_body_value(payload: &Value, key: &str) -> String {
@@ -905,31 +941,26 @@ pub(crate) async fn authenticate_node_request(
     uri: &Uri,
     payload: &mut Value,
 ) -> Result<ServerNodeRow, Response<Body>> {
-    let params = parse_query(uri);
-    let (token, node_id) = if params.get("token").is_some_and(|value| !value.is_empty()) {
-        (
-            params.get("token").cloned().unwrap_or_default(),
-            params.get("node_id").cloned().unwrap_or_default(),
-        )
-    } else {
-        (
-            node_auth_body_value(payload, "token"),
-            node_auth_body_value(payload, "node_id"),
-        )
-    };
+    let credentials = node_credentials(uri, payload);
     if let Some(object) = payload.as_object_mut() {
         for key in NODE_AUTH_FIELDS {
             object.remove(key);
         }
     }
-    authenticate_node_credentials(state, token, node_id).await
+    authenticate_node_credentials(state, credentials).await
 }
 
-async fn authenticate_node_credentials(
+pub(crate) async fn authenticate_node_credentials(
     state: &AppState,
-    token: String,
-    node_id: String,
+    credentials: NodeCredentials,
 ) -> Result<ServerNodeRow, Response<Body>> {
+    let NodeCredentials { token, node_id, machine_id } = credentials;
+    if !machine_id.trim().is_empty() {
+        return crate::xboard_node_machine_support::authenticate_machine_node(
+            state, &machine_id, &token, &node_id,
+        )
+        .await;
+    }
 
     if !crate::machine_bootstrap_support::is_strong_machine_token(token.trim())
         || node_id.trim().is_empty()

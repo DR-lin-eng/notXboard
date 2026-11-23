@@ -201,7 +201,7 @@ fn gzip_bytes(raw: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     encoder.finish()
 }
 
-async fn load_or_build_uniproxy_user_snapshot(
+pub(crate) async fn load_or_build_uniproxy_user_snapshot(
     state: &AppState,
     node: &ServerNodeRow,
     cache_key: &str,

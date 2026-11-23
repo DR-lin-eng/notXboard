@@ -88,7 +88,8 @@ pub(crate) async fn installer_asset_authorized(state: &AppState, uri: &Uri) -> b
     let Some(signed) = parse_and_verify_bootstrap_query(uri, &state.app_key) else {
         return false;
     };
-    if signed.kind != expected_kind {
+    let machine_mode_installer = expected_kind == "xboard-node" && signed.kind == "xboard-machine";
+    if signed.kind != expected_kind && !machine_mode_installer {
         return false;
     }
     let Ok(Some(raw)) = redis_get_string(
@@ -190,6 +191,23 @@ async fn machine_bootstrap_subject_is_current(
                        WHERE duplicate.v2bx_token = node.v2bx_token
                          AND duplicate.id <> node.id
                    )",
+            )
+            .bind(payload.subject_id)
+            .bind(payload.issuer_user_id)
+            .bind(&payload.credential)
+            .fetch_one(&state.db)
+            .await
+        }
+        "xboard-machine" => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                 FROM server_machines machine
+                 JOIN v2_user owner ON owner.id = machine.user_id
+                 WHERE machine.id = ?
+                   AND owner.id = ?
+                   AND machine.token = ?
+                   AND machine.is_active = 1
+                   AND owner.banned = 0",
             )
             .bind(payload.subject_id)
             .bind(payload.issuer_user_id)
@@ -348,7 +366,7 @@ fn valid_ticket(value: &str) -> bool {
 }
 
 fn is_supported_kind(value: &str) -> bool {
-    matches!(value, "xboard-node" | "tcping")
+    matches!(value, "xboard-node" | "xboard-machine" | "tcping")
 }
 
 fn installer_kind_for_path(path: &str) -> Option<&'static str> {

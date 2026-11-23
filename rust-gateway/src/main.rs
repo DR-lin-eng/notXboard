@@ -26,6 +26,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod limits_support;
+mod xboard_node_machine_support;
+mod xboard_node_ws_support;
 mod plan_capacity_support;
 mod node_plans_support;
 mod commission_support;
@@ -294,7 +296,7 @@ pub(crate) use traffic_ingest_support::{
     load_primary_subscription_ids_for_node_users, AggregatedTrafficRow,
 };
 pub(crate) use uniproxy_support::{
-    server_handshake, server_machine_unsupported, server_report,
+    server_handshake, server_report,
     uniproxy_alive, uniproxy_alivelist, uniproxy_audit, uniproxy_config, uniproxy_push,
     uniproxy_status, uniproxy_user,
 };
@@ -1108,6 +1110,7 @@ async fn main() {
     crate::uniproxy_support::spawn_alive_session_worker(state.clone(), alive_session_rx);
     crate::legacy_traffic_support::spawn_legacy_submit_worker(state.clone(), legacy_submit_rx);
     crate::uniproxy_support::spawn_push_traffic_worker(state.clone(), push_traffic_rx);
+    crate::xboard_node_machine_support::spawn_xboard_node_schema_task(state.clone());
     let app = router_support::build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind listener");
     info!("notxboard-gateway listening on 0.0.0.0:{}", port);
