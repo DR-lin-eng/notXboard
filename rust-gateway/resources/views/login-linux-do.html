@@ -3,19 +3,33 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
+    <meta name="color-scheme" content="light dark">
     <title>Linux DO Connect 登录 · notXboard</title>
     <style>
         :root {
-            color-scheme: light;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-            --canvas: #f3f6f5;
+            color-scheme: light dark;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+            --canvas: #f7f7f8;
             --surface: #ffffff;
-            --text: #172026;
-            --muted: #5e6b73;
-            --line: #dce4e1;
-            --primary: #0f766e;
-            --primary-strong: #0b5f59;
+            --text: #18181b;
+            --muted: #6b6b76;
+            --line: #e4e4e8;
+            --primary: #4f46e5;
+            --primary-strong: #4338ca;
+            --on-primary: #ffffff;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --canvas: #0e0e11;
+                --surface: #17171b;
+                --text: #ededf0;
+                --muted: #9a9aa6;
+                --line: #2b2b33;
+                --primary: #8183f4;
+                --primary-strong: #9799f7;
+                --on-primary: #0e0e11;
+            }
         }
 
         * {
@@ -54,7 +68,7 @@
             display: grid;
             place-items: center;
             border-radius: 7px;
-            color: #ffffff;
+            color: var(--on-primary);
             background: var(--primary);
             font-size: 11px;
         }
@@ -64,7 +78,7 @@
             border: 1px solid var(--line);
             border-radius: 8px;
             background: var(--surface);
-            box-shadow: 0 10px 30px rgba(23, 32, 38, 0.08);
+            box-shadow: none;
         }
 
         h1 {
@@ -95,7 +109,7 @@
             padding: 10px 14px;
             border: 1px solid var(--primary);
             border-radius: 7px;
-            color: #ffffff;
+            color: var(--on-primary);
             background: var(--primary);
             font-size: 14px;
             font-weight: 700;
@@ -110,7 +124,7 @@
         }
 
         .button:focus-visible {
-            outline: 3px solid rgba(14, 116, 144, 0.3);
+            outline: 2px solid var(--primary);
             outline-offset: 3px;
         }
 

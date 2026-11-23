@@ -55,7 +55,8 @@ const percent = (part: unknown, total: unknown) => (Number(total) > 0 ? Math.rou
         <button type="button" class="btn" @click="reload(true)">刷新</button>
       </div>
     </div>
-    <AsyncState :loading="loading" :error="error" @retry="reload()">
+    <div v-if="data && error" class="notice error mb">刷新失败，显示的是上一次的数据：{{ error }}</div>
+    <AsyncState :loading="loading" :error="data ? '' : error" @retry="reload()">
       <div class="grid g4 mb">
         <div class="card stat"><div class="k">在线用户</div><div class="v tnum">{{ formatCompactNumber(overview.live_users) }}<small> / {{ formatCompactNumber(overview.total_users) }}</small></div><div class="d">{{ formatCompactNumber(overview.active_subscriptions) }} 个有效订阅</div></div>
         <div class="card stat"><div class="k">在线节点</div><div class="v tnum">{{ overview.online_nodes ?? 0 }}<small> / {{ overview.total_nodes ?? 0 }}</small></div><div class="d">{{ overview.maintenance_nodes ?? 0 }} 个维护中，{{ overview.traffic_hot_nodes ?? 0 }} 个流量告急</div></div>
@@ -85,7 +86,7 @@ const percent = (part: unknown, total: unknown) => (Number(total) > 0 ? Math.rou
           <div class="card-head"><h3>系统状态</h3></div>
           <div class="card-body">
             <dl class="kv">
-              <dt>定时调度</dt><dd><span class="badge" :class="system.schedule_ok ? 'ok' : 'danger'">{{ system.schedule_ok ? '运行中' : '未运行' }}</span><span class="muted small"> 上次运行 {{ formatAnyTs(system.schedule_last_runtime) }}</span></dd>
+              <dt>定时调度</dt><dd><span class="badge" :class="system.schedule_ok == null ? '' : system.schedule_ok ? 'ok' : 'danger'">{{ system.schedule_ok == null ? '未知' : system.schedule_ok ? '运行中' : '未运行' }}</span><span class="muted small"> 上次运行 {{ formatAnyTs(system.schedule_last_runtime) }}</span></dd>
               <dt>日志（info / warning / error）</dt><dd class="tnum">{{ system.logs?.info ?? 0 }} / {{ system.logs?.warning ?? 0 }} / <b :class="{ hot: Number(system.logs?.error) > 0 }">{{ system.logs?.error ?? 0 }}</b></dd>
               <dt>后台队列</dt><dd>
                 <div v-for="lane in queueLanes" :key="lane.key" class="small">{{ lane.label }}：排队 {{ lane.queued }} / 容量 {{ lane.capacity }}<b v-if="lane.failures > 0" class="hot">，失败 {{ lane.failures }} 次</b></div>

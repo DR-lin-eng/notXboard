@@ -132,7 +132,13 @@ pub async fn admin_leaderboards_redirect(
 }
 
 /// Renders the built single-page app shell, or `None` when the build output is not installed.
-async fn render_web_app_index(title: &str, version: &str, app_url: &str) -> Option<String> {
+/// `page` tells the single-page app which root to mount: `app` or `public`.
+async fn render_web_app_index(
+    title: &str,
+    version: &str,
+    app_url: &str,
+    page: &str,
+) -> Option<String> {
     let template = tokio::fs::read_to_string(crate::runtime_paths::public_path("app/index.html"))
         .await
         .ok()?;
@@ -140,7 +146,8 @@ async fn render_web_app_index(title: &str, version: &str, app_url: &str) -> Opti
         template
             .replace("__APP_NAME__", &escape_html(title))
             .replace("__APP_VERSION__", &escape_html(version))
-            .replace("__APP_URL__", &escape_html(app_url)),
+            .replace("__APP_URL__", &escape_html(app_url))
+            .replace("__APP_PAGE__", page),
     )
 }
 
@@ -173,7 +180,7 @@ async fn build_app_page_response(
         String::new(),
     ]);
     if !force_legacy {
-        if let Some(rendered) = render_web_app_index(&title, &version, &app_url).await {
+        if let Some(rendered) = render_web_app_index(&title, &version, &app_url, "app").await {
             return Ok(html_response(rendered));
         }
     }
@@ -252,6 +259,11 @@ async fn build_public_dashboard_page_response(
     let title = read_setting_from_db(state, "app_name", "Portal").await;
     let version = read_env_fallback("APP_VERSION", "1.0.0");
     let description = read_setting_from_db(state, "app_description", "Secure access portal").await;
+
+    let app_url = read_setting_from_db(state, "app_url", "").await;
+    if let Some(rendered) = render_web_app_index(&title, &version, &app_url, "public").await {
+        return Ok(html_response(rendered));
+    }
 
     let rendered = PUBLIC_DASHBOARD_TEMPLATE
         .replace("{{ $title }}", &escape_html(&title))

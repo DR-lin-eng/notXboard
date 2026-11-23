@@ -8,6 +8,8 @@ export const site = {
   name: meta('app-name', 'notXboard'),
   version: meta('app-version', 'dev'),
   url: meta('app-url', ''),
+  /** `public` when the gateway serves the public data page at `/`; `app` for the signed-in application. */
+  page: meta('app-page', 'app'),
 }
 
 export function brandMark(name: string): string {
