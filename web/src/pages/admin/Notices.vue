@@ -105,7 +105,15 @@ async function remove(notice: any) {
     <Modal v-if="form.open" :title="form.id ? `编辑公告 #${form.id}` : '新建公告'" wide @close="form.open = false">
       <form id="admin-notice-form" class="form-grid" @submit.prevent="save">
         <div v-if="form.error" class="notice error full" role="alert">{{ form.error }}</div>
-        <div v-if="form.scope_type === 'plan_subscribers'" class="notice full">这条公告只对 {{ form.target_plan_ids.length }} 个套餐的订阅者可见，保存后范围不变。</div>
+        <div v-if="form.scope_type === 'plan_subscribers'" class="notice full">
+          <template v-if="form.target_plan_ids.length">
+            仅对以下套餐的订阅者可见：
+            <span v-for="id in form.target_plan_ids" :key="id" class="badge">套餐 #{{ id }}
+              <button type="button" class="chip-x" :aria-label="`移除套餐 ${id}`" @click="form.target_plan_ids = form.target_plan_ids.filter((item) => item !== id)">×</button>
+            </span>
+          </template>
+          <template v-else>已移除全部目标套餐，保存后将变为全站公告。</template>
+        </div>
         <div class="field full"><label for="an-title">标题</label><input id="an-title" v-model="form.title" class="input" required></div>
         <div class="field full"><label for="an-content">内容</label><textarea id="an-content" v-model="form.content" class="textarea" rows="8" required /></div>
         <div class="field"><label for="an-img">图片地址（可空）</label><input id="an-img" v-model="form.img_url" class="input" placeholder="https://"></div>
@@ -120,3 +128,7 @@ async function remove(notice: any) {
     </Modal>
   </div>
 </template>
+
+<style scoped>
+.chip-x { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 0 0 4px; font: inherit; }
+</style>
