@@ -28,6 +28,10 @@ const routes: RouteRecordRaw[] = [
       { path: 'refund/:id', component: () => import('@/pages/RefundDetail.vue'), meta: { title: '退款详情' } },
       { path: 'refund-votes', component: () => import('@/pages/RefundVotes.vue'), meta: { title: '争议投票', flag: 'dispute' } },
       { path: 'refund-vote/:id', component: () => import('@/pages/RefundVoteDetail.vue'), meta: { title: '争议投票', flag: 'dispute' } },
+      { path: 'nodes', component: () => import('@/pages/Nodes.vue'), meta: { title: '节点与机器' } },
+      { path: 'nodes/new', component: () => import('@/pages/nodes/NodeForm.vue'), meta: { title: '新增节点' } },
+      { path: 'nodes/edit/:id', component: () => import('@/pages/nodes/NodeForm.vue'), meta: { title: '编辑节点' } },
+      { path: 'nodes/:id/monitor', component: () => import('@/pages/nodes/NodeMonitor.vue'), meta: { title: '节点监控' } },
       // user-routes
     ],
   },

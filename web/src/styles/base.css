@@ -146,6 +146,11 @@ a.li:hover, .li.click:hover { background: var(--surface-2); cursor: pointer; }
 .empty .t { color: var(--text); font-weight: 600; margin-bottom: 4px; }
 .skeleton { border-radius: var(--radius-sm); background: linear-gradient(90deg, var(--surface-2), var(--border), var(--surface-2)); background-size: 200% 100%; animation: sk 1.2s linear infinite; height: 14px; }
 @keyframes sk { to { background-position: -200% 0; } }
+.fold { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.fold > summary { padding: 10px 12px; cursor: pointer; font-weight: 550; font-size: 13.5px; user-select: none; }
+.fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fold[open] > summary { border-bottom: 1px solid var(--border); }
+.fold > :not(summary) { padding: 12px; margin-top: 0; }
 @media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } * { transition: none !important; } }
 
 /* responsive */

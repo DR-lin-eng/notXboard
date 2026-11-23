@@ -23,3 +23,5 @@
   --pop-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
 }
+:root { --chart-1: #4f46e5; --chart-2: #0f766e; --chart-3: #b45309; --chart-4: #be185d; --chart-5: #2563eb; --chart-6: #7c3aed; --chart-7: #0e7490; --chart-8: #475569; }
+:root[data-theme="dark"] { --chart-1: #8183f4; --chart-2: #2dd4bf; --chart-3: #fbbf24; --chart-4: #f472b6; --chart-5: #60a5fa; --chart-6: #c084fc; --chart-7: #22d3ee; --chart-8: #94a3b8; }
