@@ -1,6 +1,7 @@
 use crate::*;
 use crate::uniproxy_support::{
-    authenticate_node_credentials, build_node_config_payload, node_credentials, process_node_status,
+    authenticate_node_credentials, build_node_config_payload, load_uniproxy_device_ips, node_credentials,
+    process_node_alive, process_node_status,
     NodeCredentials,
 };
 use crate::uniproxy_user_support::load_or_build_uniproxy_user_snapshot;
@@ -128,7 +129,8 @@ struct SyncState {
     node_list: Option<String>,
     config: HashMap<u64, String>,
     users: HashMap<u64, String>,
-    node_ids: Vec<u64>,
+    devices: HashMap<u64, String>,
+    nodes: Vec<ServerNodeRow>,
 }
 
 fn event_message(event: &str, data: Value) -> Message {
@@ -171,7 +173,7 @@ async fn run_socket(state: Arc<AppState>, mut socket: WebSocket, subject: WsSubj
             }
             incoming = socket.recv() => {
                 match incoming {
-                    Some(Ok(Message::Text(text))) => handle_incoming(&state, &sync, text.as_str()),
+                    Some(Ok(Message::Text(text))) => handle_incoming(&state, &sync, text.as_str()).await,
                     Some(Ok(Message::Ping(payload))) => {
                         if socket.send(Message::Pong(payload)).await.is_err() {
                             return;
@@ -203,9 +205,10 @@ async fn collect_sync_messages(
         }
         sync.node_list = Some(digest);
     }
-    sync.node_ids = nodes.iter().map(|node| node.id).collect();
-    sync.config.retain(|id, _| sync.node_ids.contains(id));
-    sync.users.retain(|id, _| sync.node_ids.contains(id));
+    let node_ids = nodes.iter().map(|node| node.id).collect::<HashSet<_>>();
+    sync.config.retain(|id, _| node_ids.contains(id));
+    sync.users.retain(|id, _| node_ids.contains(id));
+    sync.devices.retain(|id, _| node_ids.contains(id));
     for node in &nodes {
         if let Ok(config) = build_node_config_payload(state, node).await {
             let digest = sha256_hex(&config.to_string());
@@ -227,49 +230,51 @@ async fn collect_sync_messages(
                 sync.users.insert(node.id, snapshot.version);
             }
         }
+        if let Ok(devices) = load_uniproxy_device_ips(state, node).await {
+            let digest = sha256_hex(&Value::Object(devices.clone()).to_string());
+            if sync.devices.get(&node.id) != Some(&digest) {
+                messages.push(event_message(
+                    "sync.devices",
+                    json!({ "users": devices, "node_id": node.id, "timestamp": timestamp }),
+                ));
+                sync.devices.insert(node.id, digest);
+            }
+        }
     }
+    sync.nodes = nodes;
     Ok(messages)
 }
 
-fn handle_incoming(state: &AppState, sync: &SyncState, text: &str) {
+async fn handle_incoming(state: &AppState, sync: &SyncState, text: &str) {
     let Ok(message) = serde_json::from_str::<Value>(text) else {
         return;
     };
-    if message.get("event").and_then(Value::as_str) != Some("node.status") {
+    let event = message.get("event").and_then(Value::as_str).unwrap_or_default();
+    if event != "node.status" && event != "report.devices" {
         return;
     }
     let data = message.get("data").cloned().unwrap_or(Value::Null);
     let node_id = data
         .get("node_id")
         .and_then(Value::as_u64)
-        .or_else(|| (sync.node_ids.len() == 1).then(|| sync.node_ids[0]));
-    let Some(node_id) = node_id.filter(|id| sync.node_ids.contains(id)) else {
+        .or_else(|| (sync.nodes.len() == 1).then(|| sync.nodes[0].id));
+    let Some(node) = node_id.and_then(|id| sync.nodes.iter().find(|node| node.id == id)) else {
         return;
     };
-    let status = data.get("status").cloned().unwrap_or(data);
-    let node = ServerNodeRow {
-        id: node_id,
-        ..ws_status_node_placeholder()
-    };
-    let _ = process_node_status(state, &node, &status);
-}
-
-fn ws_status_node_placeholder() -> ServerNodeRow {
-    ServerNodeRow {
-        id: 0,
-        user_id: 0,
-        name: String::new(),
-        host: String::new(),
-        port: 0,
-        service_port: None,
-        protocol: String::new(),
-        settings: None,
-        access_control: None,
-        device_limit: 0,
-        connection_limit: 0,
-        speed_limit_down: 0,
-        created_at: None,
+    if event == "report.devices" {
+        let devices = data.get("devices").cloned().unwrap_or(data);
+        let alive = match devices {
+            Value::Object(mut map) => {
+                map.remove("node_id");
+                Value::Object(map)
+            }
+            _ => return,
+        };
+        let _ = process_node_alive(state, node, &alive).await;
+        return;
     }
+    let status = data.get("status").cloned().unwrap_or(data);
+    let _ = process_node_status(state, node, &status);
 }
 
 #[cfg(test)]

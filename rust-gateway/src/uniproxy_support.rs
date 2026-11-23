@@ -32,6 +32,39 @@ pub(crate) struct QueuedAliveSessionUser {
     pub(crate) ips: Vec<String>,
 }
 
+pub(crate) async fn load_uniproxy_device_ips(
+    state: &AppState,
+    node: &ServerNodeRow,
+) -> Result<Map<String, Value>, sqlx::Error> {
+    let accessible_user_ids = get_accessible_user_ids_for_node(state, node, Some(100_000), None).await?;
+    let mut result = Map::new();
+    if accessible_user_ids.is_empty() {
+        return Ok(result);
+    }
+    let mut query = QueryBuilder::<sqlx::MySql>::new(
+        "SELECT DISTINCT user_id, ip_address FROM user_online_sessions
+         WHERE last_activity > (NOW() - INTERVAL 5 MINUTE) AND user_id IN (",
+    );
+    {
+        let mut separated = query.separated(", ");
+        for user_id in &accessible_user_ids {
+            separated.push_bind(user_id);
+        }
+    }
+    query.push(") ORDER BY user_id, ip_address");
+    for row in query.build().fetch_all(&state.db).await? {
+        let user_id: i32 = row.get("user_id");
+        let ip: String = row.get("ip_address");
+        if let Value::Array(list) = result
+            .entry(user_id.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            list.push(Value::from(ip));
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) async fn load_uniproxy_alive_counts(
     state: &AppState,
     node: &ServerNodeRow,
@@ -730,7 +763,7 @@ async fn build_uniproxy_alive_response(
     Ok(json_value_response(json!({ "data": true })))
 }
 
-async fn process_node_alive(
+pub(crate) async fn process_node_alive(
     state: &AppState,
     node: &ServerNodeRow,
     payload: &Value,
