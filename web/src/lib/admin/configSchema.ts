@@ -37,14 +37,32 @@ export function isOn(value: unknown): boolean {
   return value === true || value === 1 || value === '1' || value === 'true'
 }
 
+/** List settings come back as an array, a JSON array string or a comma-separated string. */
+function parseList(raw: unknown): string[] {
+  let items: unknown = raw
+  if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      items = JSON.parse(raw)
+    } catch {
+      items = raw
+    }
+  }
+  const list = Array.isArray(items) ? items : String(items ?? '').split(/[\r\n,]+/)
+  return list.map((item) => String(item ?? '').trim()).filter(Boolean)
+}
+
 export function readConfigValues(page: ConfigPage, config: Record<string, any>): Record<string, any> {
   const values: Record<string, any> = {}
   for (const field of page.sections.flatMap((section) => section.fields)) {
     const raw = config?.[field.group || page.group]?.[field.source || field.key]
     if (field.type === 'bool') values[field.key] = raw == null ? Boolean(field.fallback) : isOn(raw)
-    else if (field.type === 'lines') values[field.key] = Array.isArray(raw) ? raw.join('\n') : String(raw ?? '')
+    else if (field.type === 'lines') values[field.key] = parseList(raw).join('\n')
     else if (field.type === 'number' || field.type === 'float') values[field.key] = raw == null || raw === '' ? field.fallback ?? '' : Number(raw)
-    else values[field.key] = raw == null ? String(field.fallback ?? '') : String(raw)
+    else if (field.type === 'select') {
+      // A stored value outside the options would be rejected on save, so show the default instead.
+      const known = (field.options || []).some((option) => String(option.value) === String(raw))
+      values[field.key] = known ? String(raw) : String(field.fallback ?? '')
+    } else values[field.key] = raw == null ? String(field.fallback ?? '') : String(raw)
   }
   return values
 }
@@ -55,7 +73,7 @@ export function buildConfigPayload(page: ConfigPage, values: Record<string, any>
     if (field.type === 'readonly') continue
     const value = values[field.key]
     if (field.type === 'bool') payload[field.key] = value ? 1 : 0
-    else if (field.type === 'lines') payload[field.key] = String(value || '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+    else if (field.type === 'lines') payload[field.key] = parseList(value)
     else if (field.type === 'number' || field.type === 'float') {
       let num = field.type === 'number' ? parseInt(String(value), 10) : parseFloat(String(value))
       if (!Number.isFinite(num)) num = Number(field.fallback ?? 0)
