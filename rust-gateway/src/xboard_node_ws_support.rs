@@ -4,7 +4,7 @@ use crate::uniproxy_support::{
     process_node_alive, process_node_metrics, process_node_status,
     NodeCredentials,
 };
-use crate::uniproxy_user_support::load_or_build_uniproxy_user_snapshot;
+use crate::uniproxy_user_support::{load_or_build_uniproxy_user_snapshot, UniProxyUserItem};
 use crate::xboard_node_machine_support::{
     authenticate_machine, load_machine_server_nodes, machine_node_list,
 };
@@ -129,6 +129,7 @@ struct SyncState {
     node_list: Option<String>,
     config: HashMap<u64, String>,
     users: HashMap<u64, String>,
+    user_items: HashMap<u64, Vec<UniProxyUserItem>>,
     devices: HashMap<u64, String>,
     nodes: Vec<ServerNodeRow>,
 }
@@ -208,6 +209,7 @@ async fn collect_sync_messages(
     let node_ids = nodes.iter().map(|node| node.id).collect::<HashSet<_>>();
     sync.config.retain(|id, _| node_ids.contains(id));
     sync.users.retain(|id, _| node_ids.contains(id));
+    sync.user_items.retain(|id, _| node_ids.contains(id));
     sync.devices.retain(|id, _| node_ids.contains(id));
     for node in &nodes {
         if let Ok(config) = build_node_config_payload(state, node).await {
@@ -223,11 +225,28 @@ async fn collect_sync_messages(
         let cache_key = format!("uniproxy:user:ws:{}:node-credential-v1", node.id);
         if let Ok(snapshot) = load_or_build_uniproxy_user_snapshot(state, node, &cache_key, false).await {
             if sync.users.get(&node.id) != Some(&snapshot.version) {
-                messages.push(event_message(
-                    "sync.users",
-                    json!({ "users": snapshot.users, "node_id": node.id, "timestamp": timestamp }),
-                ));
+                match sync
+                    .user_items
+                    .get(&node.id)
+                    .and_then(|previous| compute_user_delta(previous, &snapshot.users))
+                {
+                    Some((removed, added)) => {
+                        for (action, users) in [("remove", removed), ("add", added)] {
+                            if !users.is_empty() {
+                                messages.push(event_message(
+                                    "sync.user.delta",
+                                    json!({ "action": action, "users": users, "node_id": node.id, "timestamp": timestamp }),
+                                ));
+                            }
+                        }
+                    }
+                    None => messages.push(event_message(
+                        "sync.users",
+                        json!({ "users": snapshot.users, "node_id": node.id, "timestamp": timestamp }),
+                    )),
+                }
                 sync.users.insert(node.id, snapshot.version);
+                sync.user_items.insert(node.id, snapshot.users);
             }
         }
         if let Ok(devices) = load_uniproxy_device_ips(state, node).await {
@@ -289,5 +308,59 @@ mod tests {
     fn websocket_url_follows_panel_scheme() {
         assert_eq!(http_to_ws_url("https://panel.example.com"), "wss://panel.example.com");
         assert_eq!(http_to_ws_url("http://127.0.0.1:8000"), "ws://127.0.0.1:8000");
+    }
+}
+
+/// Returns `(removed, added)` when the change is small enough to send as
+/// `sync.user.delta`; `None` means a full `sync.users` snapshot should be sent.
+fn compute_user_delta(
+    previous: &[UniProxyUserItem],
+    next: &[UniProxyUserItem],
+) -> Option<(Vec<UniProxyUserItem>, Vec<UniProxyUserItem>)> {
+    let previous_by_id = previous.iter().map(|user| (user.id, user)).collect::<HashMap<_, _>>();
+    let next_ids = next.iter().map(|user| user.id).collect::<HashSet<_>>();
+    let removed = previous
+        .iter()
+        .filter(|user| !next_ids.contains(&user.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let added = next
+        .iter()
+        .filter(|user| previous_by_id.get(&user.id).is_none_or(|old| *old != *user))
+        .cloned()
+        .collect::<Vec<_>>();
+    let changes = removed.len() + added.len();
+    if changes == 0 || changes > (next.len() / 2).max(DELTA_MIN_THRESHOLD) {
+        return None;
+    }
+    Some((removed, added))
+}
+
+const DELTA_MIN_THRESHOLD: usize = 50;
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    fn user(id: i64, uuid: &str, speed: i64) -> UniProxyUserItem {
+        UniProxyUserItem {
+            id,
+            uuid: uuid.to_string(),
+            speed_limit: speed,
+            device_limit: 0,
+            connection_limit: 0,
+            trust_level: 0,
+            is_silenced: false,
+        }
+    }
+
+    #[test]
+    fn user_delta_reports_adds_changes_and_removals() {
+        let previous = vec![user(1, "a", 0), user(2, "b", 0), user(3, "c", 0)];
+        let next = vec![user(1, "a", 0), user(2, "b2", 10), user(4, "d", 0)];
+        let (removed, added) = compute_user_delta(&previous, &next).unwrap();
+        assert_eq!(removed.iter().map(|u| u.id).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(added.iter().map(|u| u.id).collect::<Vec<_>>(), vec![2, 4]);
+        assert!(compute_user_delta(&next, &next).is_none());
     }
 }
