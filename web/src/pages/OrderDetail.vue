@@ -32,6 +32,8 @@ const { data, loading, error, reload } = useAsync(async () => {
   return { detail: detail || {}, methods: list }
 })
 const pending = computed(() => Number(data.value?.detail.status) === 0)
+// A zero-total order is completed by checkout without a payment channel.
+const free = computed(() => Number(data.value?.detail.total_amount) <= 0)
 
 async function checkout() {
   payError.value = ''
@@ -41,7 +43,7 @@ async function checkout() {
   await pay.run(async () => {
     const out = await request<any>('/api/v1/user/order/checkout', {
       method: 'POST',
-      body: { trade_no: tradeNo.value, method: Number(method.value) },
+      body: free.value ? { trade_no: tradeNo.value } : { trade_no: tradeNo.value, method: Number(method.value) },
     })
     if (out?.type === -1) {
       payInfo.value = '0 元订单已完成。'
@@ -106,7 +108,8 @@ async function cancel() {
               <a class="btn primary sm" :href="payUrl">前往支付</a>
             </div>
             <pre v-if="payRaw" class="codebox">{{ payRaw }}</pre>
-            <div v-if="!data.methods.length" class="notice warn">当前没有可用的支付方式，请联系管理员。</div>
+            <div v-if="free" class="muted">这是 0 元订单，无需支付，确认后立即生效。</div>
+            <div v-else-if="!data.methods.length" class="notice warn">当前没有可用的支付方式，请联系管理员。</div>
             <div v-else class="field">
               <label for="pay-method">支付方式</label>
               <select id="pay-method" v-model="method" class="select">
@@ -115,7 +118,7 @@ async function cancel() {
             </div>
           </div>
           <div class="card-foot">
-            <button type="button" class="btn primary" :disabled="pay.busy.value || !data.methods.length" @click="checkout">发起支付</button>
+            <button type="button" class="btn primary" :disabled="pay.busy.value || (!free && !data.methods.length)" @click="checkout">{{ free ? '确认订单' : '发起支付' }}</button>
             <button type="button" class="btn danger" :disabled="pay.busy.value" @click="cancel">取消订单</button>
           </div>
         </div>
