@@ -732,7 +732,21 @@ async fn build_deploy_command_response(
             "xray" => "xray",
             _ => "singbox",
         })
-        .unwrap_or("singbox")
+        .unwrap_or_else(|| {
+            let network = node
+                .settings
+                .as_ref()
+                .and_then(|value| value.0.get("network"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if matches!(network.as_str(), "xhttp" | "splithttp") {
+                "xray"
+            } else {
+                "singbox"
+            }
+        })
         .to_string();
 
     let command = format!(
