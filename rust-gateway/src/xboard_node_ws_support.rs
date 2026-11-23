@@ -20,13 +20,15 @@ pub(crate) async fn handshake_websocket_settings(state: &AppState, headers: &Hea
     }
     let configured = get_setting_string(state, "server_ws_url", "").await;
     let ws_url = if !configured.trim().is_empty() {
-        configured.trim().to_string()
+        configured.trim().trim_end_matches('/').to_string()
     } else {
-        let base = get_setting_string(state, "app_url", "").await;
-        let base = if base.trim().is_empty() {
-            request_base_url(headers)
-        } else {
-            Some(base.trim().trim_end_matches('/').to_string())
+        let base = match request_base_url(headers) {
+            Some(base) => Some(base),
+            None => {
+                let app_url = get_setting_string(state, "app_url", "").await;
+                let app_url = app_url.trim().trim_end_matches('/');
+                (!app_url.is_empty()).then(|| app_url.to_string())
+            }
         };
         match base {
             Some(base) => format!("{}{}", http_to_ws_url(&base), WS_PATH),
