@@ -55,6 +55,11 @@ async function showCommand(title: string, path: string, note: string) {
   }, ui.error)
 }
 
+async function copyDeploy() {
+  if (deploy.value && (await copyText(deploy.value.command))) ui.ok('部署命令已复制')
+  else ui.error('复制失败，请手动选择复制')
+}
+
 // ---- machines ----
 const machineForm = reactive({ open: false, id: 0, name: '', notes: '', error: '', saving: false })
 function openMachine(machine?: any) {
@@ -172,7 +177,7 @@ async function copyAgentInstall(agent: any) {
     const res = await api<any>(`/api/v1/user/tcping/agents/${agent.id}/install-command`)
     const command = String(res?.command || '').trim()
     if (!command) throw new Error('未生成安装命令')
-    await copyText(command)
+    if (!(await copyText(command))) throw new Error('复制失败，请重试')
     ui.ok('安装命令已复制。请在独立探测机上执行，不要和节点混装。')
   }, ui.error)
 }
@@ -352,7 +357,7 @@ async function rotateAgent(agent: any) {
         </div>
       </div>
       <template #footer>
-        <button v-if="deploy.command" type="button" class="btn" @click="copyText(deploy.command).then(() => ui.ok('部署命令已复制'))">复制命令</button>
+        <button v-if="deploy.command" type="button" class="btn" @click="copyDeploy">复制命令</button>
         <button type="button" class="btn primary" @click="deploy = null">我知道了</button>
       </template>
     </Modal>

@@ -139,3 +139,12 @@ export async function copyText(text: string): Promise<boolean> {
   document.body.removeChild(el)
   return ok
 }
+
+/** Accepts unix seconds, numeric strings or date strings. */
+export function formatAnyTs(value: unknown, fallback = '-'): string {
+  if (value === null || value === undefined || value === '') return fallback
+  const text = String(value).trim()
+  if (/^\d+$/.test(text)) return formatTs(Number(text))
+  const parsed = new Date(text)
+  return Number.isNaN(parsed.getTime()) ? text || fallback : parsed.toLocaleString()
+}

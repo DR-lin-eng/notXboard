@@ -165,3 +165,5 @@ a.li:hover, .li.click:hover { background: var(--surface-2); cursor: pointer; }
   .page-head .actions { margin-left: 0; width: 100%; }
 }
 @media (min-width: 821px) { .only-m { display: none !important; } }
+.prose { white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+.mb { margin-bottom: 14px; }

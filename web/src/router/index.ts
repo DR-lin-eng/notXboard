@@ -44,6 +44,11 @@ const routes: RouteRecordRaw[] = [
       { path: 'node-admin/refund/:id', component: () => import('@/pages/nodeadmin/NodeAdminRefundDetail.vue'), meta: { title: '处理退款' } },
       { path: 'node-admin/node/:id', component: () => import('@/pages/nodeadmin/NodeAdminUsers.vue'), meta: { title: '节点用户流量' } },
       { path: 'node-admin/ticket/:id', component: () => import('@/pages/nodeadmin/NodeAdminTicket.vue'), meta: { title: '处理工单' } },
+      { path: 'profile', component: () => import('@/pages/Profile.vue'), meta: { title: '个人资料' } },
+      { path: 'invite', component: () => import('@/pages/Invite.vue'), meta: { title: '邀请' } },
+      { path: 'notices', component: () => import('@/pages/Notices.vue'), meta: { title: '公告' } },
+      { path: 'knowledge', component: () => import('@/pages/Knowledge.vue'), meta: { title: '知识库' } },
+      { path: 'downloads', component: () => import('@/pages/Downloads.vue'), meta: { title: '软件下载' } },
       // user-routes
     ],
   },
