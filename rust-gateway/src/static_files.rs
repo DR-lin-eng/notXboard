@@ -69,6 +69,28 @@ pub async fn installer_file(
     response
 }
 
+/// Serves the content-hashed bundles of the built web app.
+pub async fn web_app_asset_file(
+    headers: HeaderMap,
+    uri: Uri,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response<Body> {
+    let mut response = serve_static_under(
+        crate::runtime_paths::public_path("app/assets"),
+        &path,
+        &headers,
+        &uri,
+    )
+    .await;
+    if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        response.headers_mut().insert(
+            "Cache-Control",
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
+}
+
 pub async fn theme_file(
     headers: HeaderMap,
     uri: Uri,

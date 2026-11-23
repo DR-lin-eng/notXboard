@@ -13,7 +13,18 @@ pub async fn app_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    match build_app_page_response(&state, &headers).await {
+    match build_app_page_response(&state, &headers, false).await {
+        Ok(response) => response,
+        Err(response) => response,
+    }
+}
+
+/// Serves the previous theme-based portal while the rewritten app is being rolled out.
+pub async fn legacy_app_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    match build_app_page_response(&state, &headers, true).await {
         Ok(response) => response,
         Err(response) => response,
     }
@@ -120,9 +131,23 @@ pub async fn admin_leaderboards_redirect(
     }
 }
 
+/// Renders the built single-page app shell, or `None` when the build output is not installed.
+async fn render_web_app_index(title: &str, version: &str, app_url: &str) -> Option<String> {
+    let template = tokio::fs::read_to_string(crate::runtime_paths::public_path("app/index.html"))
+        .await
+        .ok()?;
+    Some(
+        template
+            .replace("__APP_NAME__", &escape_html(title))
+            .replace("__APP_VERSION__", &escape_html(version))
+            .replace("__APP_URL__", &escape_html(app_url)),
+    )
+}
+
 async fn build_app_page_response(
     state: &AppState,
     headers: &HeaderMap,
+    force_legacy: bool,
 ) -> Result<Response<Body>, Response<Body>> {
     let _ = warm_setting_cache(
         state,
@@ -147,6 +172,11 @@ async fn build_app_page_response(
         std::env::var("APP_URL").unwrap_or_default(),
         String::new(),
     ]);
+    if !force_legacy {
+        if let Some(rendered) = render_web_app_index(&title, &version, &app_url).await {
+            return Ok(html_response(rendered));
+        }
+    }
     let asset_version = theme_support::theme_asset_version(&theme_name, &version);
     let theme = theme_support::find_theme(&theme_name)
         .ok_or_else(|| json_error(StatusCode::INTERNAL_SERVER_ERROR, "load app page failed"))?;
