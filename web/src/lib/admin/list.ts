@@ -8,10 +8,17 @@ export interface AdminPage<T = any> {
 }
 
 /** Admin list endpoints return rows as `data`, `data.data` or a top-level paginator. */
-export async function adminList<T = any>(endpoint: string, query: Record<string, any> = {}, pageSize = 20): Promise<AdminPage<T>> {
+export async function adminList<T = any>(
+  endpoint: string,
+  query: Record<string, any> = {},
+  pageSize = 20,
+  postBody?: unknown,
+): Promise<AdminPage<T>> {
   const adminPath = getAdminPath()
   if (!adminPath) throw new ApiError('当前账号没有管理权限', 403, null)
-  const body = await request<any>(`/api/v2/${encodeURIComponent(adminPath)}/${endpoint.replace(/^\/+/, '')}`, { query })
+  const body = await request<any>(`/api/v2/${encodeURIComponent(adminPath)}/${endpoint.replace(/^\/+/, '')}`,
+    postBody === undefined ? { query } : { method: 'POST', body: postBody },
+  )
   const data = body?.data
   const holder = Array.isArray(data) ? body : data && typeof data === 'object' ? data : body || {}
   const items: T[] = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : []
