@@ -66,9 +66,9 @@ async function clearLogs() {
     <AsyncState :loading="health.loading.value" :error="health.error.value" @retry="health.reload()">
       <div class="grid g3 mb">
         <div class="card stat"><span class="k">定时调度</span><span class="v"><span class="badge" :class="isOn(health.data.value?.status.schedule) ? 'ok' : 'danger'">{{ isOn(health.data.value?.status.schedule) ? '运行中' : '未运行' }}</span></span>
-          <span class="muted small">上次运行 {{ formatAnyTs(health.data.value?.status.schedule_last_runtime) }}</span></div>
+          <span class="d">上次运行 {{ formatAnyTs(health.data.value?.status.schedule_last_runtime) }}</span></div>
         <div class="card stat"><span class="k">队列</span><span class="v"><span class="badge" :class="isOn(health.data.value?.queue.status) ? 'ok' : 'danger'">{{ isOn(health.data.value?.queue.status) ? '运行中' : '未运行' }}</span></span>
-          <span class="muted small">每分钟 {{ health.data.value?.queue.jobsPerMinute ?? 0 }} 个任务，近 1 小时 {{ health.data.value?.queue.recentJobs ?? 0 }} 个</span></div>
+          <span class="d">每分钟 {{ health.data.value?.queue.jobsPerMinute ?? 0 }} 个任务，近 1 小时 {{ health.data.value?.queue.recentJobs ?? 0 }} 个</span></div>
         <div class="card stat"><span class="k">失败任务（近 7 天）</span><span class="v tnum">{{ health.data.value?.queue.failedJobs ?? 0 }}</span></div>
       </div>
     </AsyncState>

@@ -1,7 +1,8 @@
 import type { Component } from 'vue'
 import {
-  Bell, BookOpen, Box, Download, Gauge, Gift, HeartHandshake, Home, Layers, LifeBuoy, MessageSquare,
-  Receipt, Scale, Server, ShieldCheck, Undo2, UserRound, Users, Wallet, Wrench,
+  Activity, Bell, BookOpen, Box, CreditCard, Download, Gauge, Gift, Globe, HeartHandshake, Home, KeyRound, Layers, LifeBuoy,
+  Megaphone, MessageSquare, Package, Puzzle, Receipt, RotateCcw, Scale, Send, Server, ShieldAlert, ShieldCheck, Terminal,
+  TicketPercent, Undo2, UserCog, UserRound, Users, Wallet, Wrench,
 } from 'lucide-vue-next'
 
 export type Role = 'user' | 'admin' | 'super'
@@ -67,7 +68,28 @@ export const NAV: NavGroup[] = [
     role: 'admin',
     items: [
       { to: '/admin', label: '工作台', icon: Gauge, role: 'admin' },
-      { to: '/admin/support', label: '支持', icon: LifeBuoy, role: 'admin' },
+      { to: '/admin/users', label: '用户', icon: UserCog, role: 'super' },
+      { to: '/admin/tickets', label: '工单处理', icon: LifeBuoy, role: 'admin' },
+      { to: '/admin/plans', label: '平台套餐', icon: Package, role: 'admin' },
+      { to: '/admin/payments', label: '支付通道', icon: CreditCard, role: 'admin' },
+      { to: '/admin/coupons', label: '优惠券', icon: TicketPercent, role: 'admin' },
+      { to: '/admin/gift-cards', label: '礼品卡', icon: Gift, role: 'admin' },
+      { to: '/admin/notices', label: '公告管理', icon: Megaphone, role: 'admin' },
+      { to: '/admin/system', label: '系统', icon: Activity, role: 'admin' },
+    ],
+  },
+  {
+    title: '站点设置',
+    role: 'super',
+    items: [
+      { to: '/admin/site', label: '站点与订阅', icon: Globe, role: 'super' },
+      { to: '/admin/security', label: '登录与安全', icon: ShieldCheck, role: 'super' },
+      { to: '/admin/oauth', label: 'Linux DO 登录', icon: KeyRound, role: 'super' },
+      { to: '/admin/telegram', label: 'Telegram', icon: Send, role: 'super' },
+      { to: '/admin/risk', label: '风险审查', icon: ShieldAlert, role: 'super' },
+      { to: '/admin/traffic-reset', label: '流量重置', icon: RotateCcw, role: 'super' },
+      { to: '/admin/plugins', label: '扩展', icon: Puzzle, role: 'super' },
+      { to: '/admin/api', label: '接口调试', icon: Terminal, role: 'super' },
     ],
   },
 ]
