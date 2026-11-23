@@ -1461,11 +1461,14 @@ async fn build_rust_subscribe_payload(
                 "vless" => build_shadowrocket_vless(&node_uuid, &server, &name, &settings),
                 "shadowsocks" => build_shadowrocket_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
                 "trojan" => build_shadowrocket_trojan(&node_uuid, &server, &name, &settings),
-                "hysteria" => build_general_hysteria(&node_uuid, &server, &name, &settings),
+                "hysteria" => crate::subscribe_protocols_v2::shadowrocket_hysteria(&node_uuid, &server, &name, &settings),
+                "tuic" => crate::subscribe_protocols_v2::shadowrocket_tuic(&node_uuid, &server, &name, &settings),
+                "anytls" => crate::subscribe_protocols_v2::shadowrocket_anytls(&node_uuid, &server, &name, &settings),
                 "socks" => build_general_socks(&node_uuid, &server, &name),
                 _ => String::new(),
             },
             RustSubscribeMode::QuantumultX => match normalized_type.as_str() {
+                "anytls" => crate::subscribe_protocols_v2::quantumultx_anytls(&node_uuid, &server, &name, &settings),
                 "vmess" => build_quantumultx_vmess(&node_uuid, &server, &name, &settings),
                 "shadowsocks" => build_quantumultx_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
                 "trojan" => build_quantumultx_trojan(&node_uuid, &server, &name, &settings),
@@ -5802,13 +5805,21 @@ async fn build_singbox_json_payload(
         }
     }
 
+    let template_tags = outbounds
+        .iter()
+        .filter_map(|outbound| outbound.get("tag").and_then(|v| v.as_str()).map(str::to_string))
+        .collect::<Vec<_>>();
     for outbound in outbounds.iter_mut() {
-        if let Some(kind) = outbound.get("type").and_then(|v| v.as_str()) {
-            if matches!(kind, "urltest" | "selector") {
-                if let Some(list) = outbound.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
-                    list.extend(tags.iter().cloned().map(Value::String));
-                }
-            }
+        let is_group = outbound
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| matches!(kind, "urltest" | "selector"));
+        if !is_group {
+            continue;
+        }
+        let group_tags = crate::subscribe_protocols_v2::singbox_group_tags(outbound, &tags, &template_tags);
+        if let Some(list) = outbound.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
+            list.extend(group_tags.into_iter().map(Value::String));
         }
     }
 
@@ -5931,36 +5942,6 @@ fn build_general_vmess(uuid: &str, server: &ServerNodeRow, name: &str, settings:
     }
 
     format!("vmess://{}\r\n", BASE64_STANDARD.encode(config.to_string()))
-}
-
-fn build_general_hysteria(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
-    if json_int(settings, "version") != 2 {
-        return String::new();
-    }
-    let mut params = Vec::new();
-    if let Some(server_name) = settings.get("tls").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()) {
-        params.push(("sni".to_string(), server_name.to_string()));
-        params.push(("security".to_string(), "tls".to_string()));
-    }
-    if settings.get("obfs").and_then(|v| v.get("open")).and_then(|v| v.as_bool()).unwrap_or(false) {
-        params.push(("obfs".to_string(), "salamander".to_string()));
-        if let Some(password) = settings.get("obfs").and_then(|v| v.get("password")).and_then(|v| v.as_str()) {
-            params.push(("obfs-password".to_string(), password.to_string()));
-        }
-    }
-    params.push((
-        "insecure".to_string(),
-        settings.get("tls").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
-    ));
-    let query = serde_urlencoded::to_string(params).unwrap_or_default();
-    format!(
-        "hysteria2://{}@{}:{}?{}#{}\r\n",
-        uuid,
-        wrap_ipv6(&server.host),
-        server.port,
-        query,
-        urlencoding::encode(name)
-    )
 }
 
 fn build_general_socks(uuid: &str, server: &ServerNodeRow, name: &str) -> String {

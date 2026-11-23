@@ -832,6 +832,149 @@ pub(crate) fn general_hysteria(uuid: &str, server: &ServerNodeRow, name: &str, s
     }
 }
 
+pub(crate) fn shadowrocket_hysteria(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
+    let mut params: Vec<(&'static str, String)> = Vec::new();
+    let addr = wrap_ipv6(&server.host);
+    let insecure = if dg_bool(settings, &["tls", "allow_insecure"]) { "1" } else { "0" }.to_string();
+    let up = dg_int(settings, &["bandwidth", "up"]).filter(|v| *v > 0);
+    let down = dg_int(settings, &["bandwidth", "down"]).filter(|v| *v > 0);
+    if dg_int(settings, &["version"]).unwrap_or(2) == 1 {
+        params.push(("auth", uuid.to_string()));
+        if let Some(up) = up { params.push(("upmbps", up.to_string())); }
+        if let Some(down) = down { params.push(("downmbps", down.to_string())); }
+        params.push(("protocol", "udp".to_string()));
+        params.push(("fastopen", "1".to_string()));
+        if let Some(sni) = dg_str(settings, &["tls", "server_name"]) { params.push(("peer", sni.to_string())); }
+        if dg_bool(settings, &["obfs", "open"]) {
+            params.push(("obfs", "xplus".to_string()));
+            params.push(("obfsParam", dg_str(settings, &["obfs", "password"]).unwrap_or("").to_string()));
+        }
+        params.push(("insecure", insecure));
+        if let Some(ports) = server_ports(settings) { params.push(("mport", ports)); }
+        return format!("hysteria://{}:{}?{}#{}\r\n", addr, server.port, uri_query(params), name);
+    }
+    params.push(("obfs", "none".to_string()));
+    params.push(("fastopen", "1".to_string()));
+    if let Some(up) = up { params.push(("upmbps", up.to_string())); }
+    if let Some(down) = down { params.push(("downmbps", down.to_string())); }
+    if let Some(sni) = dg_str(settings, &["tls", "server_name"]) { params.push(("peer", sni.to_string())); }
+    if dg_bool(settings, &["obfs", "open"]) {
+        params[0].1 = dg_str(settings, &["obfs", "type"]).unwrap_or("salamander").to_string();
+        params.push(("obfs-password", dg_str(settings, &["obfs", "password"]).unwrap_or("").to_string()));
+    }
+    params.push(("insecure", insecure));
+    if let Some(interval) = dg_int(settings, &["hop_interval"]).filter(|v| *v > 0) {
+        params.push(("keepalive", interval.to_string()));
+    }
+    if let Some(ports) = server_ports(settings) { params.push(("mport", ports)); }
+    format!("hysteria2://{}@{}:{}?{}#{}\r\n", uuid, addr, server.port, uri_query(params), name)
+}
+
+pub(crate) fn shadowrocket_tuic(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
+    let mut params: Vec<(&'static str, String)> = Vec::new();
+    let alpn = match dg(settings, &["alpn"]) {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","),
+        Some(Value::String(value)) => value.clone(),
+        _ => String::new(),
+    };
+    if !alpn.is_empty() { params.push(("alpn", alpn)); }
+    if let Some(sni) = dg_str(settings, &["tls", "server_name"]) { params.push(("sni", sni.to_string())); }
+    params.push(("insecure", if dg_bool(settings, &["tls", "allow_insecure"]) { "1" } else { "0" }.to_string()));
+    params.push(("congestion_control", dg_str(settings, &["congestion_control"]).unwrap_or("cubic").to_string()));
+    if dg_int(settings, &["version"]) == Some(4) {
+        params.push(("token", uuid.to_string()));
+    } else {
+        params.push(("uuid", uuid.to_string()));
+        params.push(("password", uuid.to_string()));
+    }
+    format!("tuic://{}:{}?{}#{}\r\n", wrap_ipv6(&server.host), server.port, uri_query(params), urlencoding::encode(name))
+}
+
+pub(crate) fn shadowrocket_anytls(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
+    let mut params: Vec<(&'static str, String)> = Vec::new();
+    if let Some(sni) = dg_str(settings, &["tls", "server_name"]) { params.push(("sni", sni.to_string())); }
+    params.push(("insecure", if dg_bool(settings, &["tls", "allow_insecure"]) { "1" } else { "0" }.to_string()));
+    format!("anytls://{}@{}:{}?{}#{}\r\n", uuid, wrap_ipv6(&server.host), server.port, uri_query(params), urlencoding::encode(name))
+}
+
+pub(crate) fn quantumultx_anytls(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
+    let mut parts = vec![
+        format!("anytls={}:{}", wrap_ipv6(&server.host), server.port),
+        format!("password={}", uuid),
+        "udp-relay=true".to_string(),
+        format!("tag={}", name),
+        "over-tls=true".to_string(),
+    ];
+    if !dg_bool(settings, &["tls", "allow_insecure"]) {
+        parts.push("tls-verification=true".to_string());
+    }
+    if let Some(sni) = dg_str(settings, &["tls", "server_name"]) {
+        parts.push(format!("tls-host={}", sni));
+    }
+    format!("{}\r\n", parts.join(","))
+}
+
+fn compile_outbound_pattern(pattern: &str) -> Option<regex::Regex> {
+    let trimmed = pattern.trim();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    let delimited = ['/', '#', '~', '@', '%'].contains(&first)
+        && trimmed.len() > 1
+        && trimmed[1..].rfind(first).is_some_and(|end| {
+            trimmed[1 + end + first.len_utf8()..].chars().all(|c| c.is_ascii_alphabetic())
+        });
+    let source = if delimited {
+        let end = 1 + trimmed[1..].rfind(first)?;
+        let body = &trimmed[first.len_utf8()..end];
+        let flags = &trimmed[end + first.len_utf8()..];
+        let inline = flags.chars().filter(|c| matches!(c, 'i' | 'm' | 's' | 'x')).collect::<String>();
+        if inline.is_empty() { body.to_string() } else { format!("(?{}){}", inline, body) }
+    } else {
+        format!("(?i){}", pattern)
+    };
+    regex::RegexBuilder::new(&source).size_limit(1 << 20).build().ok()
+}
+
+fn filter_tags(pattern: &str, tags: &[String], keep: bool) -> Vec<String> {
+    let Some(regex) = compile_outbound_pattern(pattern) else {
+        return if keep { Vec::new() } else { tags.to_vec() };
+    };
+    tags.iter().filter(|tag| regex.is_match(tag) == keep).cloned().collect()
+}
+
+pub(crate) fn singbox_group_tags(outbound: &mut Value, all_tags: &[String], template_tags: &[String]) -> Vec<String> {
+    let Some(object) = outbound.as_object_mut() else {
+        return all_tags.to_vec();
+    };
+    let include = object.remove("include");
+    let exclude = object.remove("exclude");
+    let fallback = object.remove("fallback");
+    let mut tags = all_tags.to_vec();
+    if let Some(pattern) = include.as_ref().and_then(Value::as_str).filter(|v| !v.is_empty()) {
+        tags = filter_tags(pattern, &tags, true);
+    }
+    if let Some(pattern) = exclude.as_ref().and_then(Value::as_str).filter(|v| !v.is_empty()) {
+        tags = filter_tags(pattern, &tags, false);
+    }
+    if tags.is_empty() {
+        let candidates = match fallback {
+            Some(Value::String(value)) => vec![value],
+            Some(Value::Array(items)) => items.into_iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        };
+        for candidate in candidates.into_iter().filter(|c| !c.is_empty()) {
+            if all_tags.contains(&candidate) || template_tags.contains(&candidate) {
+                return vec![candidate];
+            }
+            let matched = filter_tags(&candidate, all_tags, true);
+            if !matched.is_empty() {
+                return matched;
+            }
+        }
+    }
+    tags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,4 +1086,28 @@ mod tests {
         assert_eq!(singbox_tuic("pw", &node("tuic"), &tuic)["congestion_control"], json!("bbr"));
         assert_eq!(meta_tuic("pw", &node("tuic"), &tuic)["congestion-controller"], json!("bbr"));
     }
+    #[test]
+    fn singbox_group_include_exclude_and_fallback() {
+        let tags = vec!["HK 01".to_string(), "JP 01".to_string(), "US 01".to_string()];
+        let mut group = json!({"type":"selector","include":"hk|jp","exclude":"/JP/"});
+        assert_eq!(singbox_group_tags(&mut group, &tags, &[]), vec!["HK 01".to_string()]);
+        assert!(group.get("include").is_none());
+        let mut group = json!({"type":"urltest","include":"SG","fallback":["SG|新加坡","direct"]});
+        assert_eq!(singbox_group_tags(&mut group, &tags, &["direct".to_string()]), vec!["direct".to_string()]);
+        let mut group = json!({"type":"urltest","include":"(unclosed"});
+        assert!(singbox_group_tags(&mut group, &tags, &[]).is_empty());
+    }
+
+    #[test]
+    fn shadowrocket_hy2_and_tuic_carry_upstream_params() {
+        let mut server = node("hysteria");
+        let settings = json!({"version":2,"bandwidth":{"up":50,"down":200},"tls":{"server_name":"hy.example.com"},"hop_interval":30}).as_object().cloned().unwrap();
+        let uri = shadowrocket_hysteria("pw", &server, "HK", &settings);
+        assert!(uri.contains("upmbps=50") && uri.contains("downmbps=200") && uri.contains("peer=hy.example.com") && uri.contains("keepalive=30"), "{uri}");
+        server.protocol = "tuic".to_string();
+        let settings = json!({"version":5,"congestion_control":"bbr","alpn":["h3"]}).as_object().cloned().unwrap();
+        let uri = shadowrocket_tuic("pw", &server, "HK", &settings);
+        assert!(uri.contains("congestion_control=bbr") && uri.contains("uuid=pw"), "{uri}");
+    }
+
 }
