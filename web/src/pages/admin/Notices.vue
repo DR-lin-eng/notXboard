@@ -13,7 +13,7 @@ const ui = useUi()
 const action = useAction()
 const { data, loading, error, reload } = useAsync(async () => (await adminList('notice/fetch')).items)
 
-const blank = () => ({ open: false, id: 0, title: '', content: '', img_url: '', tags: '', show: true, popup: false, error: '', saving: false })
+const blank = () => ({ open: false, id: 0, title: '', content: '', img_url: '', tags: '', show: true, popup: false, scope_type: 'global', target_plan_ids: [] as number[], error: '', saving: false })
 const form = reactive(blank())
 function openNew() {
   Object.assign(form, blank(), { open: true })
@@ -22,6 +22,8 @@ function edit(notice: any) {
   Object.assign(form, blank(), {
     open: true, id: Number(notice.id), title: notice.title || '', content: notice.content || '', img_url: notice.img_url || '',
     tags: Array.isArray(notice.tags) ? notice.tags.join(', ') : '', show: isOn(notice.show), popup: isOn(notice.popup),
+    scope_type: notice.scope_type === 'plan_subscribers' ? 'plan_subscribers' : 'global',
+    target_plan_ids: (Array.isArray(notice.target_plan_ids) ? notice.target_plan_ids : []).map(Number).filter((id: number) => id > 0),
   })
 }
 async function save() {
@@ -34,6 +36,10 @@ async function save() {
   if (!payload.title || !payload.content) {
     form.error = '标题和内容不能为空'
     return
+  }
+  if (form.scope_type === 'plan_subscribers' && form.target_plan_ids.length) {
+    payload.scope_type = 'plan_subscribers'
+    payload.target_plan_ids = form.target_plan_ids
   }
   if (form.id) payload.id = form.id
   form.saving = true
@@ -79,7 +85,7 @@ async function remove(notice: any) {
             <tbody>
               <tr v-for="notice in data" :key="notice.id">
                 <td class="tnum muted">{{ notice.id }}</td>
-                <td>{{ notice.title || '-' }}</td>
+                <td>{{ notice.title || '-' }} <span v-if="notice.scope_type === 'plan_subscribers'" class="badge">套餐订阅者</span></td>
                 <td><span v-for="tag in notice.tags || []" :key="tag" class="badge">{{ tag }}</span></td>
                 <td><span class="badge" :class="isOn(notice.show) ? 'ok' : ''">{{ isOn(notice.show) ? '显示中' : '已隐藏' }}</span></td>
                 <td>{{ isOn(notice.popup) ? '是' : '否' }}</td>
@@ -99,6 +105,7 @@ async function remove(notice: any) {
     <Modal v-if="form.open" :title="form.id ? `编辑公告 #${form.id}` : '新建公告'" wide @close="form.open = false">
       <form id="admin-notice-form" class="form-grid" @submit.prevent="save">
         <div v-if="form.error" class="notice error full" role="alert">{{ form.error }}</div>
+        <div v-if="form.scope_type === 'plan_subscribers'" class="notice full">这条公告只对 {{ form.target_plan_ids.length }} 个套餐的订阅者可见，保存后范围不变。</div>
         <div class="field full"><label for="an-title">标题</label><input id="an-title" v-model="form.title" class="input" required></div>
         <div class="field full"><label for="an-content">内容</label><textarea id="an-content" v-model="form.content" class="textarea" rows="8" required /></div>
         <div class="field"><label for="an-img">图片地址（可空）</label><input id="an-img" v-model="form.img_url" class="input" placeholder="https://"></div>
