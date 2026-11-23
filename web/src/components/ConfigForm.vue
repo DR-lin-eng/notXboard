@@ -12,7 +12,7 @@ const props = defineProps<{
   /** Runs before saving; return false to cancel. */
   beforeSave?: (payload: Record<string, any>, original: Record<string, any>) => Promise<boolean> | boolean
 }>()
-const emit = defineEmits<{ saved: [payload: Record<string, any>]; loaded: [group: Record<string, any>] }>()
+const emit = defineEmits<{ saved: [payload: Record<string, any>]; loaded: [config: Record<string, any>] }>()
 const ui = useUi()
 const values = reactive<Record<string, any>>({})
 const original = ref<Record<string, any>>({})
@@ -21,12 +21,12 @@ const formError = ref('')
 
 const { loading, error, reload } = useAsync(async () => {
   const config = await adminV2<any>('config/fetch')
-  const group = (config && typeof config === 'object' ? config[props.page.group] : null) || {}
-  const next = readConfigValues(props.page, group)
+  const all = config && typeof config === 'object' ? config : {}
+  const next = readConfigValues(props.page, all)
   for (const key of Object.keys(values)) delete values[key]
   Object.assign(values, next)
   original.value = { ...next }
-  emit('loaded', group)
+  emit('loaded', all)
   return true
 })
 watch(() => props.page, () => reload())

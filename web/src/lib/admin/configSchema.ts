@@ -13,6 +13,10 @@ export interface ConfigField {
   min?: number
   max?: number
   step?: number
+  /** Config group holding this field when it differs from the page group. */
+  group?: string
+  /** Key inside the group when it differs from the payload key. */
+  source?: string
   /** Spans the full form width. */
   full?: boolean
   /** Shown only when another field has a truthy or matching value. */
@@ -33,10 +37,10 @@ export function isOn(value: unknown): boolean {
   return value === true || value === 1 || value === '1' || value === 'true'
 }
 
-export function readConfigValues(page: ConfigPage, group: Record<string, any>): Record<string, any> {
+export function readConfigValues(page: ConfigPage, config: Record<string, any>): Record<string, any> {
   const values: Record<string, any> = {}
   for (const field of page.sections.flatMap((section) => section.fields)) {
-    const raw = group?.[field.key]
+    const raw = config?.[field.group || page.group]?.[field.source || field.key]
     if (field.type === 'bool') values[field.key] = raw == null ? Boolean(field.fallback) : isOn(raw)
     else if (field.type === 'lines') values[field.key] = Array.isArray(raw) ? raw.join('\n') : String(raw ?? '')
     else if (field.type === 'number' || field.type === 'float') values[field.key] = raw == null || raw === '' ? field.fallback ?? '' : Number(raw)
