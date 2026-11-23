@@ -226,6 +226,13 @@ pub(crate) fn singbox_vmess(uuid: &str, server: &ServerNodeRow, settings: &Map<S
     outbound
 }
 
+fn trojan_allow_insecure(settings: &Map<String, Value>) -> bool {
+    match dg(settings, &["tls_settings", "allow_insecure"]) {
+        Some(value) if !value.is_null() => truthy(Some(value)),
+        _ => dg_bool(settings, &["allow_insecure"]),
+    }
+}
+
 fn sb_reality_or_tls(settings: &Map<String, Value>, mode: i64) -> Value {
     let mut tls = json!({ "enabled": true });
     if mode == 2 {
@@ -236,6 +243,7 @@ fn sb_reality_or_tls(settings: &Map<String, Value>, mode: i64) -> Value {
             "public_key": dg_str(settings, &["reality_settings", "public_key"]),
             "short_id": dg_str(settings, &["reality_settings", "short_id"]),
         });
+        tls["utls"] = json!({ "enabled": true, "fingerprint": "chrome" });
     } else {
         tls["insecure"] = json!(dg_bool(settings, &["tls_settings", "allow_insecure"]));
         sb_append_ech(&mut tls, dg(settings, &["tls_settings", "ech"]));
@@ -574,7 +582,7 @@ pub(crate) fn meta_trojan(uuid: &str, server: &ServerNodeRow, settings: &Map<Str
         });
     } else {
         proxy["skip-cert-verify"] = json!(
-            dg_bool(settings, &["tls_settings", "allow_insecure"]) || dg_bool(settings, &["allow_insecure"])
+            trojan_allow_insecure(settings)
         );
         if let Some(name) = dg_str(settings, &["tls_settings", "server_name"]).or_else(|| dg_str(settings, &["server_name"])) {
             proxy["sni"] = json!(name);
@@ -778,7 +786,7 @@ pub(crate) fn general_trojan(uuid: &str, server: &ServerNodeRow, name: &str, set
         params.push(("sid", reality("short_id")));
         params.push(("sni", reality("server_name")));
     } else {
-        let insecure = dg_bool(settings, &["tls_settings", "allow_insecure"]) || dg_bool(settings, &["allow_insecure"]);
+        let insecure = trojan_allow_insecure(settings);
         params.push(("allowInsecure", if insecure { "1" } else { "0" }.to_string()));
         if let Some(sni) = dg_str(settings, &["tls_settings", "server_name"]).or_else(|| dg_str(settings, &["server_name"])) {
             params.push(("peer", sni.to_string()));
