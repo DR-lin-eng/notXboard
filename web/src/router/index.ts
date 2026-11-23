@@ -49,6 +49,11 @@ const routes: RouteRecordRaw[] = [
       { path: 'notices', component: () => import('@/pages/Notices.vue'), meta: { title: '公告' } },
       { path: 'knowledge', component: () => import('@/pages/Knowledge.vue'), meta: { title: '知识库' } },
       { path: 'downloads', component: () => import('@/pages/Downloads.vue'), meta: { title: '软件下载' } },
+      { path: 'tools', component: () => import('@/pages/Tools.vue'), meta: { title: '工具' } },
+      { path: 'payment', component: () => import('@/pages/PaymentProfile.vue'), meta: { title: '收款设置' } },
+      { path: 'sponsor', component: () => import('@/pages/Sponsor.vue'), meta: { title: '赞助' } },
+      { path: 'sponsor/:tradeNo', component: () => import('@/pages/SponsorDetail.vue'), meta: { title: '赞助订单' } },
+      { path: 'audit', component: () => import('@/pages/AuditLogs.vue'), meta: { title: '审计日志' } },
       // user-routes
     ],
   },
