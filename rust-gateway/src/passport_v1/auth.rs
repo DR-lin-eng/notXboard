@@ -478,7 +478,7 @@ async fn build_forget_response(
     }
 
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
     let password = payload.get("password").and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_default();
     let email_code = payload.get("email_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
 
@@ -534,7 +534,7 @@ async fn build_register_response(
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
     let password = payload.get("password").and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_default();
     let invite_code = payload.get("invite_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
     let email_code = payload.get("email_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();

@@ -6075,15 +6075,33 @@ fn build_shadowrocket_vless(uuid: &str, server: &ServerNodeRow, name: &str, sett
     format!("vless://{}?{}\r\n", userinfo, serde_urlencoded::to_string(params).unwrap_or_default())
 }
 
+fn trojan_tls_server_name(settings: &Map<String, Value>) -> Option<&str> {
+    settings
+        .get("tls_settings")
+        .and_then(|v| v.get("server_name"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .or_else(|| settings.get("server_name").and_then(|v| v.as_str()).filter(|v| !v.is_empty()))
+}
+
+fn trojan_tls_allow_insecure(settings: &Map<String, Value>) -> bool {
+    settings
+        .get("tls_settings")
+        .and_then(|v| v.get("allow_insecure"))
+        .or_else(|| settings.get("allow_insecure"))
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
+}
+
 fn build_shadowrocket_trojan(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
     let mut params = vec![
         (
             "allowInsecure".to_string(),
-            settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            trojan_tls_allow_insecure(settings).to_string(),
         ),
         ("tfo".to_string(), "1".to_string()),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         params.push(("peer".to_string(), server_name.to_string()));
     }
     if json_string(settings, "network", "tcp") == "grpc" {
@@ -6188,12 +6206,12 @@ fn build_quantumultx_trojan(uuid: &str, server: &ServerNodeRow, name: &str, sett
         format!("trojan={}:{}", server.host, server.port),
         format!("password={}", uuid),
         "over-tls=true".to_string(),
-        format!("tls-verification={}", (!settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false)).to_string()),
+        format!("tls-verification={}", (!trojan_tls_allow_insecure(settings)).to_string()),
         "fast-open=true".to_string(),
         "udp-relay=true".to_string(),
         format!("tag={}", name),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         parts.push(format!("tls-host={}", server_name));
     }
     format!("{}\r\n", parts.join(","))
@@ -6256,9 +6274,10 @@ fn build_clash_trojan(
     map.insert(vs("port"), serde_yaml::Value::Number(server.port.into()));
     map.insert(vs("password"), vs(uuid));
     map.insert(vs("udp"), serde_yaml::Value::Bool(true));
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         map.insert(vs("sni"), vs(server_name));
     }
+    map.insert(vs("skip-cert-verify"), serde_yaml::Value::Bool(trojan_tls_allow_insecure(settings)));
     serde_yaml::Value::Mapping(map)
 }
 
