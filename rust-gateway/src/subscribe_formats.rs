@@ -30,6 +30,7 @@ pub(crate) async fn build_surge_config_payload(
                 if !matches!(
                     cipher.as_str(),
                     "aes-128-gcm" | "aes-192-gcm" | "aes-256-gcm" | "chacha20-ietf-poly1305"
+                        | "2022-blake3-aes-128-gcm" | "2022-blake3-aes-256-gcm"
                 ) {
                     String::new()
                 } else {
@@ -38,6 +39,9 @@ pub(crate) async fn build_surge_config_payload(
             }
             "vmess" => build_surge_vmess(&node_uuid, server, &settings),
             "trojan" => build_surge_trojan(&node_uuid, server, &settings),
+            "anytls" => crate::subscribe_protocols_v2::line_anytls("surge", &node_uuid, server, &settings),
+            "socks" => crate::subscribe_protocols_v2::surge_socks_or_http("socks", &node_uuid, server, &settings),
+            "http" => crate::subscribe_protocols_v2::surge_socks_or_http("http", &node_uuid, server, &settings),
             "hysteria" => build_surge_hysteria(&node_uuid, server, &settings),
             _ => String::new(),
         };
@@ -105,6 +109,7 @@ pub(crate) async fn build_surfboard_config_payload(
             }
             "vmess" => build_surfboard_vmess(&node_uuid, server, &settings),
             "trojan" => build_surfboard_trojan(&node_uuid, server, &settings),
+            "anytls" => crate::subscribe_protocols_v2::line_anytls("surfboard", &node_uuid, server, &settings),
             _ => String::new(),
         };
 
@@ -334,6 +339,7 @@ pub(crate) fn build_loon_payload(
             "shadowsocks" => build_loon_shadowsocks(&node_uuid, server, &settings, &state.app_key),
             "vmess" => build_loon_vmess(&node_uuid, server, &settings),
             "trojan" => build_loon_trojan(&node_uuid, server, &settings),
+            "anytls" => crate::subscribe_protocols_v2::line_anytls("loon", &node_uuid, server, &settings),
             "hysteria" => build_loon_hysteria(&node_uuid, server, &settings, user),
             _ => String::new(),
         };
@@ -476,13 +482,10 @@ fn build_loon_trojan(uuid: &str, server: &ServerNodeRow, settings: &Map<String, 
         "fast-open=false".to_string(),
         "udp=true".to_string(),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(Value::as_str) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         parts.push(format!("tls-name={}", server_name));
     }
-    if settings
-        .get("allow_insecure")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if trojan_tls_allow_insecure(settings)
     {
         parts.push("skip-cert-verify=true".to_string());
     }
@@ -615,13 +618,10 @@ fn build_surge_trojan(uuid: &str, server: &ServerNodeRow, settings: &Map<String,
         "tfo=true".to_string(),
         "udp-relay=true".to_string(),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(Value::as_str) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         parts.push(format!("sni={}", server_name));
     }
-    if settings
-        .get("allow_insecure")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    if trojan_tls_allow_insecure(settings)
     {
         parts.push("skip-cert-verify=true".to_string());
     }
@@ -1159,9 +1159,9 @@ fn build_stash_trojan(uuid: &str, server: &ServerNodeRow, settings: &Map<String,
         "port": server.port,
         "password": uuid,
         "udp": true,
-        "skip-cert-verify": settings.get("allow_insecure").and_then(Value::as_bool).unwrap_or(false),
+        "skip-cert-verify": trojan_tls_allow_insecure(settings),
     });
-    if let Some(server_name) = settings.get("server_name").and_then(Value::as_str) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         value["sni"] = Value::String(server_name.to_string());
     }
     match json_string(settings, "network", "tcp").as_str() {

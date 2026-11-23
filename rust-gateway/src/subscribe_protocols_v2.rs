@@ -975,6 +975,50 @@ pub(crate) fn singbox_group_tags(outbound: &mut Value, all_tags: &[String], temp
     tags
 }
 
+pub(crate) fn line_anytls(kind: &str, uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> String {
+    let mut parts = match kind {
+        "loon" => vec![format!("{}=anytls", server.name), server.host.clone(), server.port.to_string(), uuid.to_string(), "udp=true".to_string()],
+        "surfboard" => vec![format!("{}=anytls", server.name), server.host.clone(), server.port.to_string(), format!("password={}", uuid), "tfo=true".to_string(), "udp-relay=true".to_string()],
+        _ => vec![format!("{} = anytls", server.name), server.host.clone(), server.port.to_string(), format!("password={}", uuid)],
+    };
+    if let Some(sni) = dg_str(settings, &["tls", "server_name"]) {
+        parts.push(format!("sni={}", sni));
+    }
+    if dg_bool(settings, &["tls", "allow_insecure"]) {
+        parts.push("skip-cert-verify=true".to_string());
+    }
+    format!("{}\r\n", parts.join(","))
+}
+
+pub(crate) fn surge_socks_or_http(kind: &str, uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> String {
+    let tls = dg_int(settings, &["tls"]).unwrap_or(0) > 0 || dg_bool(settings, &["tls"]);
+    let label = match (kind, tls) {
+        ("socks", true) => "socks5-tls",
+        ("socks", false) => "socks5",
+        (_, true) => "https",
+        _ => "http",
+    };
+    let mut parts = vec![
+        format!("{} = {}", server.name, label),
+        server.host.clone(),
+        server.port.to_string(),
+        uuid.to_string(),
+        uuid.to_string(),
+    ];
+    if tls {
+        if let Some(sni) = dg_str(settings, &["tls_settings", "server_name"]) {
+            parts.push(format!("sni={}", sni));
+        }
+        if dg_bool(settings, &["tls_settings", "allow_insecure"]) {
+            parts.push("skip-cert-verify=true".to_string());
+        }
+    }
+    if kind == "socks" {
+        parts.push("udp-relay=true".to_string());
+    }
+    format!("{}\r\n", parts.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
