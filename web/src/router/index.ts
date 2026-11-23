@@ -32,6 +32,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'nodes/new', component: () => import('@/pages/nodes/NodeForm.vue'), meta: { title: '新增节点' } },
       { path: 'nodes/edit/:id', component: () => import('@/pages/nodes/NodeForm.vue'), meta: { title: '编辑节点' } },
       { path: 'nodes/:id/monitor', component: () => import('@/pages/nodes/NodeMonitor.vue'), meta: { title: '节点监控' } },
+      { path: 'nodes/:id/access', component: () => import('@/pages/nodes/NodeAccess.vue'), meta: { title: '分享与权限' } },
+      { path: 'nodes/:id/audit-rules', component: () => import('@/pages/nodes/NodeAuditRules.vue'), meta: { title: '审计规则' } },
       // user-routes
     ],
   },
