@@ -1,3 +1,11 @@
+FROM node:20-alpine AS web
+WORKDIR /workspace/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+# vite writes to ../rust-gateway/resources/public/app
+RUN npm run build
+
 FROM rust:1.89-bookworm AS builder
 WORKDIR /workspace/rust-gateway
 COPY rust-gateway/Cargo.toml ./Cargo.toml
@@ -15,6 +23,7 @@ WORKDIR /app
 COPY --from=builder /workspace/rust-gateway/target/release/notxboard-gateway /usr/local/bin/notxboard-gateway
 COPY rust-gateway/resources /app/runtime/resources
 COPY rust-gateway/resources/public /app/runtime/public
+COPY --from=web /workspace/rust-gateway/resources/public/app /app/runtime/public/app
 RUN mkdir -p /app/state/theme /app/state/plugins
 ENV RUST_LOG=info
 ENV RUST_RUNTIME_ROOT=/app/runtime
