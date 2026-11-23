@@ -555,14 +555,14 @@ async fn build_deploy_response(
     };
 
     let node_type = node.protocol.to_ascii_lowercase();
-    if !server_node_supports_v2bx_deploy(&node_type) {
+    if !server_node_supports_xboard_node_deploy(&node_type) {
         return Ok(json_status_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({
-                "message": "当前协议暂不支持 V2bX 一键部署",
+                "message": "当前协议暂不支持 Xboard-Node 一键部署",
                 "data": {
                     "protocol": node_type,
-                    "supported_protocols": server_node_v2bx_supported_protocols(),
+                    "supported_protocols": server_node_xboard_node_supported_protocols(),
                 }
             }),
         ));
@@ -616,14 +616,14 @@ async fn build_deploy_command_response(
     };
 
     let node_type = node.protocol.to_ascii_lowercase();
-    if !server_node_supports_v2bx_deploy(&node_type) {
+    if !server_node_supports_xboard_node_deploy(&node_type) {
         return Ok(json_status_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({
-                "message": "当前协议暂不支持 V2bX 一键部署命令",
+                "message": "当前协议暂不支持 Xboard-Node 一键部署命令",
                 "data": {
                     "protocol": node_type,
-                    "supported_protocols": server_node_v2bx_supported_protocols(),
+                    "supported_protocols": server_node_xboard_node_supported_protocols(),
                 }
             }),
         ));
@@ -702,51 +702,50 @@ async fn build_deploy_command_response(
 
     let bootstrap = crate::machine_bootstrap_support::issue_machine_bootstrap_ticket(
         state,
-        "v2bx",
+        "xboard-node",
         user.id,
         node.id,
         &token,
     )
     .await
     .map_err(|err| {
-        error!("v2bx bootstrap ticket creation failed: {err}");
+        error!("xboard-node bootstrap ticket creation failed: {err}");
         json_error(StatusCode::SERVICE_UNAVAILABLE, "Installer bootstrap unavailable")
     })?;
     let panel_url = resolve_installer_panel_base_url(state).await?;
     let script_url = format!(
-        "{}/v2bx-install.sh?{}",
+        "{}/xboard-node-install.sh?{}",
         panel_url.trim_end_matches('/'),
         bootstrap.query,
     );
     let node_id_value = node.v2bx_node_id.unwrap_or(node.id as i64);
-    let cert_domain = node.host.trim().to_string();
-    let auto_cert_mode = server_node_prefers_auto_cert(&node_type);
-    let core = node
+    let kernel = node
         .v2bx_config
         .as_ref()
-        .and_then(|value| value.0.get("core").or_else(|| value.0.get("Core")))
+        .and_then(|value| {
+            ["kernel", "kernel_type", "core", "Core"]
+                .iter()
+                .find_map(|key| value.0.get(*key))
+        })
         .and_then(Value::as_str)
-        .map(ToString::to_string);
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "xray" => "xray",
+            _ => "singbox",
+        })
+        .unwrap_or("singbox")
+        .to_string();
 
-    let mut command = format!(
-        "{} {} | bash -s -- --panel {} --node-id {} --node-type {} --bootstrap-token {} --bootstrap-query {}",
+    let command = format!(
+        "{} {} | bash -s -- --panel {} --node-id {} --node-type {} --kernel {} --bootstrap-token {} --bootstrap-query {}",
         installer_curl_command_prefix(&panel_url),
         posix_shell_arg(&script_url),
         posix_shell_arg(&panel_url),
         posix_shell_arg(&node_id_value.to_string()),
         posix_shell_arg(&node_type),
+        posix_shell_arg(&kernel),
         posix_shell_arg(&bootstrap.ticket),
         posix_shell_arg(&bootstrap.query),
     );
-    if let Some(core) = &core {
-        command.push_str(&format!(" --core {}", posix_shell_arg(core)));
-    }
-    if auto_cert_mode {
-        command.push_str(" --cert-mode self");
-        if !cert_domain.is_empty() {
-            command.push_str(&format!(" --cert-domain {}", posix_shell_arg(&cert_domain)));
-        }
-    }
 
     Ok(json_value_response(json!({
         "data": {
@@ -755,11 +754,10 @@ async fn build_deploy_command_response(
             "panel_url": panel_url,
             "node_id": node_id_value,
             "node_type": node_type,
+            "backend": "xboard-node",
+            "kernel": kernel,
             "bootstrap_expires_in": bootstrap.expires_in,
             "token_rotated": token_changed,
-            "core": core,
-            "cert_mode": if auto_cert_mode { Value::String("self".to_string()) } else { Value::Null },
-            "cert_domain": if auto_cert_mode && !cert_domain.is_empty() { Value::String(cert_domain) } else { Value::Null },
         }
     })))
 }

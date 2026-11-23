@@ -283,22 +283,22 @@ expect_status 200 "${BASE_URL}/api/v1/user/server-nodes/${BOUNDARY_NODE_ID}" -H 
 expect_status 403 -X POST "${BASE_URL}/api/v1/user/server-nodes/${BOUNDARY_NODE_ID}/share/user" -H "Authorization: ${BOUNDARY_AUTH}" -H 'Content-Type: application/json' --data "{\"user_id\":${ADMIN_ID}}"
 expect_status 403 -X POST "${BASE_URL}/api/v1/user/server-nodes/${BOUNDARY_NODE_ID}/access" -H "Authorization: ${BOUNDARY_AUTH}" -H 'Content-Type: application/json' --data '{"min_trust_level":0}'
 
-echo "[8/10] verify V2bX credentials are bound to one node and hidden from the browser"
+echo "[8/10] verify Xboard-Node credentials are bound to one node and hidden from the browser"
 NODE_INSTALL_RESPONSE="$(curl -fsS -X POST "${BASE_URL}/api/v1/user/server-nodes/${NODE_ID}/deploy-command" -H "Authorization: ${AUTH_DATA}")"
 NODE_TOKEN="$(mysql_scalar "SELECT v2bx_token FROM server_nodes WHERE id=${NODE_ID} LIMIT 1;")"
-[ -n "$NODE_TOKEN" ] || { echo "V2bX token missing in database" >&2; exit 1; }
-case "$NODE_INSTALL_RESPONSE" in *"$NODE_TOKEN"*) echo "V2bX response leaked long credential" >&2; exit 1;; esac
+[ -n "$NODE_TOKEN" ] || { echo "Xboard-Node token missing in database" >&2; exit 1; }
+case "$NODE_INSTALL_RESPONSE" in *"$NODE_TOKEN"*) echo "Xboard-Node response leaked long credential" >&2; exit 1;; esac
 NODE_SCRIPT_URL="$(printf '%s' "$NODE_INSTALL_RESPONSE" | json_field data.script_url)"
-[ -n "$NODE_SCRIPT_URL" ] || { echo "V2bX response missing script_url" >&2; exit 1; }
+[ -n "$NODE_SCRIPT_URL" ] || { echo "Xboard-Node response missing script_url" >&2; exit 1; }
 NODE_BOOTSTRAP_TTL="$(printf '%s' "$NODE_INSTALL_RESPONSE" | json_field data.bootstrap_expires_in)"
-[ "$NODE_BOOTSTRAP_TTL" = "600" ] || { echo "V2bX bootstrap TTL must be 600 seconds" >&2; exit 1; }
+[ "$NODE_BOOTSTRAP_TTL" = "600" ] || { echo "Xboard-Node bootstrap TTL must be 600 seconds" >&2; exit 1; }
 NODE_QUERY="${NODE_SCRIPT_URL#*\?}"
 NODE_TICKET="$(printf '%s' "$NODE_INSTALL_RESPONSE" | bootstrap_token_from_command "$NODE_QUERY")"
-validate_signed_bootstrap_url "$NODE_SCRIPT_URL" v2bx "$NODE_TICKET"
-signed_asset_get "$NODE_SCRIPT_URL" v2bx-install
-NODE_EXCHANGED="$(curl -fsS -X POST "${BASE_URL}/api/v1/agent/bootstrap/v2bx?${NODE_QUERY}" -H "Authorization: Bearer ${NODE_TICKET}")"
-[ "$NODE_EXCHANGED" = "$NODE_TOKEN" ] || { echo "V2bX exchange returned the wrong credential" >&2; exit 1; }
-expect_status 404 -X POST "${BASE_URL}/api/v1/agent/bootstrap/v2bx?${NODE_QUERY}" -H "Authorization: Bearer ${NODE_TICKET}"
+validate_signed_bootstrap_url "$NODE_SCRIPT_URL" xboard-node "$NODE_TICKET"
+signed_asset_get "$NODE_SCRIPT_URL" xboard-node-install
+NODE_EXCHANGED="$(curl -fsS -X POST "${BASE_URL}/api/v1/agent/bootstrap/xboard-node?${NODE_QUERY}" -H "Authorization: Bearer ${NODE_TICKET}")"
+[ "$NODE_EXCHANGED" = "$NODE_TOKEN" ] || { echo "Xboard-Node exchange returned the wrong credential" >&2; exit 1; }
+expect_status 404 -X POST "${BASE_URL}/api/v1/agent/bootstrap/xboard-node?${NODE_QUERY}" -H "Authorization: Bearer ${NODE_TICKET}"
 
 SECOND_NODE_NAME="permission-boundary-node-2-${RANDOM}-${RANDOM}"
 SECOND_NODE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"

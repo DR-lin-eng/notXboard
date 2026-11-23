@@ -294,6 +294,7 @@ pub(crate) use traffic_ingest_support::{
     load_primary_subscription_ids_for_node_users, AggregatedTrafficRow,
 };
 pub(crate) use uniproxy_support::{
+    server_handshake, server_machine_unsupported, server_report,
     uniproxy_alive, uniproxy_alivelist, uniproxy_audit, uniproxy_config, uniproxy_push,
     uniproxy_status, uniproxy_user,
 };
@@ -2326,17 +2327,17 @@ fn server_node_supported_protocols() -> Vec<&'static str> {
     ]
 }
 
-fn server_node_v2bx_supported_protocols() -> Vec<&'static str> {
-    vec!["vmess", "vless", "trojan", "shadowsocks", "hysteria", "hysteria2", "tuic", "anytls"]
+fn server_node_xboard_node_supported_protocols() -> Vec<&'static str> {
+    vec![
+        "vmess", "vless", "trojan", "shadowsocks", "hysteria", "hysteria2", "tuic", "anytls",
+        "socks", "naive", "http", "mieru",
+    ]
 }
 
-fn server_node_supports_v2bx_deploy(protocol: &str) -> bool {
-    server_node_v2bx_supported_protocols().contains(&protocol)
+fn server_node_supports_xboard_node_deploy(protocol: &str) -> bool {
+    server_node_xboard_node_supported_protocols().contains(&protocol)
 }
 
-fn server_node_prefers_auto_cert(protocol: &str) -> bool {
-    matches!(protocol, "vmess" | "vless" | "trojan" | "hysteria" | "hysteria2" | "tuic" | "anytls")
-}
 
 fn server_node_protocol_items() -> Vec<Value> {
     let labels = server_node_protocol_labels();
@@ -5350,7 +5351,7 @@ async fn send_server_node_offline_ops_alert(
     now_ts: i64,
 ) -> Result<bool, String> {
     let text = format!(
-        "V2bX 节点离线\n节点名称：{}\n节点地址：{}\n协议：{}\n最后上报：{}\n时间：{}",
+        "节点离线\n节点名称：{}\n节点地址：{}\n协议：{}\n最后上报：{}\n时间：{}",
         node.name,
         node.host,
         node.protocol,

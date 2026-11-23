@@ -113,7 +113,7 @@ const DEFAULT_NODE_PROTOCOL_OPTIONS = Object.keys(NODE_PROTOCOL_LABELS).map((key
   label: NODE_PROTOCOL_LABELS[key],
 }));
 
-const V2BX_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
+const XBOARD_NODE_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
   'vmess',
   'vless',
   'trojan',
@@ -122,6 +122,10 @@ const V2BX_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
   'hysteria2',
   'tuic',
   'anytls',
+  'socks',
+  'naive',
+  'http',
+  'mieru',
 ]));
 
 const PLAN_PRICE_FIELDS = Object.freeze([
@@ -1024,8 +1028,8 @@ function protocolDisplayName(protocol, protocolMap = {}) {
   return protocolMap[key] || NODE_PROTOCOL_LABELS[key] || (key ? key.toUpperCase() : '-');
 }
 
-function isV2bxDeployableProtocol(protocol) {
-  return V2BX_DEPLOYABLE_PROTOCOLS.has(String(protocol || '').toLowerCase());
+function isXboardNodeDeployableProtocol(protocol) {
+  return XBOARD_NODE_DEPLOYABLE_PROTOCOLS.has(String(protocol || '').toLowerCase());
 }
 
 function buildProtocolOptionHtml(protocolOptions, selectedValue = '') {
@@ -4249,7 +4253,7 @@ async function renderNodes() {
       <div class="row" style="justify-content: space-between; align-items: center;">
         <div>
           <h2>TCPing Agent 管理</h2>
-          <div class="muted">独立部署在探测服务器上，不和 V2bX 混装。创建后复制一行命令即可接入。</div>
+          <div class="muted">独立部署在探测服务器上，不和 Xboard-Node 节点混装。创建后复制一行命令即可接入。</div>
         </div>
         <button class="btn primary" id="newTcpingAgentBtn">新增 Agent</button>
       </div>
@@ -4320,12 +4324,12 @@ async function renderNodes() {
                 <td class="row end">
                   <button class="btn small" data-action="monitor" data-id="${node.id}">监控</button>
                   <button class="btn small" data-action="edit" data-id="${node.id}">编辑</button>
-                  ${isV2bxDeployableProtocol(node.protocol)
+                  ${isXboardNodeDeployableProtocol(node.protocol)
                     ? `<button class="btn small" data-action="deploy" data-id="${node.id}">部署</button>`
                     : `<button class="btn small" data-action="deploy-unsupported" data-id="${node.id}">部署不可用</button>`
                   }
-                  ${isV2bxDeployableProtocol(node.protocol) && node.v2bx_token_configured
-                    ? `<button class="btn small" data-action="rotate-v2bx" data-id="${node.id}">轮换凭据</button>`
+                  ${isXboardNodeDeployableProtocol(node.protocol) && node.v2bx_token_configured
+                    ? `<button class="btn small" data-action="rotate-node-token" data-id="${node.id}">轮换凭据</button>`
                     : ''}
                   <button class="btn small" data-action="access" data-id="${node.id}">分享/权限</button>
                   <button class="btn small" data-action="audit" data-id="${node.id}">审计规则</button>
@@ -4401,7 +4405,7 @@ async function renderNodes() {
           const command = String(res?.data?.command || '').trim();
           if (!command) throw new Error('未生成安装命令');
           await copyText(command);
-          alert('安装命令已复制。请在独立探测机上执行，不要和 V2bX 混装。');
+          alert('安装命令已复制。请在独立探测机上执行，不要和 Xboard-Node 节点混装。');
           return;
         }
 
@@ -4432,13 +4436,13 @@ async function renderNodes() {
           return;
         }
         if (action === 'deploy-unsupported') {
-          alert('该协议暂不支持 V2bX 一键部署。请改用 vmess/vless/trojan/shadowsocks/hysteria/hysteria2/tuic/anytls。');
+          alert('该协议暂不支持 Xboard-Node 一键部署。请改用 vmess/vless/trojan/shadowsocks/hysteria/hysteria2/tuic/anytls/socks/naive/http/mieru。');
           return;
         }
         if (action === 'deploy') {
           const node = ownedNodes.find((n) => String(n.id) === String(id)) || {};
-          if (!isV2bxDeployableProtocol(node?.protocol)) {
-            alert('该协议暂不支持 V2bX 一键部署。');
+          if (!isXboardNodeDeployableProtocol(node?.protocol)) {
+            alert('该协议暂不支持 Xboard-Node 一键部署。');
             return;
           }
           const deployRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy`, { method: 'POST' });
@@ -4461,13 +4465,13 @@ async function renderNodes() {
           }
           return;
         }
-        if (action === 'rotate-v2bx') {
-          if (!confirm('确认轮换这个节点的 V2bX 凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
+        if (action === 'rotate-node-token') {
+          if (!confirm('确认轮换这个节点的 Xboard-Node 凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
           const commandRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy-command/rotate-token`, { method: 'POST', body: {} });
           const command = String(commandRes?.data?.command || '').trim();
           if (!command) throw new Error('未生成新的部署命令');
           await copyText(command);
-          alert('新部署命令已复制，旧 V2bX 凭据已失效。');
+          alert('新部署命令已复制，旧 Xboard-Node 凭据已失效。');
           await renderNodes();
           return;
         }
@@ -4909,7 +4913,7 @@ async function renderEditNode(nodeId, errorText = '') {
       <div id="en_form_error">${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}</div>
       <div class="grid cols-2" style="margin-top: 10px;">
         <div class="field"><label>节点名称</label><input id="en_name" value="${escapeHtml(node?.name || '')}"></div>
-        <div class="field"><label>在线状态（V2bX 回传）</label><div>${pillStatus(node)}</div></div>
+        <div class="field"><label>在线状态（Xboard-Node 回传）</label><div>${pillStatus(node)}</div></div>
         <div class="field">
           <label>落地国家 / 地区</label>
           <input id="en_location" list="nodeLocationOptions" value="${escapeHtml(getNodeLocationInputValue(node?.location_code, node?.location_name))}" placeholder="必选，可搜索，例如 HK | Hong Kong 香港" required>
@@ -4946,7 +4950,7 @@ async function renderEditNode(nodeId, errorText = '') {
       <div class="row end" style="margin-top: 12px;">
         <button class="btn primary" id="en_save">保存</button>
       </div>
-      <div class="muted" style="margin-top: 10px;">节点总流量达到上限后，将停止向该节点下发用户，V2bX 下发会自动清空该节点用户列表。</div>
+      <div class="muted" style="margin-top: 10px;">节点总流量达到上限后，将停止向该节点下发用户，Xboard-Node 下发会自动清空该节点用户列表。</div>
     </div>
   `);
 
@@ -6928,7 +6932,7 @@ function buildCommandCenterDashboard(payload = {}, me = {}) {
     {
       label: '探针在线',
       value: `${formatCompactNumber(overview?.tcping_agents_online || 0)}/${formatCompactNumber(overview?.tcping_agents_total || 0)}`,
-      meta: '独立于 V2bX 的探活体系',
+      meta: '独立于 Xboard-Node 的探活体系',
       tone: 'violet',
     },
     {

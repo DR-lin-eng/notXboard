@@ -2,6 +2,7 @@ use crate::{
     admin_v1, admin_v2, authenticate_route_account, bootstrap_support, client_v1, exposure_control,
     fallback_support, first_non_empty, get_setting_string, guest_v1, healthz, json_error,
     passport_v1, secure_admin_path_matches, static_files, subscribe_entry, tcping_agent_v1,
+    server_handshake, server_machine_unsupported, server_report,
     uniproxy_alive, uniproxy_alivelist, uniproxy_audit, uniproxy_config, uniproxy_push,
     uniproxy_status, uniproxy_user, user_v1, web_pages, AppState, RequiredAccountRole,
 };
@@ -64,7 +65,7 @@ fn web_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/robots.txt", get(web_pages::robots_txt))
-        .route("/v2bx-install.sh", get(static_files::installer_file))
+        .route("/xboard-node-install.sh", get(static_files::installer_file))
         .route("/tcping-agent-install.sh", get(static_files::installer_file))
         .route("/tcping-agent-src/go.mod", get(static_files::installer_file))
         .route("/tcping-agent-src/main.go", get(static_files::installer_file))
@@ -435,6 +436,10 @@ fn server_routes() -> Router<Arc<AppState>> {
         .route("/api/v1/server/UniProxy/alive", post(uniproxy_alive))
         .route("/api/v1/server/UniProxy/status", post(uniproxy_status))
         .route("/api/v1/server/UniProxy/audit", post(uniproxy_audit))
+        .route("/api/v2/server/handshake", any(server_handshake))
+        .route("/api/v2/server/report", post(server_report))
+        .route("/api/v2/server/machine/nodes", any(server_machine_unsupported))
+        .route("/api/v2/server/machine/status", any(server_machine_unsupported))
         .route("/api/v2/server/push", post(uniproxy_push))
         .route("/api/v2/server/alive", post(uniproxy_alive))
         .route("/api/v2/server/status", post(uniproxy_status))
