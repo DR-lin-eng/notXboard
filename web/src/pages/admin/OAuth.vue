@@ -19,7 +19,7 @@ const page: ConfigPage = {
 }
 function callbackUrl(): string {
   const base = (appUrl.value || location.origin).replace(/\/+$/, '')
-  return `${base}/api/v1/passport/auth/linuxdo/callback`
+  return `${base}/api/v1/passport/oauth2/linux-do/callback`
 }
 function useSuggested() {
   if (form.value) form.value.values.oauth_linux_do_redirect_uri = callbackUrl()
