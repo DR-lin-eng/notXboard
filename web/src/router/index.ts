@@ -34,6 +34,8 @@ const routes: RouteRecordRaw[] = [
       { path: 'nodes/:id/monitor', component: () => import('@/pages/nodes/NodeMonitor.vue'), meta: { title: '节点监控' } },
       { path: 'nodes/:id/access', component: () => import('@/pages/nodes/NodeAccess.vue'), meta: { title: '分享与权限' } },
       { path: 'nodes/:id/audit-rules', component: () => import('@/pages/nodes/NodeAuditRules.vue'), meta: { title: '审计规则' } },
+      { path: 'tickets', component: () => import('@/pages/Tickets.vue'), meta: { title: '工单' } },
+      { path: 'ticket/:id', component: () => import('@/pages/TicketDetail.vue'), meta: { title: '工单详情' } },
       // user-routes
     ],
   },

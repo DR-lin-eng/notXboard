@@ -104,3 +104,15 @@ export function voteLabel(vote: unknown): string {
   if (vote === 'deny') return '拒绝退款'
   return '-'
 }
+
+export function ticketStatus(status: unknown): { label: string; tone: string } {
+  const key = String(status)
+  if (key === '0' || key === 'open') return { label: '处理中', tone: 'warn' }
+  if (key === '1' || key === 'closed') return { label: '已关闭', tone: '' }
+  return { label: String(status ?? '-'), tone: '' }
+}
+export const TICKET_LEVELS = [
+  { value: '0', label: '低' },
+  { value: '1', label: '中' },
+  { value: '2', label: '高' },
+] as const
