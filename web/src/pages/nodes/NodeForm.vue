@@ -104,6 +104,8 @@ async function save() {
   const servicePort = Number(form.service_port)
   const tcpingPort = Number(form.tcping_port)
   const limitGb = Number(form.traffic_limit_gb) || 0
+  const savedAccess = node.value?.access_control
+  const existingAccess = savedAccess && typeof savedAccess === 'object' && !Array.isArray(savedAccess) ? savedAccess : {}
   const payload: Record<string, unknown> = {
     name: form.name.trim(),
     ...location,
@@ -124,10 +126,13 @@ async function save() {
     tcping_timeout_ms: Number(form.tcping_timeout_ms) || 3000,
     tcping_alert_after_seconds: Number(form.tcping_alert_after_seconds) || 300,
     tcping_recover_after_seconds: Number(form.tcping_recover_after_seconds) || 120,
-    access_control: { min_trust_level: Number(form.min_trust) || 0 },
   }
   if (!editing.value) payload.protocol = form.protocol
-  if (session.isSuperAdmin) payload.concurrent_ip_limit = Number(form.concurrent_ip_limit) || 0
+  // Only the site owner may open a node to other users; the API rejects the field from anyone else.
+  if (session.isSuperAdmin) {
+    payload.access_control = { ...existingAccess, min_trust_level: Number(form.min_trust) || 0 }
+    payload.concurrent_ip_limit = Number(form.concurrent_ip_limit) || 0
+  }
 
   saving.value = true
   try {
@@ -189,9 +194,10 @@ async function save() {
             </div>
             <div class="field">
               <label for="n-trust">最低用户等级</label>
-              <select id="n-trust" v-model.number="form.min_trust" class="select">
+              <select id="n-trust" v-model.number="form.min_trust" class="select" :disabled="!session.isSuperAdmin">
                 <option v-for="level in TRUST_LEVEL_OPTIONS" :key="level" :value="level">等级 {{ level }}</option>
               </select>
+              <span v-if="!session.isSuperAdmin" class="hint">仅站长可修改。</span>
               <span v-if="err('access_control', 'access_control.min_trust_level')" class="err">{{ err('access_control', 'access_control.min_trust_level') }}</span>
             </div>
             <div class="field">

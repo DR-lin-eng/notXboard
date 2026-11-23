@@ -8,11 +8,13 @@ import { parseIdList } from '@/lib/domain'
 import { asArray } from '@/lib/format'
 import { TRUST_LEVEL_OPTIONS } from '@/lib/nodeConstants'
 import { useAsync } from '@/lib/useAsync'
+import { useSession } from '@/stores/session'
 import { useUi } from '@/stores/ui'
 
 const route = useRoute()
 const router = useRouter()
 const ui = useUi()
+const session = useSession()
 const nodeId = computed(() => String(route.params.id))
 const form = reactive({ min_trust: 0, user_ids: '', quota: {} as Record<number, number> })
 const formError = ref('')
@@ -33,9 +35,14 @@ async function save() {
   try {
     await api(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}/access`, {
       method: 'POST',
+      // Only the site owner may open a node to other users; the API rejects those fields from anyone else.
       body: {
-        min_trust_level: Number.isFinite(Number(form.min_trust)) ? Number(form.min_trust) : null,
-        authorized_users: parseIdList(form.user_ids),
+        ...(session.isSuperAdmin
+          ? {
+              min_trust_level: Number.isFinite(Number(form.min_trust)) ? Number(form.min_trust) : null,
+              authorized_users: parseIdList(form.user_ids),
+            }
+          : {}),
         free_quota_gb_by_trust_level: Object.fromEntries(TRUST_LEVEL_OPTIONS.map((level) => [level, Number(form.quota[level]) || 0])),
       },
     })
@@ -58,18 +65,19 @@ async function save() {
     <AsyncState :loading="loading" :error="error" @retry="reload()">
       <form class="col" @submit.prevent="save">
         <div v-if="formError" class="notice error" role="alert">{{ formError }}</div>
+        <div v-if="!session.isSuperAdmin" class="notice">只有站长可以把节点开放给其他用户，这里只能调整免费额度。</div>
         <div class="card">
           <div class="card-head"><h3>谁可以使用</h3></div>
           <div class="card-body form-grid">
             <div class="field">
               <label for="na-trust">最低用户等级</label>
-              <select id="na-trust" v-model.number="form.min_trust" class="select">
+              <select id="na-trust" v-model.number="form.min_trust" class="select" :disabled="!session.isSuperAdmin">
                 <option v-for="level in TRUST_LEVEL_OPTIONS" :key="level" :value="level">等级 {{ level }}</option>
               </select>
             </div>
             <div class="field">
               <label for="na-users">指定可用用户 ID</label>
-              <input id="na-users" v-model="form.user_ids" class="input" placeholder="例如 1,2,3">
+              <input id="na-users" v-model="form.user_ids" class="input" placeholder="例如 1,2,3" :disabled="!session.isSuperAdmin">
               <span class="hint">多个用逗号分隔。</span>
             </div>
           </div>
