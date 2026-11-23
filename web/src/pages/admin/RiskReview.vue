@@ -139,7 +139,7 @@ async function ban(review: any) {
       </div>
     </AsyncState>
 
-    <div v-show="tab === 'settings'" class="narrow">
+    <div v-show="tab === 'settings'" style="max-width: 820px">
       <p class="muted small mb">
         Telegram 通知：风险提醒{{ notify.risk ? '已开启' : '未开启' }}，封禁通知{{ notify.banned ? '已开启' : '未开启' }}。
         <RouterLink to="/admin/telegram">通知设置</RouterLink>

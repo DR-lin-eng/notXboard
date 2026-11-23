@@ -18,7 +18,9 @@ const action = useAction()
 const disputeEnabled = ref(false)
 const { data, loading, error, reload } = useAsync(async () => {
   const [config, payments, methods] = await Promise.all([
-    adminV2<any>('config/fetch'), adminList('payment/fetch'), adminList<string>('payment/getPaymentMethods'),
+    // Site config is super-admin only; plain admins manage channels without the policy card.
+    session.isSuperAdmin ? adminV2<any>('config/fetch') : Promise.resolve(null),
+    adminList('payment/fetch'), adminList<string>('payment/getPaymentMethods'),
   ])
   disputeEnabled.value = isOn(config?.system?.refund_dispute_enable)
   return { payments: payments.items, methods: methods.items.map(String) }
@@ -118,7 +120,7 @@ async function remove(payment: any) {
       <div class="actions"><button type="button" class="btn primary" @click="edit()">新建支付渠道</button></div>
     </div>
     <AsyncState :loading="loading" :error="error" @retry="reload()">
-      <div class="card mb">
+      <div v-if="session.isSuperAdmin" class="card mb">
         <div class="card-head"><h3>退款与争议</h3></div>
         <div class="card-body row wrap">
           <label class="switch"><input v-model="disputeEnabled" type="checkbox" role="switch"><span>启用争议退款投票</span></label>
