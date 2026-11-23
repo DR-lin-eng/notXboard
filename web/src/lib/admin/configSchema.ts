@@ -51,6 +51,11 @@ function parseList(raw: unknown): string[] {
   return list.map((item) => String(item ?? '').trim()).filter(Boolean)
 }
 
+function matchOption(field: ConfigField, raw: unknown): string | undefined {
+  const wanted = String(raw ?? '').trim().toLowerCase()
+  return field.options?.find((option) => option.value.toLowerCase() === wanted)?.value
+}
+
 export function readConfigValues(page: ConfigPage, config: Record<string, any>): Record<string, any> {
   const values: Record<string, any> = {}
   for (const field of page.sections.flatMap((section) => section.fields)) {
@@ -59,9 +64,8 @@ export function readConfigValues(page: ConfigPage, config: Record<string, any>):
     else if (field.type === 'lines') values[field.key] = parseList(raw).join('\n')
     else if (field.type === 'number' || field.type === 'float') values[field.key] = raw == null || raw === '' ? field.fallback ?? '' : Number(raw)
     else if (field.type === 'select') {
-      // A stored value outside the options would be rejected on save, so show the default instead.
-      const known = (field.options || []).some((option) => String(option.value) === String(raw))
-      values[field.key] = known ? String(raw) : String(field.fallback ?? '')
+      // A stored value outside the options is kept as is: the select stays empty and the field is not saved.
+      values[field.key] = raw == null ? String(field.fallback ?? '') : matchOption(field, raw) ?? String(raw)
     } else values[field.key] = raw == null ? String(field.fallback ?? '') : String(raw)
   }
   return values
@@ -74,6 +78,10 @@ export function buildConfigPayload(page: ConfigPage, values: Record<string, any>
     const value = values[field.key]
     if (field.type === 'bool') payload[field.key] = value ? 1 : 0
     else if (field.type === 'lines') payload[field.key] = parseList(value)
+    else if (field.type === 'select') {
+      const option = matchOption(field, value)
+      if (option !== undefined) payload[field.key] = option
+    }
     else if (field.type === 'number' || field.type === 'float') {
       let num = field.type === 'number' ? parseInt(String(value), 10) : parseFloat(String(value))
       if (!Number.isFinite(num)) num = Number(field.fallback ?? 0)
