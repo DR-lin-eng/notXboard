@@ -132,6 +132,8 @@ async function save() {
     payload.concurrent_ip_limit = Number(form.concurrent_ip_limit) || 0
     if (!editing.value) payload.access_control = { min_trust_level: minTrust }
   }
+  // The route can change while the save is in flight; every request goes to the node the form was opened for.
+  const targetId = nodeId.value
   const trustChanged = session.isSuperAdmin && editing.value && minTrust !== Number(node.value?.access_control?.min_trust_level ?? 0)
 
   saving.value = true
@@ -139,12 +141,12 @@ async function save() {
     if (editing.value) {
       if (trustChanged) {
         // Quotas and grants belong to the sharing page: merge onto the node as it is now and leave the grants alone.
-        const current = await api<any>(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}`)
+        const current = await api<any>(`/api/v1/user/server-nodes/${encodeURIComponent(targetId)}`)
         const access = current?.access_control && typeof current.access_control === 'object' && !Array.isArray(current.access_control) ? { ...current.access_control } : {}
         delete access.authorized_users
         payload.access_control = { ...access, min_trust_level: minTrust }
       }
-      await api(`/api/v1/user/server-nodes/${encodeURIComponent(nodeId.value)}`, { method: 'PUT', body: payload })
+      await api(`/api/v1/user/server-nodes/${encodeURIComponent(targetId)}`, { method: 'PUT', body: payload })
       ui.ok('节点已保存')
     } else {
       await api('/api/v1/user/server-nodes', { method: 'POST', body: payload })
