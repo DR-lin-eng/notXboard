@@ -15,7 +15,6 @@ tests
 docs
 *.md
 *.log
-V2bX-dev_new
 design-system
 tools
 rust-gateway/target
