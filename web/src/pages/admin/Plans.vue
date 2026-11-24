@@ -34,6 +34,8 @@ const priceSummary = (plan: any) => PRICE_PERIODS
   .map((period) => `${period.label} ¥${Number(plan.prices[period.key]).toFixed(2)}`).join(' · ') || '未定价'
 const resetLabel = (plan: any) => RESET_METHODS.find((item) => item.value === String(plan.reset_traffic_method ?? ''))?.label || '-'
 
+// plan/fetch returns the stored quota in bytes; plan/save takes whole GB.
+const quotaGb = (plan: any) => Math.round(Number(plan.transfer_enable || 0) / 1024 ** 3)
 const blank = () => ({
   open: false, id: 0, name: '', group: '', transfer: 100, speed: 0, device: 0, capacity: 0, reset: '',
   tags: '', content: '', prices: {} as Record<string, string>, error: '', saving: false,
@@ -44,7 +46,7 @@ function edit(plan?: any) {
   if (!plan) return
   Object.assign(form, {
     id: Number(plan.id), name: plan.name || '', group: plan.group_id ? String(plan.group_id) : '',
-    transfer: Number(plan.transfer_enable) || 0, speed: Number(plan.speed_limit) || 0, device: Number(plan.device_limit) || 0,
+    transfer: quotaGb(plan), speed: Number(plan.speed_limit) || 0, device: Number(plan.device_limit) || 0,
     capacity: Number(plan.capacity_limit) || 0, reset: plan.reset_traffic_method == null ? '' : String(plan.reset_traffic_method),
     tags: Array.isArray(plan.tags) ? plan.tags.join(', ') : '', content: plan.content || '',
   })
@@ -124,7 +126,7 @@ async function remove(plan: any) {
                 <td class="tnum muted">{{ plan.id }}</td>
                 <td><b>{{ plan.name || '-' }}</b><div v-if="plan.tags?.length" class="muted small">{{ plan.tags.join(', ') }}</div></td>
                 <td>{{ plan.group?.name || '-' }}</td>
-                <td class="tnum">{{ plan.transfer_enable ?? '-' }} GB<div class="muted small">{{ resetLabel(plan) }}</div></td>
+                <td class="tnum">{{ quotaGb(plan) }} GB<div class="muted small">{{ resetLabel(plan) }}</div></td>
                 <td class="small">限速 {{ plan.speed_limit || '不限' }}{{ plan.speed_limit ? ' Mbps' : '' }}<br>设备 {{ plan.device_limit || '不限' }} · 容量 {{ plan.capacity_limit || '不限' }}</td>
                 <td class="small">{{ priceSummary(plan) }}</td>
                 <td>
