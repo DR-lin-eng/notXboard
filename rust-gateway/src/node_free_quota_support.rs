@@ -18,20 +18,36 @@ const UNLIMITED_TRAFFIC_ALLOWANCE_KB: i64 = 8_000_000_000_000_000;
 pub(crate) type FreeQuotaLimits = [u64; 5];
 
 static SCHEMA_READY: AtomicBool = AtomicBool::new(false);
+static REMAINDER_COLUMN_READY: AtomicBool = AtomicBool::new(false);
 
+/// `node_free_quota_usage` exists.
 pub(crate) fn free_quota_schema_ready() -> bool {
     SCHEMA_READY.load(Ordering::Relaxed)
 }
 
-async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::Error> {
-    let server_nodes_ready: i64 = sqlx::query_scalar(
+/// `user_plan_subscriptions.used_traffic_remainder_bytes` exists.
+pub(crate) fn subscription_remainder_column_ready() -> bool {
+    REMAINDER_COLUMN_READY.load(Ordering::Relaxed)
+}
+
+async fn table_exists(state: &AppState, table: &str) -> Result<bool, sqlx::Error> {
+    let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM information_schema.tables
-         WHERE table_schema = DATABASE() AND table_name = 'server_nodes'",
+         WHERE table_schema = DATABASE() AND table_name = ?",
     )
+    .bind(table)
     .fetch_one(&state.db)
     .await?;
-    if server_nodes_ready == 0 {
+    Ok(count > 0)
+}
+
+async fn ensure_usage_table(state: &AppState) -> Result<bool, sqlx::Error> {
+    if !table_exists(state, "server_nodes").await? {
         return Ok(false);
+    }
+    // No DDL when the table is already there: the database user may not be allowed to run it.
+    if table_exists(state, "node_free_quota_usage").await? {
+        return Ok(true);
     }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS `node_free_quota_usage` (
@@ -47,7 +63,13 @@ async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::E
     )
     .execute(&state.db)
     .await?;
+    Ok(true)
+}
 
+async fn ensure_remainder_column(state: &AppState) -> Result<bool, sqlx::Error> {
+    if !table_exists(state, "user_plan_subscriptions").await? {
+        return Ok(false);
+    }
     let remainder_column_exists: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM information_schema.columns
          WHERE table_schema = DATABASE()
@@ -73,28 +95,35 @@ async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::E
     Ok(true)
 }
 
+/// Each part becomes ready on its own, so a failure of one does not disable the other.
+async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::Error> {
+    let table = ensure_usage_table(state).await;
+    if matches!(table, Ok(true)) {
+        SCHEMA_READY.store(true, Ordering::Relaxed);
+    }
+    let column = ensure_remainder_column(state).await;
+    if matches!(column, Ok(true)) {
+        REMAINDER_COLUMN_READY.store(true, Ordering::Relaxed);
+    }
+    Ok(table? && column?)
+}
+
 /// Creates the usage table before the gateway serves requests, so quota checks are in force
 /// from the first request; keeps retrying in the background if the database is not ready yet.
 pub(crate) async fn init_node_free_quota_schema(state: AppState) {
     match ensure_node_free_quota_schema(&state).await {
-        Ok(true) => {
-            SCHEMA_READY.store(true, Ordering::Relaxed);
-            return;
-        }
+        Ok(true) => return,
         Ok(false) => {}
         Err(err) => error!("node free quota schema ensure failed: {err}"),
     }
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
-            if free_quota_schema_ready() {
+            if free_quota_schema_ready() && subscription_remainder_column_ready() {
                 break;
             }
             match ensure_node_free_quota_schema(&state).await {
-                Ok(true) => {
-                    SCHEMA_READY.store(true, Ordering::Relaxed);
-                    break;
-                }
+                Ok(true) => break,
                 Ok(false) => {}
                 Err(err) => error!("node free quota schema ensure failed: {err}"),
             }

@@ -228,7 +228,7 @@ pub(crate) async fn batch_update_subscription_usage(
         // Carry partial KiB across reports. Use separate assignments in this transaction
         // because MySQL does not guarantee the order of assignments on a joined update.
         // Until the remainder column exists, bill whole KiB only instead of failing the batch.
-        let assignments: &[&str] = if crate::node_free_quota_support::free_quota_schema_ready() {
+        let assignments: &[&str] = if crate::node_free_quota_support::subscription_remainder_column_ready() {
             &[
                 "ups.used_traffic_kb = ups.used_traffic_kb + ((ups.used_traffic_remainder_bytes + delta.billed) DIV 1024)",
                 "ups.used_traffic_remainder_bytes = MOD(ups.used_traffic_remainder_bytes + delta.billed, 1024)",
