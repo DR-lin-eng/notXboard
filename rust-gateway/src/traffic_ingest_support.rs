@@ -166,6 +166,9 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
                      ROW_NUMBER() OVER (
                          PARTITION BY ups.user_id
                          ORDER BY
+                             CASE WHEN ups.traffic_allowance_kb >= ?
+                                    OR ups.traffic_allowance_kb > ups.used_traffic_kb
+                                  THEN 0 ELSE 1 END ASC,
                              CASE WHEN ups.expired_at IS NULL THEN 1 ELSE 0 END DESC,
                              ups.expired_at ASC,
                              ups.id ASC
@@ -185,7 +188,10 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
              WHERE row_num = 1",
             placeholders,
         );
-        let mut query = sqlx::query(&sql).bind(node_id).bind(now_ts);
+        let mut query = sqlx::query(&sql)
+            .bind(8_000_000_000_000_000_i64)
+            .bind(node_id)
+            .bind(now_ts);
         for user_id in chunk {
             query = query.bind(*user_id);
         }
