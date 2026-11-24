@@ -71,6 +71,20 @@ CREATE TABLE `migrations` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=77 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `node_free_quota_usage`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `node_free_quota_usage` (
+  `node_id` bigint unsigned NOT NULL COMMENT '节点 ID',
+  `period_month` int unsigned NOT NULL COMMENT '自然月 YYYYMM（UTC+8）',
+  `user_id` int NOT NULL COMMENT '用户 ID',
+  `used_bytes` bigint unsigned NOT NULL DEFAULT '0' COMMENT '当月免费流量（字节）',
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`node_id`,`period_month`,`user_id`),
+  KEY `node_free_quota_usage_user_period_index` (`user_id`,`period_month`),
+  CONSTRAINT `node_free_quota_usage_node_id_foreign` FOREIGN KEY (`node_id`) REFERENCES `server_nodes` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `node_traffic_records`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -524,6 +538,7 @@ CREATE TABLE `user_plan_subscriptions` (
   `period` varchar(32) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '购买周期',
   `traffic_allowance_kb` bigint NOT NULL DEFAULT '0' COMMENT '该实例总流量额度(KB)',
   `used_traffic_kb` bigint NOT NULL DEFAULT '0' COMMENT '已使用流量(KB)',
+  `used_traffic_remainder_bytes` smallint unsigned NOT NULL DEFAULT '0' COMMENT '不足 1 KiB 的已使用字节数',
   `started_at` int NOT NULL COMMENT '生效时间',
   `expired_at` int DEFAULT NULL COMMENT '到期时间，NULL 表示长期',
   `status` tinyint NOT NULL DEFAULT '1' COMMENT '1=active,2=expired,3=revoked',

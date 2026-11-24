@@ -234,6 +234,10 @@ async fn build_configure_node_response(
             Value::Array(user_ids.iter().copied().map(Value::from).collect()),
         );
     }
+    if let Some(quota) = access_control.get("free_quota_gb_by_trust_level") {
+        let quota = crate::node_free_quota_support::normalize_free_quota(Some(quota));
+        access_control.insert("free_quota_gb_by_trust_level".to_string(), quota);
+    }
     let access_control_json = Value::Object(access_control.clone());
 
     let mut tx = state.db.begin().await.map_err(internal_error)?;

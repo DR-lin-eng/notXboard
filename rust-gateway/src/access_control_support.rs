@@ -113,6 +113,14 @@ pub(crate) async fn load_accessible_nodes_for_user_payload(
         subscription_credential_version: None,
     };
     let nodes = load_accessible_nodes_for_user_rows(state, &user_row).await?;
+    // Still listed (traffic, tickets, monitoring), but no longer delivered to the user.
+    let free_quota_exhausted = crate::node_free_quota_support::load_free_quota_blocked_node_ids(
+        state,
+        user.id,
+        user.trust_level,
+        Utc::now().timestamp(),
+    )
+    .await?;
     let push_interval = get_setting_int(state, "server_push_interval", 60).await.max(60);
     let status_cache = state.load_status_cache.read().clone();
     Ok(nodes
@@ -147,6 +155,7 @@ pub(crate) async fn load_accessible_nodes_for_user_payload(
                 "tcping_last_sampled_at": if node.tcping_enabled { node.tcping_last_sampled_at } else { None },
                 "user_id": node.user_id,
                 "owner_email": node.owner_email,
+                "free_quota_exhausted": free_quota_exhausted.contains(&node.id),
             })
         })
         .collect())
@@ -228,12 +237,36 @@ pub(crate) async fn get_accessible_user_ids_for_node(
         if let Some(values) = cached_accessible_user_ids_for_node(state, node.id) {
             return Ok(filter_accessible_user_ids(values, candidate_user_ids, limit));
         }
-        let values = query_accessible_user_ids_for_node(state, node, None, None).await?;
+        let values = query_accessible_user_ids_for_node(state, node, None, None, true).await?;
         cache_accessible_user_ids_for_node(state, node.id, values.clone());
         return Ok(filter_accessible_user_ids(values, candidate_user_ids, limit));
     }
 
-    query_accessible_user_ids_for_node(state, node, limit, candidate_user_ids).await
+    query_accessible_user_ids_for_node(state, node, limit, candidate_user_ids, true).await
+}
+
+/// Users whose traffic the node may report: the accessible ones, plus those it no longer
+/// gets only because their free quota ran out. What they used before the node dropped
+/// them still has to be accounted for.
+pub(crate) async fn get_traffic_reportable_user_ids_for_node(
+    state: &AppState,
+    node: &ServerNodeRow,
+    candidate_user_ids: &[i64],
+) -> Result<Vec<i64>, sqlx::Error> {
+    let mut allowed = get_accessible_user_ids_for_node(state, node, None, Some(candidate_user_ids)).await?;
+    if crate::node_free_quota_support::free_quota_limits(node.access_control.as_ref().map(|json| &json.0)).is_none() {
+        return Ok(allowed);
+    }
+    let allowed_set = allowed.iter().copied().collect::<HashSet<_>>();
+    let dropped = candidate_user_ids
+        .iter()
+        .copied()
+        .filter(|user_id| !allowed_set.contains(user_id))
+        .collect::<Vec<_>>();
+    if !dropped.is_empty() {
+        allowed.extend(query_accessible_user_ids_for_node(state, node, None, Some(&dropped), false).await?);
+    }
+    Ok(allowed)
 }
 
 async fn query_accessible_user_ids_for_node(
@@ -241,6 +274,7 @@ async fn query_accessible_user_ids_for_node(
     node: &ServerNodeRow,
     limit: Option<i64>,
     candidate_user_ids: Option<&[i64]>,
+    enforce_free_quota: bool,
 ) -> Result<Vec<i64>, sqlx::Error> {
     let owner_can_publish_by_trust = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM v2_user WHERE id = ? AND is_super_admin = 1 AND banned = 0",
@@ -260,14 +294,31 @@ async fn query_accessible_user_ids_for_node(
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
 
+    // Free access (individual grant or trust level) ends once the month's free quota is used up.
+    let free_quota_left = crate::node_free_quota_support::free_quota_limits(
+        node.access_control.as_ref().map(|json| &json.0),
+    )
+    .filter(|_| enforce_free_quota && crate::node_free_quota_support::free_quota_schema_ready())
+    .map(|limits| {
+        crate::node_free_quota_support::free_quota_remaining_sql(
+            node.id,
+            crate::node_free_quota_support::free_quota_period(now),
+            &limits,
+            "fu",
+        )
+    })
+    .unwrap_or_else(|| "1 = 1".to_string());
+
     let mut candidate_sql = String::from("SELECT ? AS user_id");
     if owner_can_publish_by_trust {
-        candidate_sql.push_str(
+        candidate_sql.push_str(&format!(
             " UNION
-              SELECT user_id
-              FROM user_node_access
-              WHERE node_id = ?",
-        );
+              SELECT fu.id AS user_id
+              FROM user_node_access una
+              JOIN v2_user fu ON fu.id = una.user_id
+              WHERE una.node_id = ?
+                AND {free_quota_left}",
+        ));
     }
     candidate_sql.push_str(
         " UNION
@@ -289,12 +340,13 @@ async fn query_accessible_user_ids_for_node(
     );
 
     if min_trust_level.is_some() {
-        candidate_sql.push_str(
+        candidate_sql.push_str(&format!(
             " UNION
-              SELECT id AS user_id
-              FROM v2_user
-              WHERE trust_level >= ?",
-        );
+              SELECT fu.id AS user_id
+              FROM v2_user fu
+              WHERE fu.trust_level >= ?
+                AND {free_quota_left}",
+        ));
     }
 
     let mut sql = String::from(

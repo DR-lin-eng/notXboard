@@ -304,6 +304,7 @@ async fn execute_daily_log_cleanup(
         delete_tcping_alerts_before(state, now_ts - 60 * 60 * 24 * tcping_alerts_retention_days).await?;
     let audit_logs_deleted =
         delete_audit_logs_before(state, now_ts - 60 * 60 * 24 * audit_logs_retention_days).await?;
+    crate::node_free_quota_support::delete_stale_free_quota_usage(state, now_ts).await?;
 
     Ok(DailyLogCleanupStats {
         stat_user_deleted,

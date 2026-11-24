@@ -720,7 +720,7 @@ async fn process_node_traffic(
     }
 
     let candidate_user_ids = rows.iter().map(|row| row.user_id).collect::<Vec<_>>();
-    let allowed_user_ids = get_accessible_user_ids_for_node(state, node, None, Some(&candidate_user_ids))
+    let allowed_user_ids = crate::access_control_support::get_traffic_reportable_user_ids_for_node(state, node, &candidate_user_ids)
         .await
         .map_err(internal_error)?;
     let allowed_set = allowed_user_ids.into_iter().collect::<HashSet<_>>();
@@ -1530,8 +1530,17 @@ async fn execute_record_push_traffic(
         .iter()
         .map(|(user_id, _, _, _)| *user_id)
         .collect::<Vec<_>>();
+    // Decide paid coverage before applying this batch to either counter.
     let subscription_ids =
         load_primary_subscription_ids_for_node_users(&mut tx, node_id, now_ts, &user_ids).await?;
+    let traffic_totals = merged_rows
+        .iter()
+        .map(|(user_id, upload, download, _)| (*user_id, upload.saturating_add(*download)))
+        .collect::<Vec<_>>();
+    let free_quota_crossed = crate::node_free_quota_support::record_free_quota_usage(
+        &mut tx, node_id, now_ts, &traffic_totals, &subscription_ids,
+    ).await?;
+
     let mut subscription_usage_rows = merged_rows
         .iter()
         .filter_map(|(user_id, _upload, _download, billed)| {
@@ -1546,7 +1555,11 @@ async fn execute_record_push_traffic(
         batch_update_subscription_usage(&mut tx, &subscription_usage_rows).await?;
     }
 
-    tx.commit().await
+    tx.commit().await?;
+    if free_quota_crossed {
+        crate::access_control_support::clear_accessible_user_ids_cache(state, node_id);
+    }
+    Ok(())
 }
 
 async fn enqueue_alive_sessions(

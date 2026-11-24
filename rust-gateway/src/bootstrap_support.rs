@@ -272,6 +272,7 @@ async fn build_bootstrap_full_response(
     apply_full_schema_baseline(state)
         .await
         .map_err(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, &err))?;
+    crate::node_free_quota_support::init_node_free_quota_schema(state.clone()).await;
     ensure_full_migration_markers(state)
         .await
         .map_err(|err| json_error(StatusCode::INTERNAL_SERVER_ERROR, &err))?;

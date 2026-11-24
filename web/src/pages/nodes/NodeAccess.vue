@@ -86,7 +86,7 @@ async function save() {
         <div class="card">
           <div class="card-head"><h3>免费额度</h3><span class="sub">按用户等级，GB / 月</span></div>
           <div class="card-body">
-            <p class="muted small">为不同等级用户提供该节点的免费使用额度，超出后不再下发到该节点。</p>
+            <p class="muted small">为不同等级用户提供该节点的免费使用额度，按自然月统计上行 + 下行，超出后当月不再下发该节点；0 表示不限。有该节点有效套餐的用户不占免费额度。</p>
             <div class="form-grid mt-sm">
               <div v-for="level in TRUST_LEVEL_OPTIONS" :key="level" class="field">
                 <label :for="`na-q${level}`">等级 {{ level }}</label>
