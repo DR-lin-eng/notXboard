@@ -8,6 +8,8 @@ V2bX 已不再使用，节点后端统一为 [cedar2025/Xboard-Node](https://git
 - Machine 模式：在「Xboard-Node 机器」新增机器，绑定自己的节点，复制部署命令。一台机器运行一个 Xboard-Node 进程，同时承载所有绑定节点；增删绑定会通过 WebSocket `sync.nodes` 推送。
 - 安装脚本 `/xboard-node-install.sh` 固定上游 install.sh 的 commit 和 SHA-256，命令只携带 10 分钟一次性 ticket，长期 token 由脚本兑换。
 
+如果在原服务器上复用 V2bX 的监听端口，请安排迁移窗口。先核对旧服务承载的节点，再用 `systemctl stop V2bX.service` 释放端口，执行新的部署命令并确认节点可用。需要回退时，先停止 Xboard-Node，再启动旧服务。
+
 ## 接口
 
 | 接口 | 说明 |
