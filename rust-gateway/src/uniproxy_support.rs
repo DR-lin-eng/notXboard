@@ -719,7 +719,7 @@ async fn process_node_traffic(
     }
 
     let candidate_user_ids = rows.iter().map(|row| row.user_id).collect::<Vec<_>>();
-    let allowed_user_ids = get_accessible_user_ids_for_node(state, node, None, Some(&candidate_user_ids))
+    let allowed_user_ids = crate::access_control_support::get_traffic_reportable_user_ids_for_node(state, node, &candidate_user_ids)
         .await
         .map_err(internal_error)?;
     let allowed_set = allowed_user_ids.into_iter().collect::<HashSet<_>>();

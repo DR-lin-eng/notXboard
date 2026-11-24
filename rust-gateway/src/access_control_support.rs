@@ -234,12 +234,36 @@ pub(crate) async fn get_accessible_user_ids_for_node(
         if let Some(values) = cached_accessible_user_ids_for_node(state, node.id) {
             return Ok(filter_accessible_user_ids(values, candidate_user_ids, limit));
         }
-        let values = query_accessible_user_ids_for_node(state, node, None, None).await?;
+        let values = query_accessible_user_ids_for_node(state, node, None, None, true).await?;
         cache_accessible_user_ids_for_node(state, node.id, values.clone());
         return Ok(filter_accessible_user_ids(values, candidate_user_ids, limit));
     }
 
-    query_accessible_user_ids_for_node(state, node, limit, candidate_user_ids).await
+    query_accessible_user_ids_for_node(state, node, limit, candidate_user_ids, true).await
+}
+
+/// Users whose traffic the node may report: the accessible ones, plus those it no longer
+/// gets only because their free quota ran out. What they used before the node dropped
+/// them still has to be accounted for.
+pub(crate) async fn get_traffic_reportable_user_ids_for_node(
+    state: &AppState,
+    node: &ServerNodeRow,
+    candidate_user_ids: &[i64],
+) -> Result<Vec<i64>, sqlx::Error> {
+    let mut allowed = get_accessible_user_ids_for_node(state, node, None, Some(candidate_user_ids)).await?;
+    if crate::node_free_quota_support::free_quota_limits(node.access_control.as_ref().map(|json| &json.0)).is_none() {
+        return Ok(allowed);
+    }
+    let allowed_set = allowed.iter().copied().collect::<HashSet<_>>();
+    let dropped = candidate_user_ids
+        .iter()
+        .copied()
+        .filter(|user_id| !allowed_set.contains(user_id))
+        .collect::<Vec<_>>();
+    if !dropped.is_empty() {
+        allowed.extend(query_accessible_user_ids_for_node(state, node, None, Some(&dropped), false).await?);
+    }
+    Ok(allowed)
 }
 
 async fn query_accessible_user_ids_for_node(
@@ -247,6 +271,7 @@ async fn query_accessible_user_ids_for_node(
     node: &ServerNodeRow,
     limit: Option<i64>,
     candidate_user_ids: Option<&[i64]>,
+    enforce_free_quota: bool,
 ) -> Result<Vec<i64>, sqlx::Error> {
     let owner_can_publish_by_trust = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM v2_user WHERE id = ? AND is_super_admin = 1 AND banned = 0",
@@ -270,7 +295,7 @@ async fn query_accessible_user_ids_for_node(
     let free_quota_left = crate::node_free_quota_support::free_quota_limits(
         node.access_control.as_ref().map(|json| &json.0),
     )
-    .filter(|_| crate::node_free_quota_support::free_quota_schema_ready())
+    .filter(|_| enforce_free_quota && crate::node_free_quota_support::free_quota_schema_ready())
     .map(|limits| {
         crate::node_free_quota_support::free_quota_remaining_sql(
             node.id,
