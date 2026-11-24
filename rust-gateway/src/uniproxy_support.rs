@@ -3,8 +3,9 @@ use crate::db_retry_support::retry_db_write;
 use crate::uniproxy_user_support::build_uniproxy_user_response;
 use sqlx::QueryBuilder;
 
-const MAX_TRAFFIC_DELTA_KB: i64 = 100_000_000;
-const MAX_TRAFFIC_BATCH_KB: i64 = 1_000_000_000;
+// UniProxy and Xboard-Node send traffic in bytes.
+const MAX_TRAFFIC_DELTA_BYTES: i64 = 100_000_000 * 1024;
+const MAX_TRAFFIC_BATCH_BYTES: i64 = 1_000_000_000 * 1024;
 const MAX_ALIVE_IPS_PER_USER: usize = 64;
 
 #[derive(Clone)]
@@ -348,12 +349,12 @@ async fn flush_push_traffic_jobs(
             let entry = node_rows.entry(row.user_id).or_insert((0, 0));
             entry.0 = entry
                 .0
-                .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
-                .min(MAX_TRAFFIC_BATCH_KB);
+                .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+                .min(MAX_TRAFFIC_BATCH_BYTES);
             entry.1 = entry
                 .1
-                .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
-                .min(MAX_TRAFFIC_BATCH_KB);
+                .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+                .min(MAX_TRAFFIC_BATCH_BYTES);
         }
     }
 
@@ -362,7 +363,7 @@ async fn flush_push_traffic_jobs(
         let merged_rows = merged
             .into_iter()
             .map(|(user_id, (upload, download))| {
-                let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
+                let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_BYTES);
                 (user_id, upload, download, billed.max(0))
             })
             .collect::<Vec<AggregatedTrafficRow>>();
@@ -1367,11 +1368,11 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
             }
             let user_id = item.first()?.as_i64()?;
             let traffic = item.get(1)?.as_i64()?;
-            if user_id <= 0 || !(1..=MAX_TRAFFIC_DELTA_KB).contains(&traffic) {
+            if user_id <= 0 || !(1..=MAX_TRAFFIC_DELTA_BYTES).contains(&traffic) {
                 continue;
             }
             batch_total = batch_total.checked_add(traffic)?;
-            if batch_total > MAX_TRAFFIC_BATCH_KB {
+            if batch_total > MAX_TRAFFIC_BATCH_BYTES {
                 return None;
             }
             rows.push(TrafficRow {
@@ -1397,14 +1398,14 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
         if user_id <= 0
             || upload < 0
             || download < 0
-            || upload > MAX_TRAFFIC_DELTA_KB
-            || download > MAX_TRAFFIC_DELTA_KB
+            || upload > MAX_TRAFFIC_DELTA_BYTES
+            || download > MAX_TRAFFIC_DELTA_BYTES
             || total <= 0
         {
             continue;
         }
         batch_total = batch_total.checked_add(total)?;
-        if batch_total > MAX_TRAFFIC_BATCH_KB {
+        if batch_total > MAX_TRAFFIC_BATCH_BYTES {
             return None;
         }
         rows.push(TrafficRow {
@@ -1463,17 +1464,17 @@ fn merge_push_traffic_rows(rows: &[QueuedPushTrafficRow]) -> Vec<AggregatedTraff
         let entry = merged.entry(row.user_id).or_insert((0, 0));
         entry.0 = entry
             .0
-            .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
-            .min(MAX_TRAFFIC_BATCH_KB);
+            .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+            .min(MAX_TRAFFIC_BATCH_BYTES);
         entry.1 = entry
             .1
-            .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
-            .min(MAX_TRAFFIC_BATCH_KB);
+            .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+            .min(MAX_TRAFFIC_BATCH_BYTES);
     }
     let mut merged_rows = merged
         .into_iter()
         .map(|(user_id, (upload, download))| {
-            let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
+            let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_BYTES);
             (user_id, upload, download, billed.max(0))
         })
         .collect::<Vec<AggregatedTrafficRow>>();

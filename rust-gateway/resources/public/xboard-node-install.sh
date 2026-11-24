@@ -183,6 +183,9 @@ else
   SUBJECT_ARGS=(--node-id "$NODE_ID")
   SUBJECT_LABEL="node ${NODE_ID}"
 fi
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet V2bX.service; then
+  echo "[xboard-node-install] V2bX.service is active. If this is an in-place migration, stop it to release any ports Xboard-Node will reuse." >&2
+fi
 echo "[xboard-node-install] ${SCRIPT_VERSION}: installing Xboard-Node ${RELEASE_VERSION} (${KERNEL}) for ${SUBJECT_LABEL}"
 bash "$INSTALLER" install \
   --mode "$MODE" \
