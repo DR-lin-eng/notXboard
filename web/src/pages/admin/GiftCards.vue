@@ -62,7 +62,7 @@ async function saveTemplate() {
     return
   }
   const payload: Record<string, any> = {
-    name: form.name.trim(), type: Number(form.type) || 1, status: form.status ? 1 : 0, description: form.description,
+    name: form.name.trim(), type: Number(form.type) || 1, status: Boolean(form.status), description: form.description,
     theme_color: form.themeColor || '#4f46e5', rewards: form.rewards, conditions: form.conditions, limits: form.limits,
   }
   form.saving = true
