@@ -227,10 +227,16 @@ pub(crate) async fn batch_update_subscription_usage(
         .map_err(|err| sqlx::Error::Protocol(format!("serialize subscription usage delta failed: {err}")))?;
         // Carry partial KiB across reports. Use separate assignments in this transaction
         // because MySQL does not guarantee the order of assignments on a joined update.
-        for assignment in [
-            "ups.used_traffic_kb = ups.used_traffic_kb + ((ups.used_traffic_remainder_bytes + delta.billed) DIV 1024)",
-            "ups.used_traffic_remainder_bytes = MOD(ups.used_traffic_remainder_bytes + delta.billed, 1024)",
-        ] {
+        // Until the remainder column exists, bill whole KiB only instead of failing the batch.
+        let assignments: &[&str] = if crate::node_free_quota_support::free_quota_schema_ready() {
+            &[
+                "ups.used_traffic_kb = ups.used_traffic_kb + ((ups.used_traffic_remainder_bytes + delta.billed) DIV 1024)",
+                "ups.used_traffic_remainder_bytes = MOD(ups.used_traffic_remainder_bytes + delta.billed, 1024)",
+            ]
+        } else {
+            &["ups.used_traffic_kb = ups.used_traffic_kb + (delta.billed DIV 1024)"]
+        };
+        for assignment in assignments {
             let sql = format!(
                 "UPDATE user_plan_subscriptions ups
              JOIN JSON_TABLE(
