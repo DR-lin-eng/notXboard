@@ -50,9 +50,20 @@ async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::E
     Ok(true)
 }
 
-pub(crate) fn spawn_node_free_quota_schema_task(state: AppState) {
+/// Creates the usage table before the gateway serves requests, so quota checks are in force
+/// from the first request; keeps retrying in the background if the database is not ready yet.
+pub(crate) async fn init_node_free_quota_schema(state: AppState) {
+    match ensure_node_free_quota_schema(&state).await {
+        Ok(true) => {
+            SCHEMA_READY.store(true, Ordering::Relaxed);
+            return;
+        }
+        Ok(false) => {}
+        Err(err) => error!("node free quota schema ensure failed: {err}"),
+    }
     tokio::spawn(async move {
         loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
             match ensure_node_free_quota_schema(&state).await {
                 Ok(true) => {
                     SCHEMA_READY.store(true, Ordering::Relaxed);
@@ -61,7 +72,6 @@ pub(crate) fn spawn_node_free_quota_schema_task(state: AppState) {
                 Ok(false) => {}
                 Err(err) => error!("node free quota schema ensure failed: {err}"),
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
 }

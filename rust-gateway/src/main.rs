@@ -1113,7 +1113,7 @@ async fn main() {
     crate::legacy_traffic_support::spawn_legacy_submit_worker(state.clone(), legacy_submit_rx);
     crate::uniproxy_support::spawn_push_traffic_worker(state.clone(), push_traffic_rx);
     crate::xboard_node_machine_support::spawn_xboard_node_schema_task(state.clone());
-    crate::node_free_quota_support::spawn_node_free_quota_schema_task(state.clone());
+    crate::node_free_quota_support::init_node_free_quota_schema(state.clone()).await;
     let app = router_support::build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind listener");
     info!("notxboard-gateway listening on 0.0.0.0:{}", port);
