@@ -162,7 +162,7 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
              FROM (
                  SELECT
                      ups.user_id AS user_id,
-                     ups.id AS subscription_id,
+                     CAST(ups.id AS SIGNED) AS subscription_id,
                      ROW_NUMBER() OVER (
                          PARTITION BY ups.user_id
                          ORDER BY
