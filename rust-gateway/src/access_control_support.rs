@@ -113,6 +113,14 @@ pub(crate) async fn load_accessible_nodes_for_user_payload(
         subscription_credential_version: None,
     };
     let nodes = load_accessible_nodes_for_user_rows(state, &user_row).await?;
+    // Still listed (traffic, tickets, monitoring), but no longer delivered to the user.
+    let free_quota_exhausted = crate::node_free_quota_support::load_free_quota_blocked_node_ids(
+        state,
+        user.id,
+        user.trust_level,
+        Utc::now().timestamp(),
+    )
+    .await?;
     let push_interval = get_setting_int(state, "server_push_interval", 60).await.max(60);
     let status_cache = state.load_status_cache.read().clone();
     Ok(nodes
@@ -147,6 +155,7 @@ pub(crate) async fn load_accessible_nodes_for_user_payload(
                 "tcping_last_sampled_at": if node.tcping_enabled { node.tcping_last_sampled_at } else { None },
                 "user_id": node.user_id,
                 "owner_email": node.owner_email,
+                "free_quota_exhausted": free_quota_exhausted.contains(&node.id),
             })
         })
         .collect())
@@ -160,10 +169,7 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
     let trust_level = user.trust_level.unwrap_or(0);
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
-    let free_quota_left = crate::node_free_quota_support::free_quota_node_filter_sql(
-        &crate::node_free_quota_support::load_free_quota_exhausted_node_ids(state, user_id, trust_level, now).await?,
-    );
-    let sql = format!(
+    sqlx::query_as::<_, AccessibleNodeRow>(
         "SELECT DISTINCT sn.id, CAST(sn.user_id AS SIGNED) AS user_id, sn.name, sn.protocol, sn.location_name, sn.status,
                 sn.traffic_limit, sn.traffic_used, CAST(sn.traffic_multiplier AS CHAR) AS traffic_multiplier,
                 sn.tcping_enabled, sn.tcping_last_status, sn.tcping_last_latency_ms, sn.tcping_last_sampled_at,
@@ -179,7 +185,6 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
                WHERE ua.node_id = sn.id
                  AND ua.user_id = ?
                  AND owner.is_super_admin = 1
-                 AND {free_quota_left}
              )
              OR EXISTS (
                SELECT 1
@@ -203,7 +208,6 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
                owner.is_super_admin = 1
                AND JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(sn.access_control, '$.min_trust_level')) AS SIGNED) <= ?
-               AND {free_quota_left}
              )
            )
            AND NOT EXISTS (
@@ -211,8 +215,7 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
              WHERE ub.node_id = sn.id AND ub.user_id = ?
            )
          ORDER BY sn.id",
-    );
-    sqlx::query_as::<_, AccessibleNodeRow>(&sql)
+    )
     .bind(user_id)
     .bind(user_id)
     .bind(user_id)

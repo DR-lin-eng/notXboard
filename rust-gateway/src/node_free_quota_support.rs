@@ -215,6 +215,52 @@ pub(crate) async fn load_free_quota_exhausted_node_ids(
         .collect())
 }
 
+/// Exhausted nodes the user really lost: those not also paid for by a node-plan subscription.
+pub(crate) async fn load_free_quota_blocked_node_ids(
+    state: &AppState,
+    user_id: i64,
+    trust_level: i64,
+    now_ts: i64,
+) -> Result<HashSet<u64>, sqlx::Error> {
+    let mut blocked = load_free_quota_exhausted_node_ids(state, user_id, trust_level, now_ts)
+        .await?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if blocked.is_empty() {
+        return Ok(blocked);
+    }
+    let sql = format!(
+        "SELECT DISTINCT sn.id
+         FROM server_nodes sn
+         JOIN v2_plan plan ON plan.owner_user_id = sn.user_id AND plan.scope = 'node'
+         JOIN user_plan_subscriptions ups ON ups.plan_id = plan.id
+         WHERE JSON_CONTAINS(COALESCE(plan.node_ids, JSON_ARRAY()), CAST(sn.id AS JSON), '$')
+           AND ups.user_id = ?
+           AND ups.status = 1
+           AND (ups.expired_at IS NULL OR ups.expired_at > ?)
+           AND (
+             ups.traffic_allowance_kb >= ?
+             OR ups.traffic_allowance_kb > ups.used_traffic_kb
+           )
+           AND sn.id IN ({})",
+        blocked
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    let covered = sqlx::query_scalar::<_, u64>(&sql)
+        .bind(user_id)
+        .bind(now_ts)
+        .bind(UNLIMITED_TRAFFIC_ALLOWANCE_KB)
+        .fetch_all(&state.db)
+        .await?;
+    for node_id in covered {
+        blocked.remove(&node_id);
+    }
+    Ok(blocked)
+}
+
 /// SQL predicate on `sn.id` that excludes the given nodes; always true for an empty list.
 pub(crate) fn free_quota_node_filter_sql(exhausted_node_ids: &[u64]) -> String {
     if exhausted_node_ids.is_empty() {

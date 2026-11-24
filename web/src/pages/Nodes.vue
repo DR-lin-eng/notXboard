@@ -303,7 +303,7 @@ async function rotateAgent(agent: any) {
                   <td><div class="strong">{{ node.name || '-' }}</div><div class="muted small">#{{ node.id }} · {{ node.location_name || '未设置地区' }}</div></td>
                   <td class="muted">{{ node.owner_email || node.user_id || '-' }}</td>
                   <td><span class="badge">{{ protocolDisplayName(node.protocol, data.names) }}</span></td>
-                  <td><span class="badge" :class="nodeStatus(node).tone">{{ nodeStatus(node).label }}</span></td>
+                  <td><span v-if="node.free_quota_exhausted" class="badge warn" title="本月在该节点的免费额度已用完，下月 1 日恢复">本月额度已用完</span><span v-else class="badge" :class="nodeStatus(node).tone">{{ nodeStatus(node).label }}</span></td>
                   <td class="nowrap">×{{ Number(node.traffic_multiplier || 1).toFixed(2) }}</td>
                   <td><span class="badge" :class="tcpingStatus(node.tcping_status, Boolean(node.tcping_enabled)).tone">{{ tcpingStatus(node.tcping_status, Boolean(node.tcping_enabled)).label }}</span></td>
                   <td><div class="actions"><RouterLink class="btn sm" :to="`/nodes/${node.id}/monitor`">监控</RouterLink></div></td>
