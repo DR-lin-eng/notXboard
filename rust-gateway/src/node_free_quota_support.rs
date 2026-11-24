@@ -47,6 +47,29 @@ async fn ensure_node_free_quota_schema(state: &AppState) -> Result<bool, sqlx::E
     )
     .execute(&state.db)
     .await?;
+
+    let remainder_column_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE()
+           AND table_name = 'user_plan_subscriptions'
+           AND column_name = 'used_traffic_remainder_bytes'",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    if remainder_column_exists == 0 {
+        let result = sqlx::query(
+            "ALTER TABLE user_plan_subscriptions
+             ADD COLUMN used_traffic_remainder_bytes SMALLINT UNSIGNED NOT NULL DEFAULT 0",
+        )
+        .execute(&state.db)
+        .await;
+        if let Err(error) = result {
+            // A second gateway may have added the column since the schema check.
+            if error.as_database_error().and_then(|error| error.code()).as_deref() != Some("42S21") {
+                return Err(error);
+            }
+        }
+    }
     Ok(true)
 }
 
@@ -64,6 +87,9 @@ pub(crate) async fn init_node_free_quota_schema(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
+            if free_quota_schema_ready() {
+                break;
+            }
             match ensure_node_free_quota_schema(&state).await {
                 Ok(true) => {
                     SCHEMA_READY.store(true, Ordering::Relaxed);
@@ -282,6 +308,7 @@ pub(crate) async fn record_free_quota_usage(
     node_id: u64,
     now_ts: i64,
     rows: &[(i64, i64)],
+    paid_subscriptions: &HashMap<i64, i64>,
 ) -> Result<bool, sqlx::Error> {
     if rows.is_empty() || !free_quota_schema_ready() {
         return Ok(false);
@@ -296,11 +323,11 @@ pub(crate) async fn record_free_quota_usage(
         return Ok(false);
     };
     let limits = free_quota_limits(access_control.as_ref().map(|json| &json.0));
-    let user_ids = rows.iter().map(|(user_id, _)| *user_id).collect::<Vec<_>>();
-    let covered = load_subscription_covered_user_ids(tx, node_id, now_ts, &user_ids).await?;
     let free_rows = rows
         .iter()
-        .filter(|(user_id, bytes)| *user_id != owner_id && *bytes > 0 && !covered.contains(user_id))
+        .filter(|(user_id, bytes)| {
+            *user_id != owner_id && *bytes > 0 && !paid_subscriptions.contains_key(user_id)
+        })
         .collect::<Vec<_>>();
     let period = free_quota_period(now_ts);
     let mut crossed = false;
@@ -351,42 +378,6 @@ pub(crate) async fn record_free_quota_usage(
                 });
     }
     Ok(crossed)
-}
-
-/// Users whose access to the node is paid for: same subscription test as node authorization.
-async fn load_subscription_covered_user_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
-    node_id: u64,
-    now_ts: i64,
-    user_ids: &[i64],
-) -> Result<HashSet<i64>, sqlx::Error> {
-    let mut covered = HashSet::new();
-    for chunk in user_ids.chunks(BATCH_ROWS) {
-        let sql = format!(
-            "SELECT DISTINCT ups.user_id
-             FROM user_plan_subscriptions ups
-             JOIN v2_plan plan ON plan.id = ups.plan_id AND plan.scope = 'node'
-             JOIN server_nodes node ON node.id = ? AND node.user_id = plan.owner_user_id
-             WHERE JSON_CONTAINS(COALESCE(plan.node_ids, JSON_ARRAY()), CAST(node.id AS JSON), '$')
-               AND ups.status = 1
-               AND (ups.expired_at IS NULL OR ups.expired_at > ?)
-               AND (
-                 ups.traffic_allowance_kb >= ?
-                 OR ups.traffic_allowance_kb > ups.used_traffic_kb
-               )
-               AND ups.user_id IN ({})",
-            vec!["?"; chunk.len()].join(","),
-        );
-        let mut query = sqlx::query_scalar::<_, i64>(&sql)
-            .bind(node_id)
-            .bind(now_ts)
-            .bind(UNLIMITED_TRAFFIC_ALLOWANCE_KB);
-        for user_id in chunk {
-            query = query.bind(*user_id);
-        }
-        covered.extend(query.fetch_all(&mut **tx).await?);
-    }
-    Ok(covered)
 }
 
 /// Drops usage of months before the previous one.

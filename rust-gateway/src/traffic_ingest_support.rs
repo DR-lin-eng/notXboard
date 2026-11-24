@@ -166,9 +166,6 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
                      ROW_NUMBER() OVER (
                          PARTITION BY ups.user_id
                          ORDER BY
-                             CASE WHEN ups.traffic_allowance_kb >= ?
-                                    OR ups.traffic_allowance_kb > ups.used_traffic_kb
-                                  THEN 0 ELSE 1 END ASC,
                              CASE WHEN ups.expired_at IS NULL THEN 1 ELSE 0 END DESC,
                              ups.expired_at ASC,
                              ups.id ASC
@@ -183,15 +180,16 @@ pub(crate) async fn load_primary_subscription_ids_for_node_users(
                        )
                    AND ups.status = 1
                    AND (ups.expired_at IS NULL OR ups.expired_at > ?)
+                   AND (ups.traffic_allowance_kb >= ? OR ups.used_traffic_kb < ups.traffic_allowance_kb)
                    AND ups.user_id IN ({})
              ) ranked
              WHERE row_num = 1",
             placeholders,
         );
         let mut query = sqlx::query(&sql)
-            .bind(8_000_000_000_000_000_i64)
             .bind(node_id)
-            .bind(now_ts);
+            .bind(now_ts)
+            .bind(8_000_000_000_000_000_i64);
         for user_id in chunk {
             query = query.bind(*user_id);
         }
@@ -227,8 +225,14 @@ pub(crate) async fn batch_update_subscription_usage(
                 .collect::<Vec<_>>(),
         )
         .map_err(|err| sqlx::Error::Protocol(format!("serialize subscription usage delta failed: {err}")))?;
-        sqlx::query(
-            "UPDATE user_plan_subscriptions ups
+        // Carry partial KiB across reports. Use separate assignments in this transaction
+        // because MySQL does not guarantee the order of assignments on a joined update.
+        for assignment in [
+            "ups.used_traffic_kb = ups.used_traffic_kb + ((ups.used_traffic_remainder_bytes + delta.billed) DIV 1024)",
+            "ups.used_traffic_remainder_bytes = MOD(ups.used_traffic_remainder_bytes + delta.billed, 1024)",
+        ] {
+            let sql = format!(
+                "UPDATE user_plan_subscriptions ups
              JOIN JSON_TABLE(
                 ?,
                 '$[*]' COLUMNS(
@@ -236,11 +240,10 @@ pub(crate) async fn batch_update_subscription_usage(
                     billed BIGINT PATH '$.billed'
                 )
              ) delta ON ups.id = delta.subscription_id
-             SET ups.used_traffic_kb = ups.used_traffic_kb + delta.billed",
-        )
-        .bind(payload)
-        .execute(&mut **tx)
-        .await?;
+             SET {assignment}"
+            );
+            sqlx::query(&sql).bind(&payload).execute(&mut **tx).await?;
+        }
     }
 
     Ok(())

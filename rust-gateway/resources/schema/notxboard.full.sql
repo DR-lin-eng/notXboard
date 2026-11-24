@@ -538,6 +538,7 @@ CREATE TABLE `user_plan_subscriptions` (
   `period` varchar(32) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '购买周期',
   `traffic_allowance_kb` bigint NOT NULL DEFAULT '0' COMMENT '该实例总流量额度(KB)',
   `used_traffic_kb` bigint NOT NULL DEFAULT '0' COMMENT '已使用流量(KB)',
+  `used_traffic_remainder_bytes` smallint unsigned NOT NULL DEFAULT '0' COMMENT '不足 1 KiB 的已使用字节数',
   `started_at` int NOT NULL COMMENT '生效时间',
   `expired_at` int DEFAULT NULL COMMENT '到期时间，NULL 表示长期',
   `status` tinyint NOT NULL DEFAULT '1' COMMENT '1=active,2=expired,3=revoked',
