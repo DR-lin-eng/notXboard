@@ -94,7 +94,7 @@ docker network create "${NETWORK_NAME}" >/dev/null
 
 if [ "${BUILD_IMAGE}" = "1" ]; then
   echo "[2/12] build Rust gateway image: ${GATEWAY_IMAGE}"
-  docker build -t "${GATEWAY_IMAGE}" rust-gateway
+  docker build -t "${GATEWAY_IMAGE}" .
 else
   echo "[2/12] reuse Rust gateway image: ${GATEWAY_IMAGE}"
 fi
@@ -210,7 +210,7 @@ echo "${HOOKS_RESPONSE}"
 printf '%s' "${HOOKS_RESPONSE}" | json_array_contains "data" "order.create.before"
 printf '%s' "${HOOKS_RESPONSE}" | json_array_contains "data" "user.telegram.bind.after"
 
-echo "[10/12] verify default minimal private entry and Rust built-in theme app"
+echo "[10/12] verify default minimal private entry, Vue assets, and the legacy portal"
 PUBLIC_PAGE="$(curl -fsS "http://127.0.0.1:${HOST_PORT}/")"
 for expected in \
   '<meta name="robots" content="noindex,nofollow,noarchive,nosnippet,noimageindex">' \
@@ -248,12 +248,14 @@ if grep -Fq '{{ $title }}' <<<"${PUBLIC_PAGE}"; then
   exit 1
 fi
 APP_PAGE="$(curl -fsS "http://127.0.0.1:${HOST_PORT}/app")"
-printf '%s' "${APP_PAGE}" | grep -q 'Maintainable'
-printf '%s' "${APP_PAGE}" | grep -q '/theme/Maintainable/app.js'
-if printf '%s' "${APP_PAGE}" | grep -q '{{ \$version'; then
-  echo "unrendered version placeholder found in /app page" >&2
+APP_SCRIPT="$(sed -n 's/.*src="\(\/app\/assets\/[^"]*\.js\)".*/\1/p' <<<"${APP_PAGE}")"
+if [ -z "${APP_SCRIPT}" ]; then
+  echo "Vue bundle missing from /app" >&2
   exit 1
 fi
+curl -fsS "http://127.0.0.1:${HOST_PORT}${APP_SCRIPT}" >/dev/null
+LEGACY_PAGE="$(curl -fsS "http://127.0.0.1:${HOST_PORT}/app/legacy")"
+grep -Fq '/theme/Maintainable/app.js' <<<"${LEGACY_PAGE}"
 
 echo "[11/12] trigger Rust-native manual database backup"
 BACKUP_RESPONSE="$(curl -fsS -X POST "http://127.0.0.1:${HOST_PORT}/api/v2/${SECURE_PATH}/system/runDatabaseBackup" \
