@@ -382,9 +382,16 @@ pub(crate) async fn user_machines_index(
         .fetch_all(&state.db)
         .await
         .map_err(internal_error)?;
+        // A machine reports every `server_push_interval`; three missed reports mean offline.
+        let online_window = get_setting_int(&state, "server_push_interval", 60).await.max(60) * 3;
+        let now = Utc::now().timestamp();
         let data = rows
             .iter()
             .map(|row| {
+                let last_seen_at = row.try_get::<Option<u32>, _>("last_seen_at").ok().flatten();
+                let is_online = last_seen_at
+                    .map(|seen| now - i64::from(seen) <= online_window)
+                    .unwrap_or(false);
                 let node_ids = row
                     .try_get::<Option<String>, _>("node_ids")
                     .ok()
@@ -398,7 +405,8 @@ pub(crate) async fn user_machines_index(
                     "name": row.try_get::<String, _>("name").unwrap_or_default(),
                     "notes": row.try_get::<Option<String>, _>("notes").ok().flatten(),
                     "is_active": row.try_get::<i8, _>("is_active").unwrap_or(0) == 1,
-                    "last_seen_at": row.try_get::<Option<u32>, _>("last_seen_at").ok().flatten(),
+                    "last_seen_at": last_seen_at,
+                    "is_online": is_online,
                     "load_status": row.try_get::<Option<SqlxJson<Value>>, _>("load_status").ok().flatten().map(|v| v.0),
                     "node_ids": node_ids,
                     "token_configured": true,
