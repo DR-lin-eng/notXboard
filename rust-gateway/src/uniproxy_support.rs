@@ -1529,6 +1529,14 @@ async fn execute_record_push_traffic(
         .iter()
         .map(|(user_id, _, _, _)| *user_id)
         .collect::<Vec<_>>();
+    // Before subscription usage moves: who is covered is decided on the state this batch was served under.
+    let traffic_totals = merged_rows
+        .iter()
+        .map(|(user_id, upload, download, _)| (*user_id, upload.saturating_add(*download)))
+        .collect::<Vec<_>>();
+    let free_quota_crossed =
+        crate::node_free_quota_support::record_free_quota_usage(&mut tx, node_id, now_ts, &traffic_totals).await?;
+
     let subscription_ids =
         load_primary_subscription_ids_for_node_users(&mut tx, node_id, now_ts, &user_ids).await?;
     let mut subscription_usage_rows = merged_rows
@@ -1545,7 +1553,11 @@ async fn execute_record_push_traffic(
         batch_update_subscription_usage(&mut tx, &subscription_usage_rows).await?;
     }
 
-    tx.commit().await
+    tx.commit().await?;
+    if free_quota_crossed {
+        crate::access_control_support::clear_accessible_user_ids_cache(state, node_id);
+    }
+    Ok(())
 }
 
 async fn enqueue_alive_sessions(

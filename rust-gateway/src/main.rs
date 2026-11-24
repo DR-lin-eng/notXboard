@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 mod limits_support;
 mod subscribe_protocols_v2;
+mod node_free_quota_support;
 mod xboard_node_machine_support;
 mod xboard_node_ws_support;
 mod plan_capacity_support;
@@ -1112,6 +1113,7 @@ async fn main() {
     crate::legacy_traffic_support::spawn_legacy_submit_worker(state.clone(), legacy_submit_rx);
     crate::uniproxy_support::spawn_push_traffic_worker(state.clone(), push_traffic_rx);
     crate::xboard_node_machine_support::spawn_xboard_node_schema_task(state.clone());
+    crate::node_free_quota_support::spawn_node_free_quota_schema_task(state.clone());
     let app = router_support::build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind listener");
     info!("notxboard-gateway listening on 0.0.0.0:{}", port);
@@ -1247,8 +1249,11 @@ async fn load_available_server_nodes_for_user(
 ) -> Result<Vec<ServerNodeRow>, sqlx::Error> {
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
+    let free_quota_left = crate::node_free_quota_support::free_quota_node_filter_sql(
+        &crate::node_free_quota_support::load_free_quota_exhausted_node_ids(state, user_id, trust_level, now).await?,
+    );
 
-    let rows = sqlx::query_as::<_, ServerNodeRow>(
+    let sql = format!(
         "SELECT DISTINCT sn.id, sn.user_id, sn.name, sn.host, sn.port, sn.service_port, sn.protocol, sn.settings, sn.access_control, sn.device_limit, sn.connection_limit, sn.speed_limit_down, sn.created_at
          FROM server_nodes sn
          JOIN v2_user owner ON owner.id = sn.user_id
@@ -1262,6 +1267,7 @@ async fn load_available_server_nodes_for_user(
                  AND ua.user_id = ?
                  AND owner.is_super_admin = 1
                  AND owner.banned = 0
+                 AND {free_quota_left}
              )
              OR EXISTS (
                SELECT 1
@@ -1286,6 +1292,7 @@ async fn load_available_server_nodes_for_user(
                AND owner.banned = 0
                AND JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(sn.access_control, '$.min_trust_level')) AS SIGNED) <= ?
+               AND {free_quota_left}
              )
            )
            AND NOT EXISTS (
@@ -1293,7 +1300,8 @@ async fn load_available_server_nodes_for_user(
              WHERE ub.node_id = sn.id AND ub.user_id = ?
            )
          ORDER BY sn.id"
-    )
+    );
+    let rows = sqlx::query_as::<_, ServerNodeRow>(&sql)
     .bind(user_id)
     .bind(user_id)
     .bind(user_id)

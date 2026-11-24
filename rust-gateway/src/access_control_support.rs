@@ -160,7 +160,10 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
     let trust_level = user.trust_level.unwrap_or(0);
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
-    sqlx::query_as::<_, AccessibleNodeRow>(
+    let free_quota_left = crate::node_free_quota_support::free_quota_node_filter_sql(
+        &crate::node_free_quota_support::load_free_quota_exhausted_node_ids(state, user_id, trust_level, now).await?,
+    );
+    let sql = format!(
         "SELECT DISTINCT sn.id, CAST(sn.user_id AS SIGNED) AS user_id, sn.name, sn.protocol, sn.location_name, sn.status,
                 sn.traffic_limit, sn.traffic_used, CAST(sn.traffic_multiplier AS CHAR) AS traffic_multiplier,
                 sn.tcping_enabled, sn.tcping_last_status, sn.tcping_last_latency_ms, sn.tcping_last_sampled_at,
@@ -176,6 +179,7 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
                WHERE ua.node_id = sn.id
                  AND ua.user_id = ?
                  AND owner.is_super_admin = 1
+                 AND {free_quota_left}
              )
              OR EXISTS (
                SELECT 1
@@ -199,6 +203,7 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
                owner.is_super_admin = 1
                AND JSON_EXTRACT(sn.access_control, '$.min_trust_level') IS NOT NULL
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(sn.access_control, '$.min_trust_level')) AS SIGNED) <= ?
+               AND {free_quota_left}
              )
            )
            AND NOT EXISTS (
@@ -206,7 +211,8 @@ pub(crate) async fn load_accessible_nodes_for_user_rows(
              WHERE ub.node_id = sn.id AND ub.user_id = ?
            )
          ORDER BY sn.id",
-    )
+    );
+    sqlx::query_as::<_, AccessibleNodeRow>(&sql)
     .bind(user_id)
     .bind(user_id)
     .bind(user_id)
@@ -260,14 +266,31 @@ async fn query_accessible_user_ids_for_node(
     let now = Utc::now().timestamp();
     let unlimited_allowance = 8_000_000_000_000_000i64;
 
+    // Free access (individual grant or trust level) ends once the month's free quota is used up.
+    let free_quota_left = crate::node_free_quota_support::free_quota_limits(
+        node.access_control.as_ref().map(|json| &json.0),
+    )
+    .filter(|_| crate::node_free_quota_support::free_quota_schema_ready())
+    .map(|limits| {
+        crate::node_free_quota_support::free_quota_remaining_sql(
+            node.id,
+            crate::node_free_quota_support::free_quota_period(now),
+            &limits,
+            "fu",
+        )
+    })
+    .unwrap_or_else(|| "1 = 1".to_string());
+
     let mut candidate_sql = String::from("SELECT ? AS user_id");
     if owner_can_publish_by_trust {
-        candidate_sql.push_str(
+        candidate_sql.push_str(&format!(
             " UNION
-              SELECT user_id
-              FROM user_node_access
-              WHERE node_id = ?",
-        );
+              SELECT fu.id AS user_id
+              FROM user_node_access una
+              JOIN v2_user fu ON fu.id = una.user_id
+              WHERE una.node_id = ?
+                AND {free_quota_left}",
+        ));
     }
     candidate_sql.push_str(
         " UNION
@@ -289,12 +312,13 @@ async fn query_accessible_user_ids_for_node(
     );
 
     if min_trust_level.is_some() {
-        candidate_sql.push_str(
+        candidate_sql.push_str(&format!(
             " UNION
-              SELECT id AS user_id
-              FROM v2_user
-              WHERE trust_level >= ?",
-        );
+              SELECT fu.id AS user_id
+              FROM v2_user fu
+              WHERE fu.trust_level >= ?
+                AND {free_quota_left}",
+        ));
     }
 
     let mut sql = String::from(

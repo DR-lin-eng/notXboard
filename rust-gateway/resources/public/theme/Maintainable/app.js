@@ -5257,7 +5257,7 @@ async function renderNodeAccess(nodeId, errorText = '') {
 
       <div class="card" style="margin-top: 12px;">
         <h3>免费额度（按用户等级，GB/月）</h3>
-        <div class="muted">为不同等级用户提供该节点的免费使用额度，超出后不再下发到该节点。</div>
+        <div class="muted">为不同等级用户提供该节点的免费使用额度，按自然月统计上行 + 下行，超出后当月不再下发该节点；0 表示不限。有该节点有效套餐的用户不占免费额度。</div>
         <div class="grid cols-2" style="margin-top: 10px;">
           <div class="field"><label>TL0</label><input id="fq0" type="number" min="0" step="0.01" value="${q(0)}"></div>
           <div class="field"><label>TL1</label><input id="fq1" type="number" min="0" step="0.01" value="${q(1)}"></div>
