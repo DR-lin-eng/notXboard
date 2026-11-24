@@ -394,6 +394,8 @@ async fn load_config_mappings(state: &AppState) -> Map<String, Value> {
         "server_token": config_optional_value(state, "server_token").await,
         "server_pull_interval": config_i64(state, "server_pull_interval", 60).await,
         "server_push_interval": config_i64(state, "server_push_interval", 60).await,
+        "server_ws_enable": config_bool(state, "server_ws_enable", true).await,
+        "server_ws_url": config_value_string(state, "server_ws_url", "").await,
         "device_limit_mode": config_i64(state, "device_limit_mode", 0).await,
     }));
     map.insert("email".to_string(), json!({
@@ -603,6 +605,8 @@ fn allowed_config_keys() -> HashSet<&'static str> {
         "server_token",
         "server_pull_interval",
         "server_push_interval",
+        "server_ws_enable",
+        "server_ws_url",
         "device_limit_mode",
         "email_template",
         "email_host",

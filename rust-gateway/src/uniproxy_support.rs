@@ -3,8 +3,9 @@ use crate::db_retry_support::retry_db_write;
 use crate::uniproxy_user_support::build_uniproxy_user_response;
 use sqlx::QueryBuilder;
 
-const MAX_TRAFFIC_DELTA_KB: i64 = 100_000_000;
-const MAX_TRAFFIC_BATCH_KB: i64 = 1_000_000_000;
+// UniProxy and Xboard-Node send traffic in bytes.
+const MAX_TRAFFIC_DELTA_BYTES: i64 = 100_000_000 * 1024;
+const MAX_TRAFFIC_BATCH_BYTES: i64 = 1_000_000_000 * 1024;
 const MAX_ALIVE_IPS_PER_USER: usize = 64;
 
 #[derive(Clone)]
@@ -30,6 +31,39 @@ pub(crate) struct QueuedAliveSessionJob {
 pub(crate) struct QueuedAliveSessionUser {
     pub(crate) user_id: i64,
     pub(crate) ips: Vec<String>,
+}
+
+pub(crate) async fn load_uniproxy_device_ips(
+    state: &AppState,
+    node: &ServerNodeRow,
+) -> Result<Map<String, Value>, sqlx::Error> {
+    let accessible_user_ids = get_accessible_user_ids_for_node(state, node, Some(100_000), None).await?;
+    let mut result = Map::new();
+    if accessible_user_ids.is_empty() {
+        return Ok(result);
+    }
+    let mut query = QueryBuilder::<sqlx::MySql>::new(
+        "SELECT DISTINCT user_id, ip_address FROM user_online_sessions
+         WHERE last_activity > (NOW() - INTERVAL 5 MINUTE) AND user_id IN (",
+    );
+    {
+        let mut separated = query.separated(", ");
+        for user_id in &accessible_user_ids {
+            separated.push_bind(user_id);
+        }
+    }
+    query.push(") ORDER BY user_id, ip_address");
+    for row in query.build().fetch_all(&state.db).await? {
+        let user_id: i32 = row.get("user_id");
+        let ip: String = row.get("ip_address");
+        if let Value::Array(list) = result
+            .entry(user_id.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            list.push(Value::from(ip));
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) async fn load_uniproxy_alive_counts(
@@ -315,12 +349,12 @@ async fn flush_push_traffic_jobs(
             let entry = node_rows.entry(row.user_id).or_insert((0, 0));
             entry.0 = entry
                 .0
-                .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
-                .min(MAX_TRAFFIC_BATCH_KB);
+                .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+                .min(MAX_TRAFFIC_BATCH_BYTES);
             entry.1 = entry
                 .1
-                .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
-                .min(MAX_TRAFFIC_BATCH_KB);
+                .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+                .min(MAX_TRAFFIC_BATCH_BYTES);
         }
     }
 
@@ -329,7 +363,7 @@ async fn flush_push_traffic_jobs(
         let merged_rows = merged
             .into_iter()
             .map(|(user_id, (upload, download))| {
-                let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
+                let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_BYTES);
                 (user_id, upload, download, billed.max(0))
             })
             .collect::<Vec<AggregatedTrafficRow>>();
@@ -478,6 +512,110 @@ pub(crate) async fn uniproxy_audit(
     }
 }
 
+pub(crate) async fn server_handshake(
+    State(state): State<Arc<AppState>>,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Response<Body> {
+    match build_server_handshake_response(&state, method, headers, uri, body).await {
+        Ok(response) => response,
+        Err(response) => response,
+    }
+}
+
+pub(crate) async fn server_report(
+    State(state): State<Arc<AppState>>,
+    uri: Uri,
+    body: Body,
+) -> Response<Body> {
+    match build_server_report_response(&state, uri, body).await {
+        Ok(response) => response,
+        Err(response) => response,
+    }
+}
+
+async fn build_server_handshake_response(
+    state: &AppState,
+    method: Method,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Result<Response<Body>, Response<Body>> {
+    let mut payload = if method == Method::POST {
+        parse_json_body(body).await.unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    let credentials = node_credentials(&uri, &payload);
+    if !credentials.machine_id.trim().is_empty() && credentials.node_id.trim().is_empty() {
+        crate::xboard_node_machine_support::authenticate_machine(
+            state,
+            &credentials.machine_id,
+            &credentials.token,
+        )
+        .await?;
+    } else {
+        authenticate_node_request(state, &uri, &mut payload).await?;
+    }
+    let push_interval = get_setting_int(state, "server_push_interval", 60).await;
+    let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
+    let websocket = crate::xboard_node_ws_support::handshake_websocket_settings(state, &headers).await;
+    Ok(json_value_response(json!({
+        "websocket": websocket,
+        "settings": {
+            "push_interval": push_interval,
+            "pull_interval": pull_interval,
+        },
+    })))
+}
+
+async fn build_server_report_response(
+    state: &AppState,
+    uri: Uri,
+    body: Body,
+) -> Result<Response<Body>, Response<Body>> {
+    let mut payload = parse_json_body(body).await?;
+    let node = authenticate_node_request(state, &uri, &mut payload).await?;
+    if let Some(traffic) = payload.get("traffic").filter(|value| value.is_object()) {
+        process_node_traffic(state, &node, traffic).await?;
+    }
+    if let Some(alive) = payload.get("alive").filter(|value| value.is_object()) {
+        process_node_alive(state, &node, alive).await?;
+    }
+    if let Some(status) = payload.get("status").filter(|value| value.is_object()) {
+        process_node_status(state, &node, status)?;
+    }
+    if let Some(online) = payload.get("online").filter(|value| value.is_object()) {
+        process_node_online(state, &node, online);
+    }
+    if let Some(metrics) = payload.get("metrics").filter(|value| value.is_object()) {
+        process_node_metrics(state, &node, metrics);
+    }
+    Ok(json_value_response(json!({ "data": true })))
+}
+
+pub(crate) async fn build_node_config_payload(
+    state: &AppState,
+    node: &ServerNodeRow,
+) -> Result<Value, Response<Body>> {
+    let push_interval = get_setting_int(state, "server_push_interval", 60).await;
+    let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
+    let mut payload = build_server_node_panel_config(state, node)?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("node_id".to_string(), json!(node.id));
+        object.insert(
+            "base_config".to_string(),
+            json!({
+                "push_interval": push_interval,
+                "pull_interval": pull_interval,
+            }),
+        );
+    }
+    Ok(payload)
+}
+
 pub(crate) fn build_uniproxy_read_cache_key(kind: &str, uri: &Uri) -> String {
     let params = parse_query(uri);
     let token = params.get("token").map(|value| value.trim()).unwrap_or_default();
@@ -524,19 +662,7 @@ async fn build_uniproxy_config_response(
         return Ok(response);
     }
 
-    let push_interval = get_setting_int(state, "server_push_interval", 60).await;
-    let pull_interval = get_setting_int(state, "server_pull_interval", 60).await;
-
-    let mut payload = build_server_node_panel_config(state, &node)?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert(
-            "base_config".to_string(),
-            json!({
-                "push_interval": push_interval,
-                "pull_interval": pull_interval,
-            }),
-        );
-    }
+    let payload = build_node_config_payload(state, &node).await?;
 
     Ok(json_cached_response(
         state,
@@ -573,19 +699,28 @@ async fn build_uniproxy_push_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let node = authenticate_node(state, &uri).await?;
-    let payload = parse_json_body(body).await?;
-    let rows = normalize_push_payload(&payload)
+    let mut payload = parse_json_body(body).await?;
+    let node = authenticate_node_request(state, &uri, &mut payload).await?;
+    process_node_traffic(state, &node, &payload).await?;
+    Ok(json_value_response(json!({ "data": true })))
+}
+
+async fn process_node_traffic(
+    state: &AppState,
+    node: &ServerNodeRow,
+    payload: &Value,
+) -> Result<(), Response<Body>> {
+    let rows = normalize_push_payload(payload)
         .ok_or_else(|| json_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid data format"))?;
     if rows.len() > 20_000 {
         return Err(json_error(StatusCode::PAYLOAD_TOO_LARGE, "Too many traffic rows"));
     }
     if rows.is_empty() {
-        return Ok(json_value_response(json!({ "data": true })));
+        return Ok(());
     }
 
     let candidate_user_ids = rows.iter().map(|row| row.user_id).collect::<Vec<_>>();
-    let allowed_user_ids = get_accessible_user_ids_for_node(state, &node, None, Some(&candidate_user_ids))
+    let allowed_user_ids = get_accessible_user_ids_for_node(state, node, None, Some(&candidate_user_ids))
         .await
         .map_err(internal_error)?;
     let allowed_set = allowed_user_ids.into_iter().collect::<HashSet<_>>();
@@ -595,7 +730,7 @@ async fn build_uniproxy_push_response(
         .collect::<Vec<_>>();
 
     if filtered_rows.is_empty() {
-        return Ok(json_value_response(json!({ "data": true })));
+        return Ok(());
     }
     let mut replay_rows = filtered_rows
         .iter()
@@ -613,7 +748,7 @@ async fn build_uniproxy_push_response(
         replay_fingerprint,
     );
     match redis_set_nx_ex_raw(state, &replay_key, 10, "1").await {
-        Ok(false) => return Ok(json_value_response(json!({ "data": true }))),
+        Ok(false) => return Ok(()),
         Err(err) => warn!(node_id = node.id, error = %err, "traffic replay guard unavailable"),
         Ok(true) => {}
     }
@@ -621,7 +756,7 @@ async fn build_uniproxy_push_response(
     enqueue_push_traffic(state, node.id, &filtered_rows)
         .await
         .map_err(internal_error)?;
-    Ok(json_value_response(json!({ "data": true })))
+    Ok(())
 }
 
 async fn build_uniproxy_alive_response(
@@ -629,8 +764,17 @@ async fn build_uniproxy_alive_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let node = authenticate_node(state, &uri).await?;
-    let payload = parse_json_body(body).await?;
+    let mut payload = parse_json_body(body).await?;
+    let node = authenticate_node_request(state, &uri, &mut payload).await?;
+    process_node_alive(state, &node, &payload).await?;
+    Ok(json_value_response(json!({ "data": true })))
+}
+
+pub(crate) async fn process_node_alive(
+    state: &AppState,
+    node: &ServerNodeRow,
+    payload: &Value,
+) -> Result<(), Response<Body>> {
     let map = payload
         .as_object()
         .cloned()
@@ -644,7 +788,7 @@ async fn build_uniproxy_alive_response(
         .filter_map(|key| key.parse::<i64>().ok())
         .filter(|id| *id > 0)
         .collect::<Vec<_>>();
-    let allowed_user_ids = get_accessible_user_ids_for_node(state, &node, None, Some(&candidate_user_ids))
+    let allowed_user_ids = get_accessible_user_ids_for_node(state, node, None, Some(&candidate_user_ids))
         .await
         .map_err(internal_error)?;
     let allowed_set = allowed_user_ids.into_iter().collect::<HashSet<_>>();
@@ -652,7 +796,7 @@ async fn build_uniproxy_alive_response(
     enqueue_alive_sessions(state, node.id, &map, &allowed_set)
         .await
         .map_err(internal_error)?;
-    Ok(json_value_response(json!({ "data": true })))
+    Ok(())
 }
 
 async fn build_uniproxy_status_response(
@@ -660,8 +804,21 @@ async fn build_uniproxy_status_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let node = authenticate_node(state, &uri).await?;
-    let payload = parse_json_body(body).await?;
+    let mut payload = parse_json_body(body).await?;
+    let node = authenticate_node_request(state, &uri, &mut payload).await?;
+    process_node_status(state, &node, &payload)?;
+    Ok(json_value_response(json!({
+        "data": true,
+        "code": 0,
+        "message": "success"
+    })))
+}
+
+pub(crate) fn process_node_status(
+    state: &AppState,
+    node: &ServerNodeRow,
+    payload: &Value,
+) -> Result<(), Response<Body>> {
     let object = payload
         .as_object()
         .cloned()
@@ -684,22 +841,78 @@ async fn build_uniproxy_status_response(
     let disk_used = nested_i64(&object, &["disk", "used"])
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Invalid disk.used"))?;
 
-    state.load_status_cache.write().insert(
+    let mut cache = state.load_status_cache.write();
+    let previous = cache.get(&node.id);
+    let mut entry = json!({
+        "cpu": cpu,
+        "mem": { "total": mem_total, "used": mem_used },
+        "swap": { "total": swap_total, "used": swap_used },
+        "disk": { "total": disk_total, "used": disk_used },
+        "updated_at": Utc::now().timestamp(),
+    });
+    for key in ["metrics", "online"] {
+        if let Some(value) = previous.and_then(|previous| previous.get(key)).cloned() {
+            entry[key] = value;
+        }
+    }
+    cache.insert(node.id, entry);
+
+    Ok(())
+}
+
+fn merge_node_status_field(state: &AppState, node_id: u64, key: &str, value: Value) {
+    let mut cache = state.load_status_cache.write();
+    let entry = cache.entry(node_id).or_insert_with(|| json!({}));
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(key.to_string(), value);
+        object.insert("updated_at".to_string(), json!(Utc::now().timestamp()));
+    }
+}
+
+pub(crate) fn process_node_metrics(state: &AppState, node: &ServerNodeRow, metrics: &Value) {
+    let Some(object) = metrics.as_object() else {
+        return;
+    };
+    let int = |key: &str| object.get(key).and_then(Value::as_i64).unwrap_or(0);
+    let raw = |key: &str| object.get(key).cloned().unwrap_or_else(|| json!({}));
+    merge_node_status_field(
+        state,
         node.id,
+        "metrics",
         json!({
-            "cpu": cpu,
-            "mem": { "total": mem_total, "used": mem_used },
-            "swap": { "total": swap_total, "used": swap_used },
-            "disk": { "total": disk_total, "used": disk_used },
+            "uptime": int("uptime"),
+            "goroutines": int("goroutines"),
+            "active_connections": int("active_connections"),
+            "total_connections": int("total_connections"),
+            "total_users": int("total_users"),
+            "active_users": int("active_users"),
+            "inbound_speed": int("inbound_speed"),
+            "outbound_speed": int("outbound_speed"),
+            "cpu_per_core": object.get("cpu_per_core").cloned().unwrap_or_else(|| json!([])),
+            "load": raw("load"),
+            "speed_limiter": raw("speed_limiter"),
+            "gc": raw("gc"),
+            "api": raw("api"),
+            "ws": raw("ws"),
+            "limits": raw("limits"),
+            "kernel_status": object.get("kernel_status").and_then(Value::as_bool).unwrap_or(false),
             "updated_at": Utc::now().timestamp(),
         }),
     );
+}
 
-    Ok(json_value_response(json!({
-        "data": true,
-        "code": 0,
-        "message": "success"
-    })))
+pub(crate) fn process_node_online(state: &AppState, node: &ServerNodeRow, online: &Value) {
+    let Some(object) = online.as_object() else {
+        return;
+    };
+    let users = object.len();
+    let connections = object.values().filter_map(Value::as_i64).filter(|v| *v > 0).sum::<i64>();
+    merge_node_status_field(
+        state,
+        node.id,
+        "online",
+        json!({ "users": users, "connections": connections }),
+    );
 }
 
 async fn build_uniproxy_audit_response(
@@ -707,8 +920,8 @@ async fn build_uniproxy_audit_response(
     uri: Uri,
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
-    let node = authenticate_node(state, &uri).await?;
-    let payload = parse_json_body(body).await?;
+    let mut payload = parse_json_body(body).await?;
+    let node = authenticate_node_request(state, &uri, &mut payload).await?;
     let object = payload
         .as_object()
         .cloned()
@@ -779,13 +992,75 @@ async fn build_uniproxy_audit_response(
     })))
 }
 
+const NODE_AUTH_FIELDS: [&str; 4] = ["token", "node_id", "node_type", "machine_id"];
+
 pub(crate) async fn authenticate_node(
     state: &AppState,
     uri: &Uri,
 ) -> Result<ServerNodeRow, Response<Body>> {
+    let credentials = node_credentials(uri, &Value::Null);
+    authenticate_node_credentials(state, credentials).await
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NodeCredentials {
+    pub(crate) token: String,
+    pub(crate) node_id: String,
+    pub(crate) machine_id: String,
+}
+
+pub(crate) fn node_credentials(uri: &Uri, payload: &Value) -> NodeCredentials {
     let params = parse_query(uri);
-    let token = params.get("token").cloned().unwrap_or_default();
-    let node_id = params.get("node_id").cloned().unwrap_or_default();
+    if params.get("token").is_some_and(|value| !value.is_empty()) {
+        let read = |key: &str| params.get(key).cloned().unwrap_or_default();
+        return NodeCredentials {
+            token: read("token"),
+            node_id: read("node_id"),
+            machine_id: read("machine_id"),
+        };
+    }
+    NodeCredentials {
+        token: node_auth_body_value(payload, "token"),
+        node_id: node_auth_body_value(payload, "node_id"),
+        machine_id: node_auth_body_value(payload, "machine_id"),
+    }
+}
+
+fn node_auth_body_value(payload: &Value, key: &str) -> String {
+    match payload.get(key) {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Number(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Xboard-Node sends credentials in the JSON body of POST requests; legacy
+/// nodes send them in the query string. Auth fields are stripped from the body.
+pub(crate) async fn authenticate_node_request(
+    state: &AppState,
+    uri: &Uri,
+    payload: &mut Value,
+) -> Result<ServerNodeRow, Response<Body>> {
+    let credentials = node_credentials(uri, payload);
+    if let Some(object) = payload.as_object_mut() {
+        for key in NODE_AUTH_FIELDS {
+            object.remove(key);
+        }
+    }
+    authenticate_node_credentials(state, credentials).await
+}
+
+pub(crate) async fn authenticate_node_credentials(
+    state: &AppState,
+    credentials: NodeCredentials,
+) -> Result<ServerNodeRow, Response<Body>> {
+    let NodeCredentials { token, node_id, machine_id } = credentials;
+    if !machine_id.trim().is_empty() {
+        return crate::xboard_node_machine_support::authenticate_machine_node(
+            state, &machine_id, &token, &node_id,
+        )
+        .await;
+    }
 
     if !crate::machine_bootstrap_support::is_strong_machine_token(token.trim())
         || node_id.trim().is_empty()
@@ -833,6 +1108,37 @@ pub(crate) async fn authenticate_node(
     node.ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "Invalid server token"))
 }
 
+fn panel_tls_settings(settings: &Map<String, Value>, tls: i64) -> Value {
+    if tls == 2 {
+        return normalize_object_value(settings.get("reality_settings"), true);
+    }
+    normalize_object_value(
+        settings
+            .get("tls_settings")
+            .or_else(|| settings.get("tlsSettings"))
+            .or_else(|| settings.get("tls").filter(|value| value.is_object())),
+        true,
+    )
+}
+
+fn panel_multiplex(settings: &Map<String, Value>) -> Value {
+    settings
+        .get("multiplex")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn panel_protocol_requires_cert(protocol: &str, tls: i64) -> bool {
+    match protocol {
+        "hysteria" | "tuic" | "anytls" => true,
+        "trojan" => tls != 2,
+        _ => tls == 1,
+    }
+}
+
+/// Mirrors upstream Xboard `ServerService::buildNodeConfig` for Xboard-Node,
+/// keeping legacy keys (`network_settings`, `host`) for older node backends.
 fn build_server_node_panel_config(
     state: &AppState,
     node: &ServerNodeRow,
@@ -848,54 +1154,85 @@ fn build_server_node_panel_config(
     let host = node.host.clone();
     let service_port = effective_service_port(node);
     let server_name = resolve_panel_server_name(&settings, &host);
+    let network = settings
+        .get("network")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("tcp")
+        .to_string();
+    let network_settings = normalize_object_value(
+        settings
+            .get("network_settings")
+            .or_else(|| settings.get("networkSettings")),
+        true,
+    );
 
     let base = json!({
+        "protocol": protocol,
+        "listen_ip": "0.0.0.0",
         "host": host,
         "server_port": service_port,
         "server_name": server_name,
+        "network": network,
+        "networkSettings": network_settings,
+        "network_settings": network_settings,
     });
 
     let base_map = base.as_object().cloned().unwrap_or_default();
-    let payload = match protocol.as_str() {
+    let mut tls_mode = json_int(&settings, "tls");
+    let mut payload = match protocol.as_str() {
         "vmess" => merge_json_object(
             base_map,
             json!({
-                "tls": json_int(&settings, "tls"),
-                "network": json_string(&settings, "network", "tcp"),
-                "network_settings": normalize_object_value(settings.get("network_settings").or_else(|| settings.get("networkSettings")), true),
-                "tls_settings": normalize_object_value(settings.get("tls_settings").or_else(|| settings.get("tlsSettings")), true),
+                "tls": tls_mode,
+                "tls_settings": panel_tls_settings(&settings, tls_mode),
+                "multiplex": panel_multiplex(&settings),
             }),
         ),
         "vless" => {
-            let tls = json_int(&settings, "tls");
-            let tls_settings = if tls == 2 {
-                normalize_object_value(settings.get("reality_settings"), true)
+            let encryption_enabled = json_nested_bool(&settings, &["encryption", "enabled"]);
+            let decryption = if encryption_enabled {
+                get_nested_value(&settings, &["encryption", "decryption"])
+                    .cloned()
+                    .unwrap_or(Value::Null)
             } else {
-                normalize_object_value(
-                    settings
-                        .get("tls_settings")
-                        .or_else(|| settings.get("tlsSettings")),
-                    true,
-                )
+                Value::Null
             };
             merge_json_object(
                 base_map,
                 json!({
-                    "tls": tls,
-                    "network": json_string(&settings, "network", "tcp"),
-                    "network_settings": normalize_object_value(settings.get("network_settings").or_else(|| settings.get("networkSettings")), true),
+                    "tls": tls_mode,
                     "flow": settings.get("flow").cloned().unwrap_or(Value::Null),
-                    "tls_settings": tls_settings,
+                    "decryption": decryption,
+                    "tls_settings": panel_tls_settings(&settings, tls_mode),
+                    "multiplex": panel_multiplex(&settings),
                 }),
             )
         }
-        "trojan" => merge_json_object(
-            base_map,
-            json!({
-                "network": json_string(&settings, "network", "tcp"),
-                "networkSettings": normalize_object_value(settings.get("network_settings").or_else(|| settings.get("networkSettings")), true),
-            }),
-        ),
+        "trojan" => {
+            if tls_mode != 2 {
+                tls_mode = 1;
+            }
+            let mut tls_settings = panel_tls_settings(&settings, tls_mode);
+            if tls_mode != 2 {
+                if let Some(object) = tls_settings.as_object_mut() {
+                    object
+                        .entry("server_name".to_string())
+                        .or_insert_with(|| Value::String(server_name.clone()));
+                    object.entry("allow_insecure".to_string()).or_insert_with(|| {
+                        Value::Bool(json_bool(&settings, "allow_insecure"))
+                    });
+                }
+            }
+            merge_json_object(
+                base_map,
+                json!({
+                    "tls": tls_mode,
+                    "tls_settings": tls_settings,
+                    "multiplex": panel_multiplex(&settings),
+                }),
+            )
+        }
         "shadowsocks" => {
             let cipher = json_string(&settings, "cipher", "aes-128-gcm");
             let server_key = match cipher.as_str() {
@@ -907,19 +1244,22 @@ fn build_server_node_panel_config(
                 base_map,
                 json!({
                     "cipher": cipher,
+                    "plugin": settings.get("plugin").cloned().unwrap_or(Value::Null),
+                    "plugin_opts": settings.get("plugin_opts").cloned().unwrap_or(Value::Null),
                     "server_key": server_key,
                 }),
             )
         }
-        "hysteria" | "hysteria2" => {
+        "hysteria" => {
             let mut version = json_int(&settings, "version");
-            if protocol == "hysteria2" {
-                version = 2;
+            if node.protocol.trim().eq_ignore_ascii_case("hysteria2") || version <= 0 {
+                version = if node.protocol.trim().eq_ignore_ascii_case("hysteria2") { 2 } else { 1 };
             }
             let base_hy = merge_json_object(
                 base_map.clone(),
                 json!({
                     "version": version,
+                    "tls_settings": panel_tls_settings(&settings, 1),
                     "up_mbps": json_nested_int(&settings, &["bandwidth", "up"]),
                     "down_mbps": json_nested_int(&settings, &["bandwidth", "down"]),
                 }),
@@ -946,7 +1286,10 @@ fn build_server_node_panel_config(
         "tuic" => merge_json_object(
             base_map,
             json!({
+                "version": match json_int(&settings, "version") { 0 => 5, value => value },
+                "tls_settings": panel_tls_settings(&settings, 1),
                 "congestion_control": json_string(&settings, "congestion_control", "cubic"),
+                "auth_timeout": "3s",
                 "zero_rtt_handshake": json_bool(&settings, "zero_rtt_handshake"),
                 "heartbeat": json_string(&settings, "heartbeat", "10s"),
             }),
@@ -954,11 +1297,58 @@ fn build_server_node_panel_config(
         "anytls" => merge_json_object(
             base_map,
             json!({
+                "tls_settings": panel_tls_settings(&settings, 1),
                 "padding_scheme": settings.get("padding_scheme").cloned().unwrap_or_else(|| json!([])),
+            }),
+        ),
+        "socks" | "naive" | "http" => merge_json_object(
+            base_map,
+            json!({
+                "tls": tls_mode,
+                "tls_settings": panel_tls_settings(&settings, tls_mode),
+            }),
+        ),
+        "mieru" => merge_json_object(
+            base_map,
+            json!({
+                "transport": json_string(&settings, "transport", "TCP").to_ascii_uppercase(),
+                "traffic_pattern": settings.get("traffic_pattern").cloned().unwrap_or(Value::Null),
             }),
         ),
         _ => Value::Object(base_map),
     };
+
+    if let Some(object) = payload.as_object_mut() {
+        for key in ["custom_outbounds", "custom_routes", "custom_route_rules", "routes"] {
+            if let Some(value) = settings.get(key).filter(|value| value.as_array().is_some_and(|items| !items.is_empty())) {
+                object.insert(key.to_string(), value.clone());
+            }
+        }
+        let mut cert_config = settings
+            .get("cert_config")
+            .and_then(Value::as_object)
+            .cloned();
+        if let Some(config) = cert_config.as_mut() {
+            if let Some(mode) = config.remove("mode") {
+                config.entry("cert_mode".to_string()).or_insert(mode);
+            }
+        }
+        match cert_config {
+            Some(config) => {
+                let mode = config.get("cert_mode").and_then(Value::as_str).unwrap_or("");
+                if !mode.is_empty() && mode != "none" {
+                    object.insert("cert_config".to_string(), Value::Object(config));
+                }
+            }
+            None if panel_protocol_requires_cert(&protocol, tls_mode) => {
+                object.insert(
+                    "cert_config".to_string(),
+                    json!({ "cert_mode": "self", "domain": server_name }),
+                );
+            }
+            None => {}
+        }
+    }
 
     Ok(payload)
 }
@@ -978,11 +1368,11 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
             }
             let user_id = item.first()?.as_i64()?;
             let traffic = item.get(1)?.as_i64()?;
-            if user_id <= 0 || !(1..=MAX_TRAFFIC_DELTA_KB).contains(&traffic) {
+            if user_id <= 0 || !(1..=MAX_TRAFFIC_DELTA_BYTES).contains(&traffic) {
                 continue;
             }
             batch_total = batch_total.checked_add(traffic)?;
-            if batch_total > MAX_TRAFFIC_BATCH_KB {
+            if batch_total > MAX_TRAFFIC_BATCH_BYTES {
                 return None;
             }
             rows.push(TrafficRow {
@@ -1008,14 +1398,14 @@ fn normalize_push_payload(value: &Value) -> Option<Vec<TrafficRow>> {
         if user_id <= 0
             || upload < 0
             || download < 0
-            || upload > MAX_TRAFFIC_DELTA_KB
-            || download > MAX_TRAFFIC_DELTA_KB
+            || upload > MAX_TRAFFIC_DELTA_BYTES
+            || download > MAX_TRAFFIC_DELTA_BYTES
             || total <= 0
         {
             continue;
         }
         batch_total = batch_total.checked_add(total)?;
-        if batch_total > MAX_TRAFFIC_BATCH_KB {
+        if batch_total > MAX_TRAFFIC_BATCH_BYTES {
             return None;
         }
         rows.push(TrafficRow {
@@ -1074,17 +1464,17 @@ fn merge_push_traffic_rows(rows: &[QueuedPushTrafficRow]) -> Vec<AggregatedTraff
         let entry = merged.entry(row.user_id).or_insert((0, 0));
         entry.0 = entry
             .0
-            .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_KB))
-            .min(MAX_TRAFFIC_BATCH_KB);
+            .saturating_add(row.upload.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+            .min(MAX_TRAFFIC_BATCH_BYTES);
         entry.1 = entry
             .1
-            .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_KB))
-            .min(MAX_TRAFFIC_BATCH_KB);
+            .saturating_add(row.download.clamp(0, MAX_TRAFFIC_DELTA_BYTES))
+            .min(MAX_TRAFFIC_BATCH_BYTES);
     }
     let mut merged_rows = merged
         .into_iter()
         .map(|(user_id, (upload, download))| {
-            let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_KB);
+            let billed = upload.saturating_add(download).min(MAX_TRAFFIC_BATCH_BYTES);
             (user_id, upload, download, billed.max(0))
         })
         .collect::<Vec<AggregatedTrafficRow>>();

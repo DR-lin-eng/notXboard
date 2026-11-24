@@ -36,7 +36,7 @@ async fn build_send_email_verify_response(
     }
 
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
     if email.is_empty() {
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Email can not be empty"));
     }

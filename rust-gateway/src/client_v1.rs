@@ -106,7 +106,7 @@ async fn build_app_get_config_response(
 
     let rotate_credentials = get_setting_bool(state, "rotate_subscription_credentials_daily", false).await;
     let uuid = effective_uuid(&user.uuid, credential_version, rotate_credentials);
-    let proxies = build_clash_proxies(&servers, &uuid, state).await
+    let proxies = build_clash_proxies(&servers, &uuid, state, false).await
         .into_iter()
         .filter(|proxy| {
             proxy.get("type").and_then(|value| value.as_str()).map(|value| {

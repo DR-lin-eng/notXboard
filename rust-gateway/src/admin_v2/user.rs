@@ -440,7 +440,7 @@ async fn build_update_response(
     let mut tx = state.db.begin().await.map_err(internal_error)?;
 
     if let Some(email) = request_optional_string_field(&payload, "email") {
-        let email = email.unwrap_or_default();
+        let email = email.unwrap_or_default().trim().to_ascii_lowercase();
         if email.is_empty() {
             tx.rollback().await.ok();
             return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "邮箱不能为空"));
@@ -474,7 +474,9 @@ async fn build_update_response(
     let resolved_invite_user_id = resolve_invite_user_id(&mut tx, &payload, user_id).await?;
 
     let mut updates = Vec::<(&str, Value)>::new();
-    push_optional_string_update(&payload, "email", &mut updates);
+    if let Some(Some(email)) = request_optional_string_field(&payload, "email") {
+        updates.push(("email", Value::from(email.trim().to_ascii_lowercase())));
+    }
     push_optional_i64_update(&payload, "transfer_enable", &mut updates);
     push_optional_i64_update(&payload, "expired_at", &mut updates);
     push_optional_i64_update(&payload, "plan_id", &mut updates);

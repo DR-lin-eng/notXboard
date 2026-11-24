@@ -87,7 +87,7 @@ pub(crate) async fn run_scheduled_database_backup(
         }
         Err(err) => {
             let message = format!(
-                "V2bX 数据库备份失败\n事件：backup:database:failed\n时间：{}\n\n错误：{}",
+                "notXboard 数据库备份失败\n事件：backup:database:failed\n时间：{}\n\n错误：{}",
                 now.format("%Y-%m-%d %H:%M:%S"),
                 err
             );

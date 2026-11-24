@@ -219,6 +219,7 @@ CREATE TABLE `server_nodes` (
   `v2bx_node_id` int DEFAULT NULL COMMENT 'V2bX 节点 ID',
   `v2bx_config` json DEFAULT NULL COMMENT 'V2bX 配置',
   `v2bx_token` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT 'V2bX 认证令牌',
+  `machine_id` bigint unsigned DEFAULT NULL,
   `device_limit` int NOT NULL DEFAULT '0' COMMENT '设备数限制',
   `connection_limit` int NOT NULL DEFAULT '0' COMMENT '连接数限制',
   `speed_limit_up` int NOT NULL DEFAULT '0' COMMENT '上传限速 (Mbps)',
@@ -235,7 +236,47 @@ CREATE TABLE `server_nodes` (
   UNIQUE KEY `server_nodes_v2bx_token_unique` (`v2bx_token`),
   KEY `idx_server_nodes_v2bx_node_token` (`v2bx_node_id`,`v2bx_token`),
   KEY `idx_server_nodes_status_user` (`status`,`user_id`),
+  KEY `server_nodes_machine_id_index` (`machine_id`),
   CONSTRAINT `server_nodes_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `server_machines`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `server_machines` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `token` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `notes` text COLLATE utf8mb4_unicode_ci,
+  `is_active` tinyint(1) NOT NULL DEFAULT '1',
+  `last_seen_at` int unsigned DEFAULT NULL,
+  `load_status` json DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `server_machines_token_unique` (`token`),
+  KEY `server_machines_user_id_index` (`user_id`),
+  CONSTRAINT `server_machines_user_id_foreign` FOREIGN KEY (`user_id`) REFERENCES `v2_user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `server_machine_load_history`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `server_machine_load_history` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `machine_id` bigint unsigned NOT NULL,
+  `cpu` double NOT NULL DEFAULT '0',
+  `mem_total` bigint unsigned NOT NULL DEFAULT '0',
+  `mem_used` bigint unsigned NOT NULL DEFAULT '0',
+  `disk_total` bigint unsigned NOT NULL DEFAULT '0',
+  `disk_used` bigint unsigned NOT NULL DEFAULT '0',
+  `net_in_speed` double DEFAULT NULL,
+  `net_out_speed` double DEFAULT NULL,
+  `recorded_at` int unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `server_machine_load_history_machine_recorded_index` (`machine_id`,`recorded_at`),
+  CONSTRAINT `server_machine_load_history_machine_id_foreign` FOREIGN KEY (`machine_id`) REFERENCES `server_machines` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `sponsor_donations`;

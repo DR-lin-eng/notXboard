@@ -478,7 +478,7 @@ async fn build_forget_response(
     }
 
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
     let password = payload.get("password").and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_default();
     let email_code = payload.get("email_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
 
@@ -513,8 +513,8 @@ async fn build_forget_response(
     }
 
     let verify_key = format!("EMAIL_VERIFY_CODE_{}", email);
-    let cached_code = redis_get_string(state, &verify_key).await.ok().flatten().unwrap_or_default();
-    if cached_code != email_code {
+    let cached_code = redis_get_string(state, &verify_key).await.ok().flatten();
+    if !email_code_matches(cached_code.as_deref(), &email_code) {
         let next = if forget_limit > 0 { forget_limit + 1 } else { 1 };
         let _ = redis_setex_string(state, &forget_limit_key, 300, &next.to_string()).await;
         return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Incorrect email verification code"));
@@ -534,7 +534,7 @@ async fn build_register_response(
     body: Body,
 ) -> Result<Response<Body>, Response<Body>> {
     let payload = parse_json_body(body).await?;
-    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
+    let email = payload.get("email").and_then(|v| v.as_str()).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
     let password = payload.get("password").and_then(|v| v.as_str()).map(|v| v.to_string()).unwrap_or_default();
     let invite_code = payload.get("invite_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
     let email_code = payload.get("email_code").and_then(|v| v.as_str()).map(|v| v.trim().to_string()).unwrap_or_default();
@@ -609,8 +609,8 @@ async fn build_register_response(
             return Ok(fail_json_response(StatusCode::UNPROCESSABLE_ENTITY, "Email verification code cannot be empty"));
         }
         let verify_key = format!("EMAIL_VERIFY_CODE_{}", email);
-        let cached_code = redis_get_string(state, &verify_key).await.ok().flatten().unwrap_or_default();
-        if cached_code != email_code {
+        let cached_code = redis_get_string(state, &verify_key).await.ok().flatten();
+        if !email_code_matches(cached_code.as_deref(), &email_code) {
             return Ok(fail_json_response(StatusCode::BAD_REQUEST, "Incorrect email verification code"));
         }
     }
@@ -646,4 +646,34 @@ async fn build_register_response(
         "auth_data": auth_data,
         "is_admin": user.is_admin != 0,
     }))))
+}
+
+fn email_code_matches(cached: Option<&str>, submitted: &str) -> bool {
+    let Some(cached) = cached.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if submitted.len() != 6 || !submitted.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    cached.len() == submitted.len()
+        && cached
+            .bytes()
+            .zip(submitted.bytes())
+            .fold(0u8, |diff, (left, right)| diff | (left ^ right))
+            == 0
+}
+
+#[cfg(test)]
+mod email_code_tests {
+    use super::email_code_matches;
+
+    #[test]
+    fn email_code_requires_cached_six_digit_exact_match() {
+        assert!(email_code_matches(Some("123456"), "123456"));
+        assert!(!email_code_matches(None, ""));
+        assert!(!email_code_matches(Some(""), ""));
+        assert!(!email_code_matches(Some("123456"), "123457"));
+        assert!(!email_code_matches(Some("12345"), "12345"));
+        assert!(!email_code_matches(Some("abcdef"), "abcdef"));
+    }
 }

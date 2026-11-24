@@ -113,7 +113,7 @@ const DEFAULT_NODE_PROTOCOL_OPTIONS = Object.keys(NODE_PROTOCOL_LABELS).map((key
   label: NODE_PROTOCOL_LABELS[key],
 }));
 
-const V2BX_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
+const XBOARD_NODE_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
   'vmess',
   'vless',
   'trojan',
@@ -122,6 +122,10 @@ const V2BX_DEPLOYABLE_PROTOCOLS = Object.freeze(new Set([
   'hysteria2',
   'tuic',
   'anytls',
+  'socks',
+  'naive',
+  'http',
+  'mieru',
 ]));
 
 const PLAN_PRICE_FIELDS = Object.freeze([
@@ -1024,8 +1028,8 @@ function protocolDisplayName(protocol, protocolMap = {}) {
   return protocolMap[key] || NODE_PROTOCOL_LABELS[key] || (key ? key.toUpperCase() : '-');
 }
 
-function isV2bxDeployableProtocol(protocol) {
-  return V2BX_DEPLOYABLE_PROTOCOLS.has(String(protocol || '').toLowerCase());
+function isXboardNodeDeployableProtocol(protocol) {
+  return XBOARD_NODE_DEPLOYABLE_PROTOCOLS.has(String(protocol || '').toLowerCase());
 }
 
 function buildProtocolOptionHtml(protocolOptions, selectedValue = '') {
@@ -4228,6 +4232,8 @@ async function renderNodes() {
 
   let agents = [];
   let agentErr = '';
+  let machines = [];
+  let machineErr = '';
   const [owned, accessible, protocolOptions] = await Promise.all([
     apiFetch('/api/v1/user/server-nodes'),
     apiFetch('/api/v1/user/accessible-nodes'),
@@ -4237,6 +4243,12 @@ async function renderNodes() {
       .catch((e) => {
         agentErr = e.message || '加载 TCPing Agent 失败';
         agents = [];
+      }),
+    apiFetch('/api/v1/user/server-machines')
+      .then((res) => { machines = asArray(res?.data); })
+      .catch((e) => {
+        machineErr = e.message || '加载 Xboard-Node 机器失败';
+        machines = [];
       }),
   ]);
 
@@ -4249,7 +4261,7 @@ async function renderNodes() {
       <div class="row" style="justify-content: space-between; align-items: center;">
         <div>
           <h2>TCPing Agent 管理</h2>
-          <div class="muted">独立部署在探测服务器上，不和 V2bX 混装。创建后复制一行命令即可接入。</div>
+          <div class="muted">独立部署在探测服务器上，不和 Xboard-Node 节点混装。创建后复制一行命令即可接入。</div>
         </div>
         <button class="btn primary" id="newTcpingAgentBtn">新增 Agent</button>
       </div>
@@ -4280,6 +4292,43 @@ async function renderNodes() {
           </tbody>
         </table>
       ` : '<div class="notice" style="margin-top:10px;">还没有 TCPing Agent。建议至少部署 1 个，节点监控和被墙提醒才会开始工作。</div>'}
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <h2>Xboard-Node 机器</h2>
+          <div class="muted">机器模式：一台服务器运行一个 Xboard-Node，同时承载绑定到它的多个自有节点，节点增减会实时推送。</div>
+        </div>
+        <button class="btn primary" id="newMachineBtn">新增机器</button>
+      </div>
+      ${machineErr ? `<div class="notice error" style="margin-top:10px;">${escapeHtml(machineErr)}</div>` : ''}
+      ${machines.length ? html`
+        <table class="table" style="margin-top:10px;">
+          <thead>
+            <tr><th>ID</th><th>名称</th><th>绑定节点</th><th>状态</th><th>负载</th><th>最后上报</th><th></th></tr>
+          </thead>
+          <tbody>
+            ${machines.map((machine) => `
+              <tr>
+                <td>${machine.id}</td>
+                <td>${escapeHtml(machine.name || '-')}</td>
+                <td class="muted">${escapeHtml(asArray(machine.node_ids).join(', ') || '未绑定')}</td>
+                <td>${machine.is_active ? '<span class="pill ok">启用</span>' : '<span class="pill">停用</span>'}</td>
+                <td class="muted">${machine.load_status ? escapeHtml(`CPU ${Number(machine.load_status.cpu || 0).toFixed(1)}%`) : '-'}</td>
+                <td class="muted">${escapeHtml(formatTs(machine.last_seen_at))}</td>
+                <td class="row end">
+                  <button class="btn small" data-machine-action="bind" data-id="${machine.id}">绑定节点</button>
+                  <button class="btn small" data-machine-action="install" data-id="${machine.id}">复制部署命令</button>
+                  <button class="btn small" data-machine-action="rotate" data-id="${machine.id}">轮换凭据</button>
+                  <button class="btn small" data-machine-action="toggle" data-id="${machine.id}">${machine.is_active ? '停用' : '启用'}</button>
+                  <button class="btn small danger" data-machine-action="delete" data-id="${machine.id}">删除</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : '<div class="notice" style="margin-top:10px;">还没有机器。单节点部署可直接使用下方节点的一键部署。</div>'}
     </div>
 
     <div class="card" style="margin-top: 12px;">
@@ -4320,12 +4369,12 @@ async function renderNodes() {
                 <td class="row end">
                   <button class="btn small" data-action="monitor" data-id="${node.id}">监控</button>
                   <button class="btn small" data-action="edit" data-id="${node.id}">编辑</button>
-                  ${isV2bxDeployableProtocol(node.protocol)
+                  ${isXboardNodeDeployableProtocol(node.protocol)
                     ? `<button class="btn small" data-action="deploy" data-id="${node.id}">部署</button>`
                     : `<button class="btn small" data-action="deploy-unsupported" data-id="${node.id}">部署不可用</button>`
                   }
-                  ${isV2bxDeployableProtocol(node.protocol) && node.v2bx_token_configured
-                    ? `<button class="btn small" data-action="rotate-v2bx" data-id="${node.id}">轮换凭据</button>`
+                  ${isXboardNodeDeployableProtocol(node.protocol) && node.v2bx_token_configured
+                    ? `<button class="btn small" data-action="rotate-node-token" data-id="${node.id}">轮换凭据</button>`
                     : ''}
                   <button class="btn small" data-action="access" data-id="${node.id}">分享/权限</button>
                   <button class="btn small" data-action="audit" data-id="${node.id}">审计规则</button>
@@ -4389,6 +4438,60 @@ async function renderNodes() {
     });
   }
 
+  qs('#newMachineBtn').addEventListener('click', async () => {
+    const name = String(prompt('机器名称', `machine-${Date.now()}`) || '').trim();
+    if (!name) return;
+    try {
+      await apiFetch('/api/v1/user/server-machines', { method: 'POST', body: { name } });
+      await renderNodes();
+    } catch (e) {
+      alert(e.message || '创建失败');
+    }
+  });
+
+  qsa('button[data-machine-action]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const action = String(btn.getAttribute('data-machine-action') || '');
+      const id = btn.getAttribute('data-id');
+      const machine = machines.find((m) => String(m.id) === String(id));
+      if (!id || !machine) return;
+      try {
+        if (action === 'bind') {
+          const deployable = ownedNodes.filter((n) => isXboardNodeDeployableProtocol(n.protocol)).map((n) => `${n.id}:${n.name || ''}`).join('  ');
+          const input = prompt(`输入要绑定到该机器的节点 ID（逗号分隔，留空表示解绑全部）\n可选：${deployable}`, asArray(machine.node_ids).join(','));
+          if (input === null) return;
+          const nodeIds = String(input).split(/[\s,，]+/).filter(Boolean).map((v) => Number(v));
+          if (nodeIds.some((v) => !Number.isInteger(v) || v <= 0)) throw new Error('节点 ID 格式错误');
+          await apiFetch(`/api/v1/user/server-machines/${id}/nodes`, { method: 'POST', body: { node_ids: nodeIds } });
+          await renderNodes();
+          return;
+        }
+        if (action === 'install' || action === 'rotate') {
+          if (action === 'rotate' && !confirm('确认轮换这台机器的凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
+          const path = action === 'rotate' ? 'deploy-command/rotate-token' : 'deploy-command';
+          const res = await apiFetch(`/api/v1/user/server-machines/${id}/${path}`, { method: 'POST', body: {} });
+          const command = String(res?.data?.command || '').trim();
+          if (!command) throw new Error('未生成部署命令');
+          await copyText(command);
+          alert('机器模式部署命令已复制，请在目标服务器上以 root 执行。');
+          return;
+        }
+        if (action === 'toggle') {
+          await apiFetch(`/api/v1/user/server-machines/${id}`, { method: 'PUT', body: { is_active: !machine.is_active } });
+          await renderNodes();
+          return;
+        }
+        if (action === 'delete') {
+          if (!confirm('确认删除这台机器？已绑定的节点会解绑，节点本身不会删除。')) return;
+          await apiFetch(`/api/v1/user/server-machines/${id}`, { method: 'DELETE' });
+          await renderNodes();
+        }
+      } catch (e) {
+        alert(e.message || '操作失败');
+      }
+    });
+  });
+
   qsa('button[data-agent-action]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const action = String(btn.getAttribute('data-agent-action') || '');
@@ -4401,7 +4504,7 @@ async function renderNodes() {
           const command = String(res?.data?.command || '').trim();
           if (!command) throw new Error('未生成安装命令');
           await copyText(command);
-          alert('安装命令已复制。请在独立探测机上执行，不要和 V2bX 混装。');
+          alert('安装命令已复制。请在独立探测机上执行，不要和 Xboard-Node 节点混装。');
           return;
         }
 
@@ -4432,13 +4535,13 @@ async function renderNodes() {
           return;
         }
         if (action === 'deploy-unsupported') {
-          alert('该协议暂不支持 V2bX 一键部署。请改用 vmess/vless/trojan/shadowsocks/hysteria/hysteria2/tuic/anytls。');
+          alert('该协议暂不支持 Xboard-Node 一键部署。请改用 vmess/vless/trojan/shadowsocks/hysteria/hysteria2/tuic/anytls/socks/naive/http/mieru。');
           return;
         }
         if (action === 'deploy') {
           const node = ownedNodes.find((n) => String(n.id) === String(id)) || {};
-          if (!isV2bxDeployableProtocol(node?.protocol)) {
-            alert('该协议暂不支持 V2bX 一键部署。');
+          if (!isXboardNodeDeployableProtocol(node?.protocol)) {
+            alert('该协议暂不支持 Xboard-Node 一键部署。');
             return;
           }
           const deployRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy`, { method: 'POST' });
@@ -4461,13 +4564,13 @@ async function renderNodes() {
           }
           return;
         }
-        if (action === 'rotate-v2bx') {
-          if (!confirm('确认轮换这个节点的 V2bX 凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
+        if (action === 'rotate-node-token') {
+          if (!confirm('确认轮换这个节点的 Xboard-Node 凭据？旧实例会立即失效，请随后执行新的部署命令。')) return;
           const commandRes = await apiFetch(`/api/v1/user/server-nodes/${id}/deploy-command/rotate-token`, { method: 'POST', body: {} });
           const command = String(commandRes?.data?.command || '').trim();
           if (!command) throw new Error('未生成新的部署命令');
           await copyText(command);
-          alert('新部署命令已复制，旧 V2bX 凭据已失效。');
+          alert('新部署命令已复制，旧 Xboard-Node 凭据已失效。');
           await renderNodes();
           return;
         }
@@ -4909,7 +5012,7 @@ async function renderEditNode(nodeId, errorText = '') {
       <div id="en_form_error">${errorText ? `<div class="notice error">${escapeHtml(errorText)}</div>` : ''}</div>
       <div class="grid cols-2" style="margin-top: 10px;">
         <div class="field"><label>节点名称</label><input id="en_name" value="${escapeHtml(node?.name || '')}"></div>
-        <div class="field"><label>在线状态（V2bX 回传）</label><div>${pillStatus(node)}</div></div>
+        <div class="field"><label>在线状态（Xboard-Node 回传）</label><div>${pillStatus(node)}</div></div>
         <div class="field">
           <label>落地国家 / 地区</label>
           <input id="en_location" list="nodeLocationOptions" value="${escapeHtml(getNodeLocationInputValue(node?.location_code, node?.location_name))}" placeholder="必选，可搜索，例如 HK | Hong Kong 香港" required>
@@ -4946,7 +5049,7 @@ async function renderEditNode(nodeId, errorText = '') {
       <div class="row end" style="margin-top: 12px;">
         <button class="btn primary" id="en_save">保存</button>
       </div>
-      <div class="muted" style="margin-top: 10px;">节点总流量达到上限后，将停止向该节点下发用户，V2bX 下发会自动清空该节点用户列表。</div>
+      <div class="muted" style="margin-top: 10px;">节点总流量达到上限后，将停止向该节点下发用户，Xboard-Node 下发会自动清空该节点用户列表。</div>
     </div>
   `);
 
@@ -6928,7 +7031,7 @@ function buildCommandCenterDashboard(payload = {}, me = {}) {
     {
       label: '探针在线',
       value: `${formatCompactNumber(overview?.tcping_agents_online || 0)}/${formatCompactNumber(overview?.tcping_agents_total || 0)}`,
-      meta: '独立于 V2bX 的探活体系',
+      meta: '独立于 Xboard-Node 的探活体系',
       tone: 'violet',
     },
     {

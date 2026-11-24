@@ -88,7 +88,8 @@ pub(crate) async fn installer_asset_authorized(state: &AppState, uri: &Uri) -> b
     let Some(signed) = parse_and_verify_bootstrap_query(uri, &state.app_key) else {
         return false;
     };
-    if signed.kind != expected_kind {
+    let machine_mode_installer = expected_kind == "xboard-node" && signed.kind == "xboard-machine";
+    if signed.kind != expected_kind && !machine_mode_installer {
         return false;
     }
     let Ok(Some(raw)) = redis_get_string(
@@ -171,7 +172,7 @@ async fn machine_bootstrap_subject_is_current(
     payload: &MachineBootstrapTicket,
 ) -> bool {
     let result = match payload.kind.as_str() {
-        "v2bx" => {
+        "xboard-node" => {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*)
                  FROM server_nodes node
@@ -190,6 +191,23 @@ async fn machine_bootstrap_subject_is_current(
                        WHERE duplicate.v2bx_token = node.v2bx_token
                          AND duplicate.id <> node.id
                    )",
+            )
+            .bind(payload.subject_id)
+            .bind(payload.issuer_user_id)
+            .bind(&payload.credential)
+            .fetch_one(&state.db)
+            .await
+        }
+        "xboard-machine" => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                 FROM server_machines machine
+                 JOIN v2_user owner ON owner.id = machine.user_id
+                 WHERE machine.id = ?
+                   AND owner.id = ?
+                   AND machine.token = ?
+                   AND machine.is_active = 1
+                   AND owner.banned = 0",
             )
             .bind(payload.subject_id)
             .bind(payload.issuer_user_id)
@@ -348,12 +366,12 @@ fn valid_ticket(value: &str) -> bool {
 }
 
 fn is_supported_kind(value: &str) -> bool {
-    matches!(value, "v2bx" | "tcping")
+    matches!(value, "xboard-node" | "xboard-machine" | "tcping")
 }
 
 fn installer_kind_for_path(path: &str) -> Option<&'static str> {
     match path {
-        "/v2bx-install.sh" => Some("v2bx"),
+        "/xboard-node-install.sh" => Some("xboard-node"),
         "/tcping-agent-install.sh"
         | "/tcping-agent-src/go.mod"
         | "/tcping-agent-src/main.go" => Some("tcping"),
@@ -375,7 +393,7 @@ mod tests {
 
     #[test]
     fn installer_assets_are_bound_to_small_explicit_bundles() {
-        assert_eq!(installer_kind_for_path("/v2bx-install.sh"), Some("v2bx"));
+        assert_eq!(installer_kind_for_path("/xboard-node-install.sh"), Some("xboard-node"));
         assert_eq!(installer_kind_for_path("/tcping-agent-install.sh"), Some("tcping"));
         assert_eq!(installer_kind_for_path("/tcping-agent-src/go.mod"), Some("tcping"));
         assert_eq!(installer_kind_for_path("/tcping-agent-src/main.go"), Some("tcping"));
@@ -407,7 +425,7 @@ mod tests {
         .is_some());
         assert!(verify_bootstrap_query_signature(
             key,
-            "v2bx",
+            "xboard-node",
             expires_at,
             &asset_id,
             &signature,
@@ -430,19 +448,19 @@ mod tests {
         let key = "base64:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
         let asset_id = "cd".repeat(32);
         let expires_at = Utc::now().timestamp() + 600;
-        let signature = sign_bootstrap_query(key, "v2bx", expires_at, &asset_id).unwrap();
+        let signature = sign_bootstrap_query(key, "xboard-node", expires_at, &asset_id).unwrap();
         let query = format!(
-            "mb_v=1&mb_kind=v2bx&mb_exp={expires_at}&mb_asset={asset_id}&mb_sig={signature}"
+            "mb_v=1&mb_kind=xboard-node&mb_exp={expires_at}&mb_asset={asset_id}&mb_sig={signature}"
         );
-        let valid = format!("/v2bx-install.sh?{query}").parse::<Uri>().unwrap();
+        let valid = format!("/xboard-node-install.sh?{query}").parse::<Uri>().unwrap();
         assert!(parse_and_verify_bootstrap_query(&valid, key).is_some());
 
         for invalid_query in [
-            format!("{query}&mb_kind=v2bx"),
+            format!("{query}&mb_kind=xboard-node"),
             format!("{query}&extra=1"),
-            query.replace("mb_kind=v2bx", "mb_kind=tcping"),
+            query.replace("mb_kind=xboard-node", "mb_kind=tcping"),
         ] {
-            let uri = format!("/v2bx-install.sh?{invalid_query}")
+            let uri = format!("/xboard-node-install.sh?{invalid_query}")
                 .parse::<Uri>()
                 .unwrap();
             assert!(parse_and_verify_bootstrap_query(&uri, key).is_none());

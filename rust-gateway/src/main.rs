@@ -26,6 +26,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod limits_support;
+mod subscribe_protocols_v2;
+mod xboard_node_machine_support;
+mod xboard_node_ws_support;
 mod plan_capacity_support;
 mod node_plans_support;
 mod commission_support;
@@ -294,6 +297,7 @@ pub(crate) use traffic_ingest_support::{
     load_primary_subscription_ids_for_node_users, AggregatedTrafficRow,
 };
 pub(crate) use uniproxy_support::{
+    server_handshake, server_report,
     uniproxy_alive, uniproxy_alivelist, uniproxy_audit, uniproxy_config, uniproxy_push,
     uniproxy_status, uniproxy_user,
 };
@@ -1107,6 +1111,7 @@ async fn main() {
     crate::uniproxy_support::spawn_alive_session_worker(state.clone(), alive_session_rx);
     crate::legacy_traffic_support::spawn_legacy_submit_worker(state.clone(), legacy_submit_rx);
     crate::uniproxy_support::spawn_push_traffic_worker(state.clone(), push_traffic_rx);
+    crate::xboard_node_machine_support::spawn_xboard_node_schema_task(state.clone());
     let app = router_support::build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind listener");
     info!("notxboard-gateway listening on 0.0.0.0:{}", port);
@@ -1443,10 +1448,10 @@ async fn build_rust_subscribe_payload(
         let line = match mode {
             RustSubscribeMode::General => match normalized_type.as_str() {
                 "vmess" => build_general_vmess(&node_uuid, &server, &name, &settings),
-                "vless" => build_general_vless(&node_uuid, &server, &name, &settings),
+                "vless" => crate::subscribe_protocols_v2::general_vless(&node_uuid, &server, &name, &settings),
                 "shadowsocks" => build_general_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
-                "trojan" => build_general_trojan(&node_uuid, &server, &name, &settings),
-                "hysteria" => build_general_hysteria(&node_uuid, &server, &name, &settings),
+                "trojan" => crate::subscribe_protocols_v2::general_trojan(&node_uuid, &server, &name, &settings),
+                "hysteria" => crate::subscribe_protocols_v2::general_hysteria(&node_uuid, &server, &name, &settings),
                 "socks" => build_general_socks(&node_uuid, &server, &name),
                 _ => String::new(),
             },
@@ -1456,11 +1461,14 @@ async fn build_rust_subscribe_payload(
                 "vless" => build_shadowrocket_vless(&node_uuid, &server, &name, &settings),
                 "shadowsocks" => build_shadowrocket_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
                 "trojan" => build_shadowrocket_trojan(&node_uuid, &server, &name, &settings),
-                "hysteria" => build_general_hysteria(&node_uuid, &server, &name, &settings),
+                "hysteria" => crate::subscribe_protocols_v2::shadowrocket_hysteria(&node_uuid, &server, &name, &settings),
+                "tuic" => crate::subscribe_protocols_v2::shadowrocket_tuic(&node_uuid, &server, &name, &settings),
+                "anytls" => crate::subscribe_protocols_v2::shadowrocket_anytls(&node_uuid, &server, &name, &settings),
                 "socks" => build_general_socks(&node_uuid, &server, &name),
                 _ => String::new(),
             },
             RustSubscribeMode::QuantumultX => match normalized_type.as_str() {
+                "anytls" => crate::subscribe_protocols_v2::quantumultx_anytls(&node_uuid, &server, &name, &settings),
                 "vmess" => build_quantumultx_vmess(&node_uuid, &server, &name, &settings),
                 "shadowsocks" => build_quantumultx_shadowsocks(&node_uuid, &server, &name, &settings, &state.app_key),
                 "trojan" => build_quantumultx_trojan(&node_uuid, &server, &name, &settings),
@@ -1510,6 +1518,7 @@ async fn build_rust_subscribe_payload(
             &servers,
             &uuid,
             query,
+            false,
         ).await?,
         RustSubscribeMode::ClashMeta => build_clash_yaml_payload(
             state,
@@ -1517,6 +1526,7 @@ async fn build_rust_subscribe_payload(
             &servers,
             &uuid,
             query,
+            true,
         ).await?,
         RustSubscribeMode::SingBox => build_singbox_json_payload(
             state,
@@ -1561,12 +1571,13 @@ async fn build_clash_yaml_payload(
     servers: &[ServerNodeRow],
     uuid: &str,
     query: &HashMap<String, String>,
+    meta: bool,
 ) -> Result<String, Response<Body>> {
     let app_name = get_setting_string(state, "app_name", "Portal").await;
     let mut config = serde_yaml::from_str::<serde_yaml::Value>(CLASH_DEFAULT_TEMPLATE)
     .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid clash template"))?;
 
-    let proxies = build_clash_proxies(servers, uuid, state).await;
+    let proxies = build_clash_proxies(servers, uuid, state, meta).await;
     let proxy_names = proxies
         .iter()
         .filter_map(|p| p.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
@@ -2326,17 +2337,17 @@ fn server_node_supported_protocols() -> Vec<&'static str> {
     ]
 }
 
-fn server_node_v2bx_supported_protocols() -> Vec<&'static str> {
-    vec!["vmess", "vless", "trojan", "shadowsocks", "hysteria", "hysteria2", "tuic", "anytls"]
+fn server_node_xboard_node_supported_protocols() -> Vec<&'static str> {
+    vec![
+        "vmess", "vless", "trojan", "shadowsocks", "hysteria", "hysteria2", "tuic", "anytls",
+        "socks", "naive", "http", "mieru",
+    ]
 }
 
-fn server_node_supports_v2bx_deploy(protocol: &str) -> bool {
-    server_node_v2bx_supported_protocols().contains(&protocol)
+fn server_node_supports_xboard_node_deploy(protocol: &str) -> bool {
+    server_node_xboard_node_supported_protocols().contains(&protocol)
 }
 
-fn server_node_prefers_auto_cert(protocol: &str) -> bool {
-    matches!(protocol, "vmess" | "vless" | "trojan" | "hysteria" | "hysteria2" | "tuic" | "anytls")
-}
 
 fn server_node_protocol_items() -> Vec<Value> {
     let labels = server_node_protocol_labels();
@@ -5350,7 +5361,7 @@ async fn send_server_node_offline_ops_alert(
     now_ts: i64,
 ) -> Result<bool, String> {
     let text = format!(
-        "V2bX 节点离线\n节点名称：{}\n节点地址：{}\n协议：{}\n最后上报：{}\n时间：{}",
+        "节点离线\n节点名称：{}\n节点地址：{}\n协议：{}\n最后上报：{}\n时间：{}",
         node.name,
         node.host,
         node.protocol,
@@ -5775,13 +5786,13 @@ async fn build_singbox_json_payload(
 
         let outbound = match normalized_type.as_str() {
             "shadowsocks" => Some(build_singbox_shadowsocks(&node_uuid, server, &settings, &state.app_key)),
-            "trojan" => Some(build_singbox_trojan(&node_uuid, server, &settings)),
-            "vmess" => Some(build_singbox_vmess(&node_uuid, server, &settings)),
-            "vless" => Some(build_singbox_vless(&node_uuid, server, &settings)),
-            "hysteria" => Some(build_singbox_hysteria(&node_uuid, server, &settings)),
-            "tuic" => Some(build_singbox_tuic(&node_uuid, server, &settings)),
-            "anytls" => Some(build_singbox_anytls(&node_uuid, server, &settings)),
-            "socks" => Some(build_singbox_socks(&node_uuid, server, &settings)),
+            "trojan" => Some(crate::subscribe_protocols_v2::singbox_trojan(&node_uuid, server, &settings)),
+            "vmess" => Some(crate::subscribe_protocols_v2::singbox_vmess(&node_uuid, server, &settings)),
+            "vless" => Some(crate::subscribe_protocols_v2::singbox_vless(&node_uuid, server, &settings)),
+            "hysteria" => Some(crate::subscribe_protocols_v2::singbox_hysteria(&node_uuid, server, &settings)),
+            "tuic" => Some(crate::subscribe_protocols_v2::singbox_tuic(&node_uuid, server, &settings)),
+            "anytls" => Some(crate::subscribe_protocols_v2::singbox_anytls(&node_uuid, server, &settings)),
+            "socks" => Some(crate::subscribe_protocols_v2::singbox_socks(&node_uuid, server, &settings)),
             "http" => Some(build_singbox_http(&node_uuid, server, &settings)),
             _ => None,
         };
@@ -5794,13 +5805,21 @@ async fn build_singbox_json_payload(
         }
     }
 
+    let template_tags = outbounds
+        .iter()
+        .filter_map(|outbound| outbound.get("tag").and_then(|v| v.as_str()).map(str::to_string))
+        .collect::<Vec<_>>();
     for outbound in outbounds.iter_mut() {
-        if let Some(kind) = outbound.get("type").and_then(|v| v.as_str()) {
-            if matches!(kind, "urltest" | "selector") {
-                if let Some(list) = outbound.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
-                    list.extend(tags.iter().cloned().map(Value::String));
-                }
-            }
+        let is_group = outbound
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| matches!(kind, "urltest" | "selector"));
+        if !is_group {
+            continue;
+        }
+        let group_tags = crate::subscribe_protocols_v2::singbox_group_tags(outbound, &tags, &template_tags);
+        if let Some(list) = outbound.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
+            list.extend(group_tags.into_iter().map(Value::String));
         }
     }
 
@@ -5812,6 +5831,7 @@ async fn build_clash_proxies(
     servers: &[ServerNodeRow],
     uuid: &str,
     state: &AppState,
+    meta: bool,
 ) -> Vec<serde_yaml::Value> {
     let mut result = Vec::new();
     for server in servers {
@@ -5825,6 +5845,24 @@ async fn build_clash_proxies(
                 .and_then(|json| json.0.as_object().cloned())
                 .unwrap_or_default(),
         );
+        if meta {
+            let proxy = match normalized_type.as_str() {
+                "vmess" => Some(crate::subscribe_protocols_v2::meta_vmess(&node_uuid, server, &settings)),
+                "vless" => Some(crate::subscribe_protocols_v2::meta_vless(&node_uuid, server, &settings)),
+                "trojan" => Some(crate::subscribe_protocols_v2::meta_trojan(&node_uuid, server, &settings)),
+                "hysteria" => Some(crate::subscribe_protocols_v2::meta_hysteria(&node_uuid, server, &settings)),
+                "tuic" => Some(crate::subscribe_protocols_v2::meta_tuic(&node_uuid, server, &settings)),
+                "anytls" => Some(crate::subscribe_protocols_v2::meta_anytls(&node_uuid, server, &settings)),
+                "mieru" => Some(crate::subscribe_protocols_v2::meta_mieru(&node_uuid, server, &settings)),
+                "socks" => Some(crate::subscribe_protocols_v2::meta_socks5_or_http("socks5", &node_uuid, server, &settings)),
+                "http" => Some(crate::subscribe_protocols_v2::meta_socks5_or_http("http", &node_uuid, server, &settings)),
+                _ => None,
+            };
+            if let Some(proxy) = proxy.and_then(|proxy| serde_yaml::to_value(proxy).ok()) {
+                result.push(proxy);
+                continue;
+            }
+        }
         let proxy = match normalized_type.as_str() {
             "shadowsocks" => Some(build_clash_shadowsocks(&node_uuid, server, &settings, &state.app_key)),
             "vmess" => Some(build_clash_vmess(&node_uuid, server, &settings)),
@@ -5904,115 +5942,6 @@ fn build_general_vmess(uuid: &str, server: &ServerNodeRow, name: &str, settings:
     }
 
     format!("vmess://{}\r\n", BASE64_STANDARD.encode(config.to_string()))
-}
-
-fn build_general_vless(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
-    let mut params = vec![
-        ("encryption".to_string(), "none".to_string()),
-        ("type".to_string(), json_string(settings, "network", "tcp")),
-    ];
-    let tls = json_int(settings, "tls");
-    if tls == 1 {
-        params.push(("security".to_string(), "tls".to_string()));
-        if let Some(server_name) = settings.get("tls_settings").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()) {
-            params.push(("sni".to_string(), server_name.to_string()));
-        }
-    } else if tls == 2 {
-        params.push(("security".to_string(), "reality".to_string()));
-        if let Some(value) = settings.get("reality_settings").and_then(|v| v.get("public_key")).and_then(|v| v.as_str()) {
-            params.push(("pbk".to_string(), value.to_string()));
-        }
-        if let Some(value) = settings.get("reality_settings").and_then(|v| v.get("short_id")).and_then(|v| v.as_str()) {
-            params.push(("sid".to_string(), value.to_string()));
-        }
-        if let Some(value) = settings.get("reality_settings").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()) {
-            params.push(("sni".to_string(), value.to_string()));
-            params.push(("servername".to_string(), value.to_string()));
-        }
-        params.push(("spx".to_string(), "/".to_string()));
-        params.push(("fp".to_string(), "chrome".to_string()));
-    }
-
-    if let Some(flow) = settings.get("flow").and_then(|v| v.as_str()) {
-        if !flow.is_empty() {
-            params.push(("flow".to_string(), flow.to_string()));
-        }
-    }
-    if let Some(path) = settings.get("network_settings").and_then(|v| v.get("path")).and_then(|v| v.as_str()) {
-        params.push(("path".to_string(), path.to_string()));
-    }
-    if let Some(host) = settings.get("network_settings").and_then(|v| v.get("headers")).and_then(|v| v.get("Host")).and_then(|v| v.as_str()) {
-        params.push(("host".to_string(), host.to_string()));
-    }
-
-    let query = serde_urlencoded::to_string(params).unwrap_or_default();
-    format!(
-        "vless://{}@{}:{}?{}#{}\r\n",
-        uuid,
-        wrap_ipv6(&server.host),
-        server.port,
-        query,
-        urlencoding::encode(name)
-    )
-}
-
-fn build_general_trojan(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
-    let mut params = vec![(
-        "allowInsecure".to_string(),
-        settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
-    )];
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
-        params.push(("peer".to_string(), server_name.to_string()));
-        params.push(("sni".to_string(), server_name.to_string()));
-    }
-    if json_string(settings, "network", "tcp") == "ws" {
-        params.push(("type".to_string(), "ws".to_string()));
-        if let Some(path) = settings.get("network_settings").and_then(|v| v.get("path")).and_then(|v| v.as_str()) {
-            params.push(("path".to_string(), path.to_string()));
-        }
-        if let Some(host) = settings.get("network_settings").and_then(|v| v.get("headers")).and_then(|v| v.get("Host")).and_then(|v| v.as_str()) {
-            params.push(("host".to_string(), host.to_string()));
-        }
-    }
-    let query = serde_urlencoded::to_string(params).unwrap_or_default();
-    format!(
-        "trojan://{}@{}:{}?{}#{}\r\n",
-        uuid,
-        wrap_ipv6(&server.host),
-        server.port,
-        query,
-        urlencoding::encode(name)
-    )
-}
-
-fn build_general_hysteria(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
-    if json_int(settings, "version") != 2 {
-        return String::new();
-    }
-    let mut params = Vec::new();
-    if let Some(server_name) = settings.get("tls").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()) {
-        params.push(("sni".to_string(), server_name.to_string()));
-        params.push(("security".to_string(), "tls".to_string()));
-    }
-    if settings.get("obfs").and_then(|v| v.get("open")).and_then(|v| v.as_bool()).unwrap_or(false) {
-        params.push(("obfs".to_string(), "salamander".to_string()));
-        if let Some(password) = settings.get("obfs").and_then(|v| v.get("password")).and_then(|v| v.as_str()) {
-            params.push(("obfs-password".to_string(), password.to_string()));
-        }
-    }
-    params.push((
-        "insecure".to_string(),
-        settings.get("tls").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
-    ));
-    let query = serde_urlencoded::to_string(params).unwrap_or_default();
-    format!(
-        "hysteria2://{}@{}:{}?{}#{}\r\n",
-        uuid,
-        wrap_ipv6(&server.host),
-        server.port,
-        query,
-        urlencoding::encode(name)
-    )
 }
 
 fn build_general_socks(uuid: &str, server: &ServerNodeRow, name: &str) -> String {
@@ -6127,15 +6056,33 @@ fn build_shadowrocket_vless(uuid: &str, server: &ServerNodeRow, name: &str, sett
     format!("vless://{}?{}\r\n", userinfo, serde_urlencoded::to_string(params).unwrap_or_default())
 }
 
+fn trojan_tls_server_name(settings: &Map<String, Value>) -> Option<&str> {
+    settings
+        .get("tls_settings")
+        .and_then(|v| v.get("server_name"))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .or_else(|| settings.get("server_name").and_then(|v| v.as_str()).filter(|v| !v.is_empty()))
+}
+
+fn trojan_tls_allow_insecure(settings: &Map<String, Value>) -> bool {
+    settings
+        .get("tls_settings")
+        .and_then(|v| v.get("allow_insecure"))
+        .or_else(|| settings.get("allow_insecure"))
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|n| n != 0)))
+        .unwrap_or(false)
+}
+
 fn build_shadowrocket_trojan(uuid: &str, server: &ServerNodeRow, name: &str, settings: &Map<String, Value>) -> String {
     let mut params = vec![
         (
             "allowInsecure".to_string(),
-            settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false).to_string(),
+            trojan_tls_allow_insecure(settings).to_string(),
         ),
         ("tfo".to_string(), "1".to_string()),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         params.push(("peer".to_string(), server_name.to_string()));
     }
     if json_string(settings, "network", "tcp") == "grpc" {
@@ -6240,12 +6187,12 @@ fn build_quantumultx_trojan(uuid: &str, server: &ServerNodeRow, name: &str, sett
         format!("trojan={}:{}", server.host, server.port),
         format!("password={}", uuid),
         "over-tls=true".to_string(),
-        format!("tls-verification={}", (!settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false)).to_string()),
+        format!("tls-verification={}", (!trojan_tls_allow_insecure(settings)).to_string()),
         "fast-open=true".to_string(),
         "udp-relay=true".to_string(),
         format!("tag={}", name),
     ];
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         parts.push(format!("tls-host={}", server_name));
     }
     format!("{}\r\n", parts.join(","))
@@ -6308,9 +6255,10 @@ fn build_clash_trojan(
     map.insert(vs("port"), serde_yaml::Value::Number(server.port.into()));
     map.insert(vs("password"), vs(uuid));
     map.insert(vs("udp"), serde_yaml::Value::Bool(true));
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
+    if let Some(server_name) = trojan_tls_server_name(settings) {
         map.insert(vs("sni"), vs(server_name));
     }
+    map.insert(vs("skip-cert-verify"), serde_yaml::Value::Bool(trojan_tls_allow_insecure(settings)));
     serde_yaml::Value::Mapping(map)
 }
 
@@ -6356,137 +6304,6 @@ fn build_singbox_shadowsocks(
         "server_port": server.port,
         "method": cipher,
         "password": password
-    })
-}
-
-fn build_singbox_trojan(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    let mut outbound = json!({
-        "tag": server.name,
-        "type": "trojan",
-        "server": server.host,
-        "server_port": server.port,
-        "password": uuid,
-        "tls": {
-            "enabled": true,
-            "insecure": settings.get("allow_insecure").and_then(|v| v.as_bool()).unwrap_or(false)
-        }
-    });
-    if let Some(server_name) = settings.get("server_name").and_then(|v| v.as_str()) {
-        outbound["tls"]["server_name"] = Value::String(server_name.to_string());
-    }
-    outbound
-}
-
-fn build_singbox_vmess(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    let mut outbound = json!({
-        "tag": server.name,
-        "type": "vmess",
-        "server": server.host,
-        "server_port": server.port,
-        "uuid": uuid,
-        "security": "auto",
-        "alter_id": 0
-    });
-    if json_int(settings, "tls") > 0 {
-        outbound["tls"] = json!({
-            "enabled": true,
-            "insecure": settings.get("tls_settings").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false)
-        });
-        if let Some(server_name) = settings.get("tls_settings").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()) {
-            outbound["tls"]["server_name"] = Value::String(server_name.to_string());
-        }
-    }
-    outbound
-}
-
-fn build_singbox_vless(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    let mut outbound = json!({
-        "tag": server.name,
-        "type": "vless",
-        "server": server.host,
-        "server_port": server.port,
-        "uuid": uuid,
-        "packet_encoding": "xudp",
-        "flow": settings.get("flow").and_then(|v| v.as_str()).unwrap_or("")
-    });
-    if json_int(settings, "tls") > 0 {
-        outbound["tls"] = json!({
-            "enabled": true,
-            "insecure": settings.get("tls_settings").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false)
-        });
-    }
-    outbound
-}
-
-fn build_singbox_hysteria(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    if json_int(settings, "version") == 2 {
-        json!({
-            "tag": server.name,
-            "type": "hysteria2",
-            "server": server.host,
-            "server_port": server.port,
-            "password": uuid,
-            "tls": {
-                "enabled": true,
-                "server_name": settings.get("tls").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()).unwrap_or(&server.host),
-                "insecure": settings.get("tls").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false)
-            }
-        })
-    } else {
-        json!({
-            "tag": server.name,
-            "type": "hysteria",
-            "server": server.host,
-            "server_port": server.port,
-            "auth_str": uuid,
-            "up_mbps": settings.get("bandwidth").and_then(|v| v.get("up")).and_then(|v| v.as_i64()).unwrap_or(0),
-            "down_mbps": settings.get("bandwidth").and_then(|v| v.get("down")).and_then(|v| v.as_i64()).unwrap_or(0)
-        })
-    }
-}
-
-fn build_singbox_tuic(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    json!({
-        "tag": server.name,
-        "type": "tuic",
-        "server": server.host,
-        "server_port": server.port,
-        "uuid": uuid,
-        "password": uuid,
-        "congestion_control": settings.get("congestion_control").and_then(|v| v.as_str()).unwrap_or("cubic"),
-        "udp_relay_mode": settings.get("udp_relay_mode").and_then(|v| v.as_str()).unwrap_or("native"),
-        "tls": {
-            "enabled": true,
-            "server_name": settings.get("tls").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()).unwrap_or(&server.host),
-            "insecure": settings.get("tls").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false)
-        }
-    })
-}
-
-fn build_singbox_anytls(uuid: &str, server: &ServerNodeRow, settings: &Map<String, Value>) -> Value {
-    json!({
-        "tag": server.name,
-        "type": "anytls",
-        "server": server.host,
-        "server_port": server.port,
-        "password": uuid,
-        "tls": {
-            "enabled": true,
-            "server_name": settings.get("tls").and_then(|v| v.get("server_name")).and_then(|v| v.as_str()).unwrap_or(&server.host),
-            "insecure": settings.get("tls").and_then(|v| v.get("allow_insecure")).and_then(|v| v.as_bool()).unwrap_or(false)
-        }
-    })
-}
-
-fn build_singbox_socks(uuid: &str, server: &ServerNodeRow, _settings: &Map<String, Value>) -> Value {
-    json!({
-        "tag": server.name,
-        "type": "socks",
-        "server": server.host,
-        "server_port": server.port,
-        "version": "5",
-        "username": uuid,
-        "password": uuid
     })
 }
 

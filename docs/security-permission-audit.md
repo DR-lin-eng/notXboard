@@ -23,7 +23,7 @@
 | 管理员 | 全局订单、支付、套餐、节点、公告、优惠券、礼品卡、工单、统计、系统日志 | 超管专属系统操作；用户/组限额处理器仍会再次要求 SuperAdmin；封禁后所有旁路失效 |
 | SuperAdmin | 管理员全部能力，加用户/限额/API key/系统配置/插件/主题/备份/维护/监控；可发布自己拥有的节点 | 仍须通过隐藏后台路径；发布和写入仍须通过对象 owner 检查 |
 | `is_staff` | 展示和通知属性 | 不构成 HTTP 鉴权角色 |
-| V2bX 节点 | 256-bit 随机 token 加 `node_id` 绑定的单节点 | 其他节点、已封禁 owner、弱 token、用户 API key、重复 token |
+| Xboard-Node 节点（含 Machine） | 256-bit 随机 token 加 `node_id` 绑定的单节点 | 其他节点、已封禁 owner、弱 token、用户 API key、重复 token |
 | 旧节点协议 | HMAC 派生的 `type + server_id` 单节点 token | 直接使用全局 `server_token` |
 | TCPing agent | 本 owner 的自有节点，即使 owner 是 SuperAdmin 也没有全局 agent 范围 | 共享节点、其他 owner 节点、禁用 agent、已封禁 owner |
 | 安装 bootstrap | HMAC 签名、10 分钟、限 kind/owner/subject/asset 的固定资源包 | 其他文件、跨 kind、转移/撤销后兑换、二次兑换 |
@@ -36,7 +36,7 @@
 4. 用户可控动态 ID 的最终写操作携带 `user_id`、`owner_user_id`、`author_user_id`、`assigned_admin_user_id` 或状态条件；需要保持归属稳定的流程在事务内执行 `FOR UPDATE`，并检查 `rows_affected`。
 5. 直接用户分享与按信任等级发布仅允许 SuperAdmin owner。历史 `user_node_access` 和 trust-wide 配置只在当前 owner 仍是未封禁 SuperAdmin 时生效。见 `user_v1/access.rs:182-225`、`user_v1/access.rs:332-446` 和 `access_control_support.rs:244-270`。
 6. 节点套餐授权由 `v2_plan.scope='node'`、`plan.owner_user_id = node.user_id`、`plan.node_ids`、有效 `user_plan_subscriptions`、有效期和剩余流量动态计算；节点列表、实际订阅输出、反向 UniProxy 用户、工单节点权限和流量计费订阅选择使用同一 owner 不变式。见 `access_control_support.rs`、`main.rs`、`tickets_support.rs` 和 `traffic_ingest_support.rs`。
-7. 用户 UUID 在订阅输出和 V2bX 用户列表中通过 `APP_KEY + base_uuid + owner_user_id + node_id` 派生为节点级 UUID，避免一个节点泄漏的凭据直接复用于其他节点。见 `main.rs:1428-1464`、`main.rs:7409-7439` 和 `uniproxy_user_support.rs:235-255`。
+7. 用户 UUID 在订阅输出和 Xboard-Node 用户列表中通过 `APP_KEY + base_uuid + owner_user_id + node_id` 派生为节点级 UUID，避免一个节点泄漏的凭据直接复用于其他节点。见 `main.rs:1428-1464`、`main.rs:7409-7439` 和 `uniproxy_user_support.rs:235-255`。
 8. TCPing agent 配置仅下发 owner 节点；样本写入在事务中锁定节点并复核 `current_owner == agent.user_id`。见 `tcping_agent_v1.rs:85-215` 和 `tcping_agent_v1.rs:295-332`。
 9. 节点共享、套餐、用户/组限额、购买发放、退款撤销订阅、封禁和安全凭据变更在成功提交后清理节点授权、UniProxy 用户快照和响应缓存。见 `access_control_support.rs:458-467`、`admin_v1/group_limits.rs:244-268`、`admin_v1/users_limits.rs:346-448`、`payment_support.rs:387-437`、`refunds_support.rs:699-700` 和 `refunds_support.rs:1009-1011`。
 10. 上传包目标必须是规范名、根目录直属子目录、非 symlink 且无大小写/Studly 别名冲突。解压临时目录为 0700 并自动清理；staging/backup 位于 `/app/state/.plugin-*` 或 `/app/state/.theme-*`，不进入可扫描插件/主题根目录。见 `archive_limit_support.rs:27-62`、`admin_v2/plugin/lifecycle.rs:570-619` 和 `admin_v2/theme/mod.rs:414-463`。
@@ -80,7 +80,7 @@
 ### P-07 High - 用户级或全局节点凭据可跨节点冒用
 
 - 影响：V2bX 曾把用户 API key 写入多个节点；旧协议曾使用单个全局 `server_token`；用户协议 UUID 也可跨节点复用。
-- 修复：V2bX 使用每节点强随机 token 并同时绑定 `node_id`，拒绝弱值、用户 API key 和重复 token；旧协议 token 用 HMAC 绑定 `type + id`；用户 UUID 再派生为节点级 UUID。见 `user_v1/server_nodes.rs:632-701`、`uniproxy_support.rs:782-834`、`legacy_server_v1.rs:304` 和 `main.rs:7409-7439`。
+- 修复：Xboard-Node 使用每节点（Machine 为每机器）强随机 token 并同时绑定 `node_id`，拒绝弱值、用户 API key 和重复 token；旧协议 token 用 HMAC 绑定 `type + id`；用户 UUID 再派生为节点级 UUID。见 `user_v1/server_nodes.rs:632-701`、`uniproxy_support.rs:782-834`、`legacy_server_v1.rs:304` 和 `main.rs:7409-7439`。
 
 ### P-08 High - 插件 code 别名可覆盖或删除插件根目录
 
@@ -115,7 +115,7 @@
 ### P-14 Medium - 安装脚本长期 token 进入命令行且落盘权限过宽
 
 - 影响：token 可进入剪贴板、shell history、进程参数和默认 0644 文件；symlink 可改写任意目标。
-- 修复：命令只包含 10 分钟签名 ticket，脚本内一次兑换长期 token；加入 `umask 077`、逐级 symlink 检查、同目录原子替换和 `0700/0600` 权限。V2bX 自签证书生成也会截断旧文件、使用正确 RSA PEM 类型，并强制私钥为 `0600`。见 `machine_bootstrap_support.rs:6-81`、`public/v2bx-install.sh:3`、`public/tcping-agent-install.sh:3` 和 `V2bX-dev_new/node/cert.go`。
+- 修复：命令只包含 10 分钟签名 ticket，脚本内一次兑换长期 token；加入 `umask 077`、逐级 symlink 检查、同目录原子替换和 `0700/0600` 权限。见 `machine_bootstrap_support.rs`、`public/xboard-node-install.sh` 和 `public/tcping-agent-install.sh`。
 
 ### P-15 High - Linux DO 同步可复活本地封禁账号
 
@@ -144,7 +144,7 @@
 
 ## 升级与运维注意
 
-1. 逐个 V2bX 节点重新生成部署命令。旧 token 只要过短、在多节点复用或等于 owner 的用户 API key，新鉴权就会失败关闭；重新生成命令会在节点 owner 事务锁内轮换为每节点强随机 token。不要把旧用户 API key 手工填回节点配置。
+1. 逐个 Xboard-Node 节点重新生成部署命令。旧 token 只要过短、在多节点复用或等于 owner 的用户 API key，新鉴权就会失败关闭；重新生成命令会在节点 owner 事务锁内轮换为每节点强随机 token。不要把旧用户 API key 手工填回节点配置。
 2. 旧协议节点不再直接接受全局 `server_token`。管理员节点列表返回派生的 `node_token`，需更新对应节点配置。
 3. 节点级 UUID 会改变各节点看到的用户协议凭据。升级后应让节点刷新用户列表，并让客户端刷新订阅；不要在节点端继续缓存旧的全局 UUID。
 4. 旧的普通 owner 直接共享或 trust-wide 配置现在会被忽略。需要持续授权时应改用有效节点套餐；需要直接发布时，节点必须由未封禁 SuperAdmin 持有并重新授权。
@@ -171,7 +171,7 @@ UniProxy 和旧协议会将规范化后的 `user_id/upload/download` 集合哈�
 ## 验证基线
 
 - Rust：`cargo test --release --locked -j 1` 全量 73 项通过，release 二进制构建通过；覆盖缓存撤权、OAuth/Telegram 封禁、OAuth 浏览器绑定、套餐 owner、路径、真实 MySQL 类型和富文本边界。
-- Go：V2bX 与两份 TCPing agent `go test ./...` 通过，发布副本与源副本使用 `cmp` 校验一致。V2bX 文件监听和真实 ACME 用例默认不阻塞、不联网；ACME 仅在显式设置 `V2BX_LIVE_ACME_TEST=1` 及真实凭据时运行，并使用测试临时目录。
+- Go：两份 TCPing agent `go test ./...` 通过，发布副本与源副本使用 `cmp` 校验一致。内置 V2bX 源码已移除，节点端改用上游 Xboard-Node。
 - 前端：5 份修改 bundle `node --check` 通过，`tools/verify_theme_xss_boundaries.sh` 通过。
 - 脚本：4 份安装脚本及权限/XSS verifier 通过 `bash -n`；安装脚本覆盖权限、原子写入和 symlink 拒绝。
 - MySQL 8：动态节点套餐授权验证购买立即授权、移除节点立即撤权、旧物化行无效、过期/耗尽拒绝、无限流量允许，并验证反向节点用户查询结果。

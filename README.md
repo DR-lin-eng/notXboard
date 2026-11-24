@@ -97,7 +97,7 @@ GHCR 包保持私有时，部署主机需先登录 `ghcr.io`；公开部署可�
 
 - Rust 网关已承接默认在线流量入口与核心初始化链路
 - 共享节点体系：支持节点负责人、节点套餐、节点级访问控制与节点统计
-- V2bX / UniProxy 接入：支持 `server/config`、`user`、`alive`、`push` 等链路
+- Xboard-Node 接入（[cedar2025/Xboard-Node](https://github.com/cedar2025/Xboard-Node)）：支持 `/api/v2/server/handshake`、`report`、`config`、`user`、Machine 模式（`/api/v2/server/machine/*`）和 WebSocket 实时同步（`/api/v2/server/ws`），并兼容旧 UniProxy `config/user/push/alive/status` 接口
 - Linux DO Connect OAuth2 登录
 - EPay / EasyPay / CodePay / VPay 兼容支付
 - 退款、争议、投票与超管最终裁决
