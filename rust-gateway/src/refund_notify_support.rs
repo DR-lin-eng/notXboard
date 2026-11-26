@@ -184,7 +184,7 @@ async fn load_refund_admin_chat_ids(
 ) -> Result<Vec<i64>, String> {
     if let Some(admin_id) = assigned_admin_user_id {
         let chat_id = sqlx::query_scalar::<_, i64>(
-            "SELECT telegram_id FROM v2_user WHERE id = ? AND telegram_id IS NOT NULL LIMIT 1",
+            "SELECT telegram_id FROM v2_user WHERE id = ? AND telegram_id IS NOT NULL AND banned = 0 LIMIT 1",
         )
         .bind(admin_id)
         .fetch_optional(&state.db)
@@ -195,7 +195,7 @@ async fn load_refund_admin_chat_ids(
         }
     }
 
-    let rows = sqlx::query("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND (is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)")
+    let rows = sqlx::query("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND banned = 0 AND (is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)")
         .fetch_all(&state.db)
         .await
         .map_err(|err| format!("load refund fallback admins failed: {err}"))?;
