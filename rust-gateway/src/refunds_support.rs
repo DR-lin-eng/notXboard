@@ -766,7 +766,8 @@ enum RefundUsageBind {
     Text(String),
 }
 
-/// Builds the usage SQL together with its bind values in placeholder order.
+/// Builds the usage SQL (bytes in `node_traffic_records`, summed as KiB) with its
+/// bind values in placeholder order.
 fn refund_usage_query(
     user_id: i64,
     node_ids: &[i64],
@@ -775,7 +776,7 @@ fn refund_usage_query(
 ) -> (String, Vec<RefundUsageBind>) {
     let placeholders = vec!["?"; node_ids.len()].join(",");
     let sql = format!(
-        "SELECT CAST(COALESCE(SUM(upload_traffic + download_traffic), 0) AS SIGNED)
+        "SELECT CAST(COALESCE(SUM(upload_traffic + download_traffic), 0) DIV 1024 AS SIGNED)
          FROM node_traffic_records
          WHERE user_id = ?
            AND node_id IN ({})
@@ -1218,6 +1219,7 @@ mod tests {
         let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
         let (sql, binds) = refund_usage_query(7, &[11, 12, 13], start, end);
         let rendered = render_refund_usage_query(&sql, &binds);
+        assert!(rendered.contains("DIV 1024 AS SIGNED"), "{rendered}");
         assert!(rendered.contains("WHERE user_id = 7"), "{rendered}");
         assert!(rendered.contains("AND node_id IN (11,12,13)"), "{rendered}");
         assert!(
