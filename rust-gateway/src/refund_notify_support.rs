@@ -183,15 +183,17 @@ async fn load_refund_admin_chat_ids(
     assigned_admin_user_id: Option<u64>,
 ) -> Result<Vec<i64>, String> {
     if let Some(admin_id) = assigned_admin_user_id {
-        let chat_id = sqlx::query_scalar::<_, i64>(
-            "SELECT telegram_id FROM v2_user WHERE id = ? AND telegram_id IS NOT NULL AND banned = 0 LIMIT 1",
+        let assignee = sqlx::query_as::<_, (Option<i64>, i8)>(
+            "SELECT telegram_id, banned FROM v2_user WHERE id = ? LIMIT 1",
         )
         .bind(admin_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|err| format!("load assigned refund admin telegram id failed: {err}"))?;
-        if let Some(chat_id) = chat_id {
-            return Ok(vec![chat_id]);
+        match assignee {
+            Some((_, banned)) if banned != 0 => return Ok(Vec::new()),
+            Some((Some(chat_id), _)) => return Ok(vec![chat_id]),
+            _ => {}
         }
     }
 
