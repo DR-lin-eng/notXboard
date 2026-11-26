@@ -760,6 +760,36 @@ pub(crate) async fn load_assigned_admin_refund_request_detail_for_update(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefundUsageBind {
+    Int(i64),
+    Text(String),
+}
+
+/// Builds the usage SQL together with its bind values in placeholder order.
+fn refund_usage_query(
+    user_id: i64,
+    node_ids: &[i64],
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> (String, Vec<RefundUsageBind>) {
+    let placeholders = vec!["?"; node_ids.len()].join(",");
+    let sql = format!(
+        "SELECT CAST(COALESCE(SUM(upload_traffic + download_traffic), 0) AS SIGNED)
+         FROM node_traffic_records
+         WHERE user_id = ?
+           AND node_id IN ({})
+           AND record_date BETWEEN ? AND ?",
+        placeholders
+    );
+    let mut binds = Vec::with_capacity(node_ids.len() + 3);
+    binds.push(RefundUsageBind::Int(user_id));
+    binds.extend(node_ids.iter().copied().map(RefundUsageBind::Int));
+    binds.push(RefundUsageBind::Text(start.to_string()));
+    binds.push(RefundUsageBind::Text(end.to_string()));
+    (sql, binds)
+}
+
 pub(crate) async fn calculate_refund_usage_kb(
     state: &AppState,
     order: &RefundCreateOrderRow,
@@ -801,21 +831,14 @@ pub(crate) async fn calculate_refund_usage_kb(
     let used_kb = if valid_node_ids.is_empty() {
         0
     } else {
-        let placeholders = vec!["?"; valid_node_ids.len()].join(",");
-        let sql = format!(
-            "SELECT CAST(COALESCE(SUM(upload_traffic + download_traffic), 0) AS SIGNED)
-             FROM node_traffic_records
-             WHERE user_id = ?
-               AND node_id IN ({})
-               AND record_date BETWEEN ? AND ?",
-            placeholders
-        );
-        let mut query = sqlx::query_scalar::<_, i64>(&sql)
-            .bind(order.user_id)
-            .bind(start.to_string())
-            .bind(end.to_string());
-        for node_id in &valid_node_ids {
-            query = query.bind(*node_id);
+        let (sql, binds) =
+            refund_usage_query(order.user_id, &valid_node_ids, start, end);
+        let mut query = sqlx::query_scalar::<_, i64>(&sql);
+        for bind in binds {
+            query = match bind {
+                RefundUsageBind::Int(value) => query.bind(value),
+                RefundUsageBind::Text(value) => query.bind(value),
+            };
         }
         query.fetch_one(&state.db).await?
     };
@@ -1167,5 +1190,69 @@ mod tests {
         }
         assert_eq!(payload["my_vote"], Value::String("approve".to_string()));
         assert_eq!(payload["evidences"][0]["is_mine"], Value::Bool(false));
+    }
+
+    fn render_refund_usage_query(sql: &str, binds: &[RefundUsageBind]) -> String {
+        let mut binds = binds.iter();
+        let rendered = sql
+            .split('?')
+            .enumerate()
+            .map(|(index, part)| {
+                if index == 0 {
+                    return part.to_string();
+                }
+                let value = match binds.next().expect("missing bind for placeholder") {
+                    RefundUsageBind::Int(value) => value.to_string(),
+                    RefundUsageBind::Text(value) => format!("'{value}'"),
+                };
+                format!("{value}{part}")
+            })
+            .collect::<String>();
+        assert!(binds.next().is_none(), "more binds than placeholders");
+        rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn refund_usage_query_binds_match_placeholder_order() {
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let end = chrono::NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let (sql, binds) = refund_usage_query(7, &[11, 12, 13], start, end);
+        let rendered = render_refund_usage_query(&sql, &binds);
+        assert!(rendered.contains("WHERE user_id = 7"), "{rendered}");
+        assert!(rendered.contains("AND node_id IN (11,12,13)"), "{rendered}");
+        assert!(
+            rendered.contains("AND record_date BETWEEN '2026-11-01' AND '2026-11-26'"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn refund_cents_charges_for_used_traffic() {
+        let order = RefundCreateOrderRow {
+            id: 501,
+            trade_no: "trade".to_string(),
+            user_id: 7,
+            plan_id: 9,
+            status: 3,
+            total_amount: 1_000,
+            handling_amount: None,
+            balance_amount: Some(1_000),
+            callback_no: None,
+            epay_pid: None,
+            epay_url: None,
+            epay_key_encrypted: None,
+            paid_at: Some(0),
+            created_at: 0,
+        };
+        let allowance_kb = 10 * 1024 * 1024;
+        assert_eq!(calculate_refund_cents(&order, 0, allowance_kb), (2_000, 0));
+        assert_eq!(
+            calculate_refund_cents(&order, allowance_kb / 4, allowance_kb),
+            (1_500, 500)
+        );
+        assert_eq!(
+            calculate_refund_cents(&order, allowance_kb * 2, allowance_kb),
+            (0, 2_000)
+        );
     }
 }
