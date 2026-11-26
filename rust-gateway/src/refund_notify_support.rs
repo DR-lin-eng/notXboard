@@ -191,13 +191,23 @@ async fn load_refund_admin_chat_ids(
         .await
         .map_err(|err| format!("load assigned refund admin telegram id failed: {err}"))?;
         match assignee {
-            Some((_, banned)) if banned != 0 => return Ok(Vec::new()),
+            Some((_, banned)) if banned != 0 => {
+                return load_refund_chat_ids_by_condition(state, "is_super_admin = 1").await;
+            }
             Some((Some(chat_id), _)) => return Ok(vec![chat_id]),
             _ => {}
         }
     }
 
-    let rows = sqlx::query("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND banned = 0 AND (is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)")
+    load_refund_chat_ids_by_condition(state, "(is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)").await
+}
+
+async fn load_refund_chat_ids_by_condition(
+    state: &AppState,
+    condition: &str,
+) -> Result<Vec<i64>, String> {
+    let sql = format!("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND banned = 0 AND {condition}");
+    let rows = sqlx::query(&sql)
         .fetch_all(&state.db)
         .await
         .map_err(|err| format!("load refund fallback admins failed: {err}"))?;
