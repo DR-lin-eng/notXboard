@@ -85,11 +85,11 @@ pub(crate) async fn send_telegram_text_to_chat_ids(
 }
 
 async fn load_super_admin_chat_ids(state: &AppState) -> Result<Vec<i64>, String> {
-    load_chat_ids_by_condition(state, "telegram_id IS NOT NULL AND is_super_admin = 1").await
+    load_chat_ids_by_condition(state, "telegram_id IS NOT NULL AND banned = 0 AND is_super_admin = 1").await
 }
 
 async fn load_admin_chat_ids(state: &AppState) -> Result<Vec<i64>, String> {
-    load_chat_ids_by_condition(state, "telegram_id IS NOT NULL AND (is_admin = 1 OR is_super_admin = 1)").await
+    load_chat_ids_by_condition(state, "telegram_id IS NOT NULL AND banned = 0 AND (is_admin = 1 OR is_super_admin = 1)").await
 }
 
 async fn load_chat_ids_by_condition(state: &AppState, condition: &str) -> Result<Vec<i64>, String> {

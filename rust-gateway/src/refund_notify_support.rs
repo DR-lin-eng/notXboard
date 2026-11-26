@@ -183,19 +183,31 @@ async fn load_refund_admin_chat_ids(
     assigned_admin_user_id: Option<u64>,
 ) -> Result<Vec<i64>, String> {
     if let Some(admin_id) = assigned_admin_user_id {
-        let chat_id = sqlx::query_scalar::<_, i64>(
-            "SELECT telegram_id FROM v2_user WHERE id = ? AND telegram_id IS NOT NULL LIMIT 1",
+        let assignee = sqlx::query_as::<_, (Option<i64>, i8)>(
+            "SELECT telegram_id, banned FROM v2_user WHERE id = ? LIMIT 1",
         )
         .bind(admin_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|err| format!("load assigned refund admin telegram id failed: {err}"))?;
-        if let Some(chat_id) = chat_id {
-            return Ok(vec![chat_id]);
+        match assignee {
+            Some((_, banned)) if banned != 0 => {
+                return load_refund_chat_ids_by_condition(state, "is_super_admin = 1").await;
+            }
+            Some((Some(chat_id), _)) => return Ok(vec![chat_id]),
+            _ => {}
         }
     }
 
-    let rows = sqlx::query("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND (is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)")
+    load_refund_chat_ids_by_condition(state, "(is_admin = 1 OR is_super_admin = 1 OR is_staff = 1)").await
+}
+
+async fn load_refund_chat_ids_by_condition(
+    state: &AppState,
+    condition: &str,
+) -> Result<Vec<i64>, String> {
+    let sql = format!("SELECT telegram_id FROM v2_user WHERE telegram_id IS NOT NULL AND banned = 0 AND {condition}");
+    let rows = sqlx::query(&sql)
         .fetch_all(&state.db)
         .await
         .map_err(|err| format!("load refund fallback admins failed: {err}"))?;
